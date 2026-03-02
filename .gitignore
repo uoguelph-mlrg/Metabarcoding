@@ -1,0 +1,9 @@
+.DS_Store
+*.pyc
+*.pt
+*.pkl
+*.log
+**/wandb/*
+**/figures*/*
+**/results/*
+**/data/*
