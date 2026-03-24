@@ -7,7 +7,7 @@ import torch
 @dataclass
 class Config:
     # Data path
-    data_path: str = "data/ecuador_training_data.csv"    # Path to raw data CSV file (e.g. data/ecuador_training_data.csv)
+    data_path: str = "data/data_merged.csv"    # Path to raw data CSV file (e.g. data/ecuador_training_data.csv)
     results_dir: str = "../results" # Directory to save results (e.g. results/results_2023-01-01_12-00.pkl)
     
     # Train / val / test split
@@ -15,8 +15,8 @@ class Config:
     val_frac: float = 0.1
 
     # Neighbour graph
-    use_taxonomy: bool = True           # set to True to use taxonomic distances
-    use_embedding: bool = False         # set to True to use DNA embedding-based neighbors
+    use_taxonomy: bool = False           # set to True to use taxonomic distances
+    use_embedding: bool = True         # set to True to use DNA embedding-based neighbors
     neighbor_mode: str = "knn"          # "threshold" for distance-based, "knn" for K-nearest neighbors
     K: int = 10                         # number of neighbors (used when neighbor_mode="knn")
     dist_thres: int = 4                 # max taxonomic distance (used when neighbor_mode="threshold")
@@ -25,7 +25,7 @@ class Config:
 
     # DNA embedding settings (used when use_embedding=True)
     embedding_path: Optional[str] = None       # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = None    # path to TSV with 'bin_uri' and 'seq' columns
+    barcode_data_path: Optional[str] = "data/data_merged.csv"    # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"        # distance metric: "cosine" or "euclidean"
 
     # Latent solver - regularization settings
