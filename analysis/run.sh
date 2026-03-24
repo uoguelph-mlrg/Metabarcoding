@@ -21,8 +21,8 @@ cd interpolated_latent/V3
 python interpolated_latent.py
 
 # Location embeddings
-cd ../../location_embeddings
-python location_embeddings.py
+cd ../../location_embedding
+python location_embedding.py
 
 cd ..
 python visualize_results.py --results_dir interpolated_latent/V3/results/model_comparison_results.pkl --output_dir figures/interpolated_latent
