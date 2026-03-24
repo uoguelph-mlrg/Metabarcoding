@@ -2,7 +2,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --time=4:00:00
+#SBATCH --time=12:00:00
 #SBATCH --job-name=metabarcoding_analysis
 #SBATCH --output=slogs/%x_%A-%a_%n-%t.out
                             # %x=job-name, %A=job ID, %a=array value, %n=node rank, %t=task rank, %N=hostname
