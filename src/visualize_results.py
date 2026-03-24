@@ -90,103 +90,112 @@ def get_layout_dims(n_comparisons: int) -> Tuple[int, int]:
 # Metrics Computation
 # ============================================================================
 
-def compute_extended_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """
-    Compute comprehensive metrics for model evaluation.
-    
-    Args:
-        y_true: Ground truth values
-        y_pred: Predicted values
-        
-    Returns:
-        Dictionary with metrics including RMSE, MAE, correlation, KL divergence, etc.
-    """
-    y_true = np.asarray(y_true).flatten()
-    y_pred = np.asarray(y_pred).flatten()
-    
-    # Filter out NaN/Inf values
-    valid_mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    y_true = y_true[valid_mask]
-    y_pred = y_pred[valid_mask]
-    
-    if len(y_true) == 0:
-        return {k: 0.0 for k in ['RMSE_micro', 'MAE_micro', 'Correlation', 'KL Divergence',
-                                  'Absolute Relative Error', 'MAE (zeros)', 'MAE (non-zeros)','R²']}
-    
-    # Clip predictions to [0, 1]
-    y_pred = np.clip(y_pred, 0, 1)
-    
-    # Overall metrics
+def compute_extended_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sample_labels: Optional[np.ndarray] = None,
+    bin_labels: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Compute comprehensive metrics with proper per-sample handling."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    rmse_macro: Optional[float] = None
+    mae_macro: Optional[float] = None
+    kl_divergence_macro: Optional[float] = None
+    eps = 1e-10
+    if y_true.ndim == 1 and sample_labels is not None:
+        sl = np.asarray(sample_labels)
+        valid = np.isfinite(y_true) & np.isfinite(y_pred)
+        yt_v = y_true[valid]
+        yp_v = np.clip(y_pred[valid], 0, 1)
+        sl_v = sl[valid]
+        rmse_per, mae_per, kl_per = [], [], []
+        for s in np.unique(sl_v):
+            mask = sl_v == s
+            rt = yt_v[mask]
+            rp = yp_v[mask]
+            if len(rt) == 0:
+                continue
+            rmse_per.append(float(np.sqrt(np.mean((rt - rp) ** 2))))
+            mae_per.append(float(np.mean(np.abs(rt - rp))))
+            rt_norm = (rt + eps) / (rt + eps).sum()
+            rp_norm = (rp + eps) / (rp + eps).sum()
+            kl_per.append(float(np.sum(rt_norm * np.log(rt_norm / rp_norm))))
+        if rmse_per:
+            rmse_macro = float(np.mean(rmse_per))
+            mae_macro = float(np.mean(mae_per))
+            kl_divergence_macro = float(np.mean(kl_per))
+    elif y_true.ndim == 2:
+        rmse_per, mae_per, kl_per = [], [], []
+        for i in range(y_true.shape[0]):
+            row_t = y_true[i]
+            row_p = y_pred[i]
+            valid_i = np.isfinite(row_t) & np.isfinite(row_p)
+            if valid_i.sum() == 0:
+                continue
+            rt = row_t[valid_i]
+            rp = np.clip(row_p[valid_i], 0, 1)
+            rmse_per.append(float(np.sqrt(np.mean((rt - rp) ** 2))))
+            mae_per.append(float(np.mean(np.abs(rt - rp))))
+            rt_norm = (rt + eps) / (rt + eps).sum()
+            rp_norm = (rp + eps) / (rp + eps).sum()
+            kl_per.append(float(np.sum(rt_norm * np.log(rt_norm / rp_norm))))
+        if rmse_per:
+            rmse_macro = float(np.mean(rmse_per))
+            mae_macro = float(np.mean(mae_per))
+            kl_divergence_macro = float(np.mean(kl_per))
+    y_true_flat = y_true.flatten()
+    y_pred_flat = y_pred.flatten()
+    valid = np.isfinite(y_true_flat) & np.isfinite(y_pred_flat)
+    y_true = y_true_flat[valid]
+    y_pred = np.clip(y_pred_flat[valid], 0, 1)
     mse = np.mean((y_true - y_pred) ** 2)
-    rmse_micro = np.sqrt(mse)
-    mae_micro = np.mean(np.abs(y_true - y_pred))
-    
-    # R² score
+    rmse_micro = float(np.sqrt(mse))
+    mae_micro = float(np.mean(np.abs(y_true - y_pred)))
+    if rmse_macro is None:
+        rmse_macro = rmse_micro
+        mae_macro = mae_micro
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    r2 = 1 - (ss_res / (ss_tot + 1e-10))
-    
-    # Split by zero/non-zero
+    r2 = float(1 - ss_res / (ss_tot + 1e-10))
     zero_mask = y_true == 0
     nonzero_mask = y_true > 0
-    
-    # Zero metrics
     if zero_mask.sum() > 0:
-        rmse_zeros = np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))
-        mae_zeros = np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))
+        rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2)))
+        mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask])))
     else:
-        rmse_zeros = 0.0
-        mae_zeros = 0.0
-    
-    # Non-zero metrics
+        rmse_zeros = mae_zeros = 0.0
     if nonzero_mask.sum() > 0:
-        rmse_nonzeros = np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2))
-        mae_nonzeros = np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask]))
+        rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2)))
+        mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask])))
     else:
-        rmse_nonzeros = 0.0
-        mae_nonzeros = 0.0
-    
-    # KL Divergence
-    epsilon = 1e-10
-    y_true_smooth = y_true + epsilon
-    y_pred_smooth = y_pred + epsilon
-    y_true_norm = y_true_smooth / y_true_smooth.sum()
-    y_pred_norm = y_pred_smooth / y_pred_smooth.sum()
-    kl_divergence = np.sum(y_true_norm * np.log(y_true_norm / y_pred_norm))
-    
-    # Correlation
-    if np.std(y_pred) > 0 and np.std(y_true) > 0:
-        correlation = np.corrcoef(y_true, y_pred)[0, 1]
-    else:
-        correlation = 0.0
-    if np.isnan(correlation):
-        correlation = 0.0
-    
-    # Absolute Relative Error
+        rmse_nonzeros = mae_nonzeros = 0.0
+    y_tn = (y_true + eps) / (y_true + eps).sum()
+    y_pn = (y_pred + eps) / (y_pred + eps).sum()
+    kl_divergence_micro = float(np.sum(y_tn * np.log(y_tn / y_pn)))
+    kl_divergence = kl_divergence_macro if kl_divergence_macro is not None else kl_divergence_micro
+    corr = np.corrcoef(y_true, y_pred)[0, 1]
+    correlation = 0.0 if np.isnan(corr) else float(corr)
+    nz = y_true != 0
     rel_error = np.zeros_like(y_true, dtype=float)
-    nonzero_mask_rel = y_true != 0
-    rel_error[nonzero_mask_rel] = np.abs(y_pred[nonzero_mask_rel] - y_true[nonzero_mask_rel]) / np.abs(y_true[nonzero_mask_rel])
-    absolute_relative_error = np.mean(rel_error[nonzero_mask_rel]) if np.any(nonzero_mask_rel) else 0.0
-    
+    rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
+    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else 0.0
     return {
-        'RMSE_micro': float(rmse_micro),
-        'MAE_micro': float(mae_micro),
-        'Absolute Relative Error': float(absolute_relative_error),
-        'R²': float(r2),
-        'RMSE (zeros)': float(rmse_zeros),
-        'MAE (zeros)': float(mae_zeros),
-        'RMSE (non-zeros)': float(rmse_nonzeros),
-        'MAE (non-zeros)': float(mae_nonzeros),
-        'KL Divergence': float(kl_divergence),
-        'Correlation': float(correlation),
+        'RMSE_micro': rmse_micro,
+        'RMSE_macro': rmse_macro,
+        'MAE_micro': mae_micro,
+        'MAE_macro': mae_macro,
+        'Absolute Relative Error': absolute_relative_error,
+        'R²': r2,
+        'RMSE (zeros)': rmse_zeros,
+        'MAE (zeros)': mae_zeros,
+        'RMSE (non-zeros)': rmse_nonzeros,
+        'MAE (non-zeros)': mae_nonzeros,
+        'KL Divergence': kl_divergence,
+        'Correlation': correlation,
         'n_zeros': int(zero_mask.sum()),
         'n_nonzeros': int(nonzero_mask.sum()),
     }
-
-
-# ============================================================================
-# Plotting Functions - Adaptive Layout
-# ============================================================================
 
 def plot_metrics_comparison(
     results: Dict[str, Any],

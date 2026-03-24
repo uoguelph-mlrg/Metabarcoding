@@ -1,6 +1,5 @@
-from typing import Literal
+from typing import Literal, Optional
 
-from git import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,16 +11,16 @@ class Loss:
     
     Two modes:
     - "cross_entropy": Sample-level distributional loss.
-      - Input: logits [batch_size, n_bins] (raw model outputs before softmax)
-      - Target: relative abundances [batch_size, n_bins] (probability distribution, sums to 1)
-      - Computes: -sum(target * log_softmax(logits)) per sample, averaged over batch
-      - This is the KL divergence up to a constant (entropy of target).
-      
+        - Input: logits [batch_size, n_bins] (raw model outputs before softmax)
+        - Target: relative abundances [batch_size, n_bins] (probability distribution, sums to 1)
+        - Computes: -sum(target * log_softmax(logits)) per sample, averaged over batch
+        - This is the KL divergence up to a constant (entropy of target).
+
     - "logistic": Bin-level independent loss (BCE with logits).
-      - Input: logits [batch_size] (raw model outputs before sigmoid)  
-      - Target: relative abundances [batch_size] in [0, 1]
-      - Computes: BCEWithLogitsLoss treating each bin independently
-      - Note: Despite the name, this is NOT binary classification - it's used
+        - Input: logits [batch_size] (raw model outputs before sigmoid)  
+        - Target: relative abundances [batch_size] in [0, 1]
+        - Computes: BCEWithLogitsLoss treating each bin independently
+        - Note: Despite the name, this is NOT binary classification - it's used
         for regression where targets are continuous in [0, 1].
     """
     
@@ -36,18 +35,18 @@ class Loss:
             raise ValueError(f"Unknown task {task}")
     
     def cross_entropy_soft_targets(
-        self, logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor = None
+        self, logits: torch.Tensor, targets: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Cross-entropy loss for soft targets (probability distributions).
         
         Args:
             logits: Raw model outputs (before softmax) of shape [batch_size, n_bins_in_sample]
-                    Padded positions should have value -inf (will become 0 after softmax)
+                Padded positions should have value -inf (will become 0 after softmax)
             targets: Target probability distributions of shape [batch_size, n_bins_in_sample]
-                     Must sum to 1 along last dim. Padded positions should be 0.
+                Must sum to 1 along last dim. Padded positions should be 0.
             mask: Optional mask of shape [batch_size, n_bins_in_sample]. 
-                  1 for valid positions, 0 for padded. If None, inferred from logits.
+                1 for valid positions, 0 for padded. If None, inferred from logits.
         
         Returns:
             Scalar loss averaged over the batch.
@@ -63,15 +62,9 @@ class Loss:
             mask = (logits > float('-inf')).float()
         
         # Compute log-softmax of logits (numerically stable)
-        # Padded positions (with -inf) will get log_prob = -inf, but that's OK
-        # because we'll zero out those positions before summing
         log_probs = F.log_softmax(logits, dim=-1)  # [batch_size, n_bins]
         
         # Cross-entropy: -sum(target * log_prob) per sample
-        # But: 0 * -inf = NaN, so we need to handle this carefully
-        # Solution: only compute loss on valid (non-padded) positions
-        # Since target should be 0 on padded positions, we can safely replace
-        # -inf log_probs with 0 for the multiplication (0 * 0 = 0)
         log_probs_safe = torch.where(
             mask.bool(),
             log_probs,

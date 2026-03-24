@@ -1,16 +1,19 @@
 from __future__ import annotations
+import os
+# Prevent BLAS/OMP threading conflict with PyTorch MPS on macOS
+#os.environ.setdefault("OMP_NUM_THREADS", "1")
+#os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import argparse
 import re
 import time
-from typing import Literal, Optional, List, Tuple, Dict, Any, Union, Callable
+from typing import Literal, Optional, List, Tuple, Dict, Any
 import logging as log
 from dataclasses import asdict
-import os
 
 import pickle
 import numpy as np
-import pandas as pd
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 try:
     import wandb  # type: ignore
@@ -47,7 +50,7 @@ class Trainer:
         
         # Load data
         if data_dir is not None:
-            data, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir, config=self.cfg)
+            data, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir)
         else:
             if data_path is None:
                 raise ValueError("Either data_path or data_dir must be provided")
@@ -63,23 +66,44 @@ class Trainer:
         self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
         self.neighbour_graph.build()
         
-        latent_solver = LatentSolver(self.cfg, self.neighbour_graph)
+        latent_solver = LatentSolver(
+            self.cfg, self.neighbour_graph,
+            embed_dim=self.cfg.embed_dim,
+            gating_fn=self.cfg.gating_fn,
+        )
         latent_solver.build_V_and_H(data["train"]["X"], bin_index, method="nw")
         
         # Build model
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
-        mlp_model = MLPModel(input_dim, hidden_dims=[128, 64], dropout=self.cfg.dropout).to(self.device)
-        self.model = Model(mlp_model, latent_solver, n_bins=len(bin_index), device=self.device)
+        mlp_model = MLPModel(
+            input_dim, hidden_dims=[64, 128, 64, 32],
+            output_dim=self.cfg.embed_dim,
+            dropout=self.cfg.dropout,
+        ).to(self.device)
+        self.model = Model(
+            mlp_model, latent_solver, n_bins=len(bin_index), device=self.device,
+            embed_dim=self.cfg.embed_dim,
+            gating_fn=self.cfg.gating_fn,
+            gating_alpha=self.cfg.gating_alpha,
+            gating_kappa=self.cfg.gating_kappa,
+            gating_epsilon=self.cfg.gating_epsilon,
+        )
         
-        # Initialize optimizer, scheduler, criterion
+        # Initialize optimizer with explicit per-group weight decay.
+        if self.cfg.embed_dim > 1:
+            optim_params = [
+                {"params": self.model.mlp.parameters(), "weight_decay": self.cfg.weight_decay},
+                {"params": self.model.final_linear.parameters(), "weight_decay": self.cfg.final_linear_wd},
+            ]
+        else:
+            optim_params = [
+                {"params": self.model.mlp.parameters(), "weight_decay": self.cfg.weight_decay},
+            ]
         self.optimizer = torch.optim.AdamW(
-            self.model.mlp.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay
+            optim_params,
+            lr=self.cfg.lr,
         )
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=3, verbose=False
-        )
-        
         # Loss configuration
         self.loss_type = loss_type
         self.loss_mode = "sample" if loss_type == "cross_entropy" else "bin"
@@ -113,22 +137,34 @@ class Trainer:
             shuffle=False,
             collate_fn=None,
         )
+
+        # LR scheduler — total steps = epochs × batches per epoch (one scheduler step per batch)
+        total_steps = self.cfg.epochs * len(self.train_loader)
+        warmup_steps = max(1, int(0.1 * total_steps))
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
+        )
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=1e-6
+        )
+        self.scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps]
+        )
         
-        # Early stopping variables
+        # Track best validation loss for checkpointing
         self.best_val_loss = float('inf')
-        self.no_improve_epochs = 0
 
         # Loss tracking for visualization
-        self.train_losses = []  # List of (cycle, epoch, loss) tuples (MLP epochs only)
-        self.val_losses = []    # List of (cycle, epoch, loss) tuples (MLP epochs only)
-        self.cycle_train_losses = []  # End-of-cycle train losses
-        self.cycle_val_losses = []    # End-of-cycle val losses
-        self.timeline_train_losses = []  # List of (phase, cycle, step, loss) tuples
-        self.timeline_val_losses = []    # List of (phase, cycle, step, loss) tuples
+        self.train_losses = []  # List of (epoch, step, loss) tuples
+        self.val_losses = []    # List of (epoch, step, loss) tuples
+        self.cycle_train_losses = []  # End-of-epoch train losses (kept for compatibility)
+        self.cycle_val_losses = []    # End-of-epoch val losses (kept for compatibility)
+        self.timeline_train_losses = []  # List of (phase, epoch, step, loss) tuples
+        self.timeline_val_losses = []    # List of (phase, epoch, step, loss) tuples
         
         # Prepare save path
         root = os.path.dirname(os.path.abspath(__file__))
-        self.save_path = os.path.join(root, "models", f"{time.strftime('%Y-%m-%d_%H:%M')}.pt")
+        self.save_path = os.path.join(root, "models", f"{time.strftime('%Y-%m-%d_%H:%M:%S')}.pt")
         os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
 
 
@@ -165,7 +201,10 @@ class Trainer:
             loss.backward()
 
             if self.cfg.grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.mlp.parameters(), self.cfg.grad_clip)
+                params_to_clip = list(self.model.mlp.parameters())
+                if self.cfg.embed_dim > 1:
+                    params_to_clip += list(self.model.final_linear.parameters())
+                torch.nn.utils.clip_grad_norm_(params_to_clip, self.cfg.grad_clip)
 
             self.optimizer.step()
 
@@ -175,6 +214,36 @@ class Trainer:
 
         epoch_loss = running_loss / max(1, n_samples)
         return epoch_loss
+
+
+    def _train_batch(self, batch: Dict[str, torch.Tensor]) -> float:
+        """Perform one MLP gradient step on a single batch. Returns batch loss."""
+        self.model.train()
+        inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
+
+        if self.loss_mode == "sample":
+            B, max_bins, n_feat = inputs.shape
+            inputs_flat = inputs.view(B * max_bins, n_feat)
+            bin_idx_flat = bin_idx.view(B * max_bins)
+            outputs_flat = self.model(inputs_flat, bin_idx_flat)
+            outputs = outputs_flat.view(B, max_bins)
+            outputs = outputs.masked_fill(mask == 0, float('-inf'))
+            loss = self.criterion(outputs, targets, mask)
+        else:
+            outputs = self.model(inputs, bin_idx)
+            loss = self.criterion(outputs, targets)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+
+        if self.cfg.grad_clip is not None:
+            params_to_clip = list(self.model.mlp.parameters())
+            if self.cfg.embed_dim > 1:
+                params_to_clip += list(self.model.final_linear.parameters())
+            torch.nn.utils.clip_grad_norm_(params_to_clip, self.cfg.grad_clip)
+
+        self.optimizer.step()
+        return loss.item()
 
 
     @torch.no_grad()
@@ -297,10 +366,8 @@ class Trainer:
             "mae_when_absent": float(np.mean(mae_when_absent)) if mae_when_absent else 0.0,
         }
 
-    def solve_latent(self) -> np.ndarray:
-        """Solve for latent vector using current MLP predictions and update model."""
-        # IMPORTANT: we always use the ordered bin-mode loader so intrinsic/targets/bin_ids/sample_ids
-        # are aligned by construction (eliminates the historical sample-mode ordering bug).
+    def solve_latent(self, prox_weight: float = 0.0) -> np.ndarray:
+        """Solve for latent variable using current MLP predictions and update model."""
         self.model.eval()
 
         intrinsic_list: List[np.ndarray] = []
@@ -315,7 +382,10 @@ class Trainer:
                 bin_idx = batch["bin_idx"].cpu().numpy()
                 sample_idx = batch["sample_idx"].cpu().numpy()
 
-                intrinsic = self.model.mlp(x).detach().cpu().numpy().reshape(-1)
+                intrinsic = self.model.mlp(x).detach().cpu().numpy()
+                if self.cfg.embed_dim == 1:
+                    intrinsic = intrinsic.reshape(-1)  # (N,)
+                # else: keep as (N, d)
 
                 intrinsic_list.append(intrinsic)
                 y_list.append(y.reshape(-1))
@@ -327,14 +397,30 @@ class Trainer:
         bin_ids = np.concatenate(bin_list, axis=0).astype(np.int64)
         sample_ids = np.concatenate(sample_list, axis=0).astype(np.int64)
 
-        latent_vec = self.model.latent_solver.solve(
-            y=y_vec,
-            intrinsic_vec=intrinsic_vec,
-            bin_ids=bin_ids,
-            sample_ids=sample_ids,
-            loss_type=self.loss_type,
-            x0=self.model.latent_vec.detach().cpu().numpy(),
-        )
+        x0_latent = self.model.latent_vec.detach().cpu().numpy()
+        if self.cfg.embed_dim > 1:
+            latent_vec = self.model.latent_solver.solve(
+                y=y_vec,
+                intrinsic_vec=intrinsic_vec,
+                final_weights=self.model.final_linear.weight.detach().cpu().numpy().squeeze(),
+                bin_ids=bin_ids,
+                sample_ids=sample_ids,
+                loss_type="cross_entropy" if self.loss_type == "cross_entropy" else "logistic",
+                x0=x0_latent,
+                prox_weight=prox_weight,
+                x_anchor=x0_latent,
+            )
+        else:
+            latent_vec = self.model.latent_solver.solve(
+                y=y_vec,
+                intrinsic_vec=intrinsic_vec,
+                bin_ids=bin_ids,
+                sample_ids=sample_ids,
+                loss_type="cross_entropy" if self.loss_type == "cross_entropy" else "logistic",
+                x0=x0_latent,
+                prox_weight=prox_weight,
+                x_anchor=x0_latent,
+            )
         self.model.set_latent(latent_vec)
         return latent_vec
 
@@ -426,83 +512,42 @@ class Trainer:
         )
 
     def run(self, use_wandb: bool = True) -> Dict[str, Any]:
-        """Run full alternation training."""
-        # initial stabilize training
-        log.debug("Initial stabilization training...")
-        best_val = float('inf')
-        for epoch in tqdm(range(self.cfg.epochs_init), desc="Init epochs", leave=False):
-            self.train_epoch()                              # optimize weights
-            train_loss = self.validate(split="train")      # eval-mode — consistent with latent phases
-            val_loss   = self.validate(split="val")
-            if use_wandb and WANDB_AVAILABLE:
-                wandb.log({"epoch": epoch, "init_train_loss": train_loss, "init_val_loss": val_loss})
+        """Run full alternation training with per-batch latent/MLP alternation."""
+        warmup_epochs = max(1, int(self.cfg.latent_warmup_frac * self.cfg.epochs))
+        log.debug(f"Starting per-batch alternation training (latent warms up over first {warmup_epochs} epochs)...")
+        for epoch in tqdm(range(self.cfg.epochs), desc="Epochs", leave=False):
+            # Proximal weight ρ: decays linearly from ρ₀ → 0 over warmup_epochs (proximal/damped EM).
+            # At epoch 0: ρ = latent_prox_scale * latent_l2_reg (large anchor near D=0).
+            # At epoch = warmup_epochs: ρ = 0 (standard unconstrained solve).
+            alpha = min(1.0, epoch / warmup_epochs)
+            phase_tag = "latent_warmup" if alpha < 1.0 else "latent"
+            prox_weight = self.cfg.latent_prox_scale * self.cfg.latent_l2_reg * (1.0 - alpha)
 
-            # Track losses (cycle=-1 for initialization phase)
-            self.train_losses.append((-1, epoch, train_loss))
-            self.val_losses.append((-1, epoch, val_loss))
-            self.timeline_train_losses.append(("init", -1, epoch, train_loss))
-            self.timeline_val_losses.append(("init", -1, epoch, val_loss))
-                
-            # Early stopping check
-            stop, best_val = self.early_stop_and_save(val_loss, best_val, cycle=-1, epoch=epoch)
-            if stop:
-                break
-        
-        log.debug("\nStarting alternation cycles...")
-        # Reset counter so Phase 1 early-stopping state doesn't bleed into Phase 3
-        self.no_improve_epochs = 0
-        for cycle in tqdm(range(self.cfg.max_cycles), desc="Cycles", leave=False):
-            # Phase A: solve for latent vector with fixed MLP
-            latent_vec = self.solve_latent()
+            # Alternate: for each batch, solve latent then take one MLP gradient step
+            latent_vec = self.model.latent_vec.detach().cpu().numpy()  # fallback if loader is empty
+            for batch in self.train_loader:
+                # Phase A: solve for latent with fixed MLP
+                latent_vec = self.solve_latent(prox_weight=prox_weight)
+                # Phase B: one MLP gradient step on this batch
+                self._train_batch(batch)
+                self.scheduler.step()
 
-            latent_train_loss = self.validate(split="train")
-            latent_val_loss = self.validate(split="val")
-            self.timeline_train_losses.append(("latent", cycle, 0, latent_train_loss))
-            self.timeline_val_losses.append(("latent", cycle, 0, latent_val_loss))
-            log.info(f"Cycle {cycle} Phase A: train={latent_train_loss:.6f}, val={latent_val_loss:.6f}")
-
-            # Phase B: train MLP with fixed latent vector
-            best_val = float('inf')
-            pbar = tqdm(range(self.cfg.epochs), desc=f"Cycle {cycle+1}", leave=False)
-            for epoch in pbar:
-                self.train_epoch()                             # optimize weights
-                val_loss   = self.validate(split="val")
-                train_loss = self.validate(split="train")     # eval-mode — consistent with latent phases
-
-                if use_wandb and WANDB_AVAILABLE:
-                    wandb.log({
-                        "cycle": cycle,
-                        "epoch": epoch,
-                        "train_loss_in_cycle": train_loss,
-                        "val_loss_in_cycle": val_loss
-                    })
-
-                # Track losses
-                self.train_losses.append((cycle, epoch, train_loss))
-                self.val_losses.append((cycle, epoch, val_loss))
-                self.timeline_train_losses.append(("mlp", cycle, epoch, train_loss))
-                self.timeline_val_losses.append(("mlp", cycle, epoch, val_loss))
-
-                # Step scheduler based on validation loss (once per epoch)
-                self.scheduler.step(val_loss)
-
-                if epoch % 10 == 0:
-                    pbar.set_postfix(
-                        {"train loss": f"{train_loss:.6f}", "val loss": f"{val_loss:.6f}"}
-                    )
-
-                # Early stopping on small improvements
-                stop, best_val = self.early_stop_and_save(val_loss, best_val, cycle=cycle, epoch=epoch)
-                if stop:
-                    break
-            
+            # End-of-epoch evaluation
             train_loss = self.validate(split="train")
             val_loss = self.validate(split="val")
+
+            self.timeline_train_losses.append((phase_tag, epoch, 0, train_loss))
+            self.timeline_val_losses.append((phase_tag, epoch, 0, val_loss))
+            self.train_losses.append((epoch, 0, train_loss))
+            self.val_losses.append((epoch, 0, val_loss))
+            self.cycle_train_losses.append((epoch, train_loss))
+            self.cycle_val_losses.append((epoch, val_loss))
 
             if use_wandb and WANDB_AVAILABLE:
                 metrics = self.compute_metrics(split="val")
                 wandb.log({
-                    "cycle": cycle,
+                    "epoch": epoch,
+                    "cycle": epoch,
                     "final_train_loss": train_loss,
                     "final_val_loss": val_loss,
                     **{f"val_{k}": v for k, v in metrics.items()},
@@ -511,19 +556,11 @@ class Trainer:
                     "latent_min": float(latent_vec.min()),
                     "latent_max": float(latent_vec.max()),
                 })
+            if val_loss < self.best_val_loss - 1e-4:
+                self.best_val_loss = val_loss
+                self.model.save_model(self.save_path)
 
-            # Track end-of-cycle losses
-            self.cycle_train_losses.append((cycle, train_loss))
-            self.cycle_val_losses.append((cycle, val_loss))
-
-            # Early stopping on no improvement after full cycle
-            stop, self.best_val_loss = self.early_stop_and_save(
-                val_loss, self.best_val_loss, cycle=cycle, epoch=-1
-            )
-            if stop:
-                break
-
-            log.info(f"Cycle {cycle}: val_loss={val_loss:.6f}, train_loss={train_loss:.6f}")
+            log.info(f"Epoch {epoch} (ρ={prox_weight:.4f}): val_loss={val_loss:.6f}, train_loss={train_loss:.6f}")
         
         # Load best saved model before final evaluation (end-of-training weights may be worse)
         if os.path.exists(self.save_path):
@@ -589,17 +626,17 @@ class Trainer:
         ax1.legend()
         ax1.grid(True, alpha=0.3)
 
-        # Plot 2: End-of-cycle losses (summary view)
+        # Plot 2: End-of-epoch losses (summary view)
         if len(self.cycle_train_losses) > 0:
-            cycle_nums  = [c for c, l in self.cycle_train_losses]
-            cycle_train = [l for c, l in self.cycle_train_losses]
-            cycle_val   = [l for c, l in self.cycle_val_losses]
+            epoch_nums  = [e for e, l in self.cycle_train_losses]
+            epoch_train = [l for e, l in self.cycle_train_losses]
+            epoch_val   = [l for e, l in self.cycle_val_losses]
 
-            ax2.plot(cycle_nums, cycle_train, 'bo-', linewidth=2, markersize=8, label='Train Loss', alpha=0.7)
-            ax2.plot(cycle_nums, cycle_val,   'ro-', linewidth=2, markersize=8, label='Val Loss',   alpha=0.7)
-            ax2.set_xlabel('EM Cycle')
+            ax2.plot(epoch_nums, epoch_train, 'bo-', linewidth=2, markersize=8, label='Train Loss', alpha=0.7)
+            ax2.plot(epoch_nums, epoch_val,   'ro-', linewidth=2, markersize=8, label='Val Loss',   alpha=0.7)
+            ax2.set_xlabel('Epoch')
             ax2.set_ylabel('Loss')
-            ax2.set_title('Training Progress: End-of-Cycle Losses')
+            ax2.set_title('Training Progress: End-of-Epoch Losses')
             ax2.legend()
             ax2.grid(True, alpha=0.3)
 
@@ -626,32 +663,14 @@ class Trainer:
         return inputs, targets, bin_idx, sample_idx, mask
     
     
-    def early_stop_and_save(
-        self, val_loss: float, best_val: float, cycle: int, epoch: int
-    ) -> Tuple[bool, float]:
-        """Check if early stopping criterion is met."""
-        if val_loss < best_val - 1e-4:
-            best_val = val_loss
-            if val_loss < self.best_val_loss - 1e-4:
-                self.model.save_model(self.save_path)
-            self.no_improve_epochs = 0
-            return False, best_val
-        else:
-            self.no_improve_epochs += 1
-            if self.cfg.patience is not None and self.no_improve_epochs >= self.cfg.patience:
-                log.info(f"Early stopping at cycle {cycle} epoch {epoch} due to no improvement in val loss.")
-                return True, best_val
-        return False, best_val
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Metabarcoding training script")
-    group_ = parser.add_mutually_exclusive_group(required=False)
-    group_.add_argument("--data_path", type=str, default=None,
-                        help="Path to raw data CSV file (e.g. data/ecuador_training_data.csv)")
-    group_.add_argument("--data_dir", type=str, default=None,
-                        help="Path to directory containing processed CSV files (X_*.csv, y_*.csv, taxonomic_data.csv)")
-    parser.add_argument("--loss_type", type=str, choices=["cross_entropy", "logistic"], 
+    data_group = parser.add_mutually_exclusive_group(required=False)
+    data_group.add_argument("--data_path", type=str, default=None,
+                            help="Path to raw data CSV file (e.g. data/ecuador_training_data.csv)")
+    data_group.add_argument("--data_dir", type=str, default=None,
+                            help="Path to directory containing processed CSV files (X_*.csv, y_*.csv, taxonomic_data.csv)")
+    parser.add_argument("--loss_type", type=str, choices=["cross_entropy", "logistic"],
                         default="cross_entropy", help="Type of loss function to use")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
@@ -672,7 +691,6 @@ if __name__ == "__main__":
             project="metabarcoding",
             name=time.strftime("%Y-%m-%d_%H-%M"),
             config=asdict(cfg),
-            tags=["cross-entropy", "ecuador", "mlp+latent"],
             dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wandb")
         )
 
@@ -681,7 +699,7 @@ if __name__ == "__main__":
     data_path = args.data_path
     data_dir = args.data_dir
     if data_path is None and data_dir is None:
-        data_path = "data/ecuador_training_data.csv"
+        data_path = cfg.data_path
 
     trainer = Trainer(cfg, data_path=data_path, data_dir=data_dir, loss_type=args.loss_type)
 
@@ -689,9 +707,8 @@ if __name__ == "__main__":
     results = trainer.run(use_wandb=use_wandb)
 
     # Save results to pickle for downstream visualization
-    results_dir = os.path.join(root_dir, "..", "analysis", "BarcodeBERT", "results")
-    os.makedirs(results_dir, exist_ok=True)
-    pkl_path = os.path.join(results_dir, "taxonomy_results.pkl")
+    os.makedirs(cfg.results_dir, exist_ok=True)
+    pkl_path = os.path.join(cfg.results_dir, f"results_{time.strftime('%Y-%m-%d_%H-%M')}.pkl")
     with open(pkl_path, "wb") as fh:
         pickle.dump(results, fh)
     log.info(f"Results saved to: {pkl_path}")

@@ -32,7 +32,7 @@ import pandas as pd
 
 # Allow importing barcodebert.py from the same folder
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from barcodebert import BarcodeBERTEmbedder
+from Metabarcoding.analysis.BarcodeBERT.wrapper import BarcodeBERTEmbedder
 
 
 # ---------------------------------------------------------------------------

@@ -2,13 +2,13 @@
 """
 Visualization module for model comparison results.
 Creates clean, presentation-ready plots comparing the baseline model and the
-latent-as-input variant.
+interpolated-latent variant.
 
 This script is separate from training to allow re-generating visualizations
 without re-running the expensive training.
 
 Usage:
-    python latent_as_input_visualisation.py --results_path results/model_comparison_results.pkl --output_dir figures
+    python interpolated_latent_visualisation.py --results_path results/model_comparison_results.pkl --output_dir figures
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import argparse
 import os
 import pickle
 import logging as log
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,7 @@ import seaborn as sns
 from scipy.stats import gaussian_kde
 from matplotlib.colors import Normalize
 from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 
 
 def _contrasting_text_color(hex_color: str) -> str:
@@ -39,6 +40,12 @@ def _ci_tuple_to_errorbar(mean_val, ci_tuple):
         ci_lower, ci_upper = ci_tuple
         return [mean_val - ci_lower, ci_upper - mean_val]
     return [0.0, 0.0]
+
+
+def _format_count_label(value: Any) -> str:
+    """Format a pandas/numpy scalar count for plot labels."""
+    count = int(np.asarray(value).item())
+    return f"{count:,}"
 
 
 
@@ -87,13 +94,13 @@ def compute_95ci_bootstrap_metric(values: np.ndarray) -> tuple:
 
 # Model colors
 LOSS_COLORS = {
-    "taxonomy": "#2ecc71",     # Green  — taxonomy-based neighbour graph (baseline)
-    "barcodebert": "#9b59b6",  # Purple — BarcodeBERT DNA-embedding neighbour graph
+    "baseline": "#1f6feb",              # Blue
+    "interpolated_latent": "#d97706",   # Amber
 }
 
 LOSS_LABELS = {
-    "taxonomy": "Taxonomy Neighbours",
-    "barcodebert": "BarcodeBERT Embeddings",
+    "baseline": "Baseline",
+    "interpolated_latent": "Interpolated Latent",
 }
 
 
@@ -262,12 +269,12 @@ def compute_extended_metrics(
     }
 
 def plot_metrics_comparison(results: Dict[str, Any], output_dir: str):
-    """Create bar plots comparing key metrics between the 2 loss types."""
+    """Create bar plots comparing key metrics between the two models."""
     set_style()
     
     loss_types = list(results.keys())
     
-    # Compute extended metrics for both loss types
+    # Compute extended metrics for both models
     extended_metrics = {}
     for lt in loss_types:
         preds = results[lt]["predictions"]
@@ -668,7 +675,7 @@ def plot_mae_per_range(results: Dict[str, Any], output_dir: str):
         ax.bar(x + offset, pivot_df[col], width, label=col, color=colors[i],
                edgecolor='white', yerr=[lower_err[:, i], upper_err[:, i]],
                capsize=5, error_kw={'elinewidth': 2})
-    range_labels_with_counts = [f"{r}\n(n={int(count_df.loc[r, 'Count']):,})" if r in count_df.index else r
+    range_labels_with_counts = [f"{r}\n(n={_format_count_label(count_df.loc[r, 'Count'])})" if r in count_df.index else r
                                  for r in range_order]
     ax.set_xlabel('Abundance Range', fontsize=12)
     ax.set_ylabel('Mean Absolute Error', fontsize=12)
@@ -745,7 +752,7 @@ def plot_RAE_per_range(results: Dict[str, Any], output_dir: str):
         ax.bar(x + offset, pivot_df[col], width, label=col, color=colors[i],
                edgecolor='white', yerr=[lower_err[:, i], upper_err[:, i]],
                capsize=5, error_kw={'elinewidth': 2})
-    range_labels_with_counts = [f"{r}\n(n={int(count_df.loc[r, 'Count']):,})" if r in count_df.index else r
+    range_labels_with_counts = [f"{r}\n(n={_format_count_label(count_df.loc[r, 'Count'])})" if r in count_df.index else r
                                  for r in range_order]
     ax.set_xticks(x)
     ax.set_xticklabels(range_labels_with_counts, rotation=0)
@@ -836,7 +843,7 @@ def plot_mae_per_range_zoomed(results: Dict[str, Any], output_dir: str):
         ax.bar(x + offset, pivot_df[col], width, label=col, color=colors[i],
                edgecolor='white', yerr=[lower_err[:, i], upper_err[:, i]],
                capsize=5, error_kw={'elinewidth': 2})
-    range_labels_with_counts = [f"{r}\n(n={int(count_df.loc[r, 'Count']):,})" if r in count_df.index else r
+    range_labels_with_counts = [f"{r}\n(n={_format_count_label(count_df.loc[r, 'Count'])})" if r in count_df.index else r
                                  for r in range_order]
     ax.set_xlabel('Abundance Range', fontsize=12)
     ax.set_ylabel('Mean Absolute Error', fontsize=12)
@@ -852,7 +859,7 @@ def plot_mae_per_range_zoomed(results: Dict[str, Any], output_dir: str):
 
 
 def plot_residual_distribution(results: Dict[str, Any], output_dir: str):
-    """Create overlapping residual distribution histograms with KDE for all loss types."""
+    """Create overlapping residual distribution histograms with KDE for both models."""
     set_style()
     loss_types = list(results.keys())
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -877,12 +884,13 @@ def plot_residual_distribution(results: Dict[str, Any], output_dir: str):
         mean_res = np.mean(residuals)
         std_res = np.std(residuals)
         counts, _, _ = ax.hist(residuals, bins=60, color=color, alpha=0.3, edgecolor='none')
-        max_count = max(max_count, counts.max())
+        counts = np.asarray(counts)
+        max_count = max(max_count, float(np.max(counts)))
         if len(residuals) > 1:
             kde = gaussian_kde(residuals)
             kde_vals = kde(x_kde)
             ax.plot(x_kde, kde_vals, color=color, linewidth=2)
-        legend_handles.append(plt.Line2D([0], [0], color=color, linewidth=2,
+        legend_handles.append(Line2D([0], [0], color=color, linewidth=2,
                               label=f'{label} (μ={mean_res:.4f}, σ={std_res:.4f})'))
     ax.axvline(x=0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
     ax.set_xlabel('Residual (Actual - Predicted)', fontsize=11)
@@ -1015,7 +1023,9 @@ def plot_training_progress_comparison(results: Dict[str, Any], output_dir: str) 
         ax2.set_ylabel('Loss')
         ax2.set_title(f'{label}: End-of-Cycle Losses')
         ax2.grid(True, alpha=0.3)
-        ax2.legend(frameon=True, fontsize=10, loc='upper right')
+        handles, labels = ax2.get_legend_handles_labels()
+        if handles:
+            ax2.legend(frameon=True, fontsize=10, loc='upper right')
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "training_progress.png"), dpi=150, bbox_inches='tight')
@@ -1124,6 +1134,139 @@ def plot_summary_table(results: Dict[str, Any], output_dir: str):
     return df
 
 
+def plot_latent_comparison(results: Dict[str, Any], output_dir: str) -> None:
+    """Compare learned latent vectors between baseline and interpolated-latent models."""
+    set_style()
+
+    baseline_lv = results.get("baseline", {}).get("latent_vector")
+    interp_lv = results.get("interpolated_latent", {}).get("latent_vector")
+
+    if baseline_lv is None and interp_lv is None:
+        log.warning("No latent vectors found; skipping latent comparison plot")
+        return
+
+    baseline_flat = np.asarray(baseline_lv).flatten() if baseline_lv is not None else None
+    interp_flat = np.asarray(interp_lv).flatten() if interp_lv is not None else None
+
+    shapes_match = (
+        baseline_flat is not None
+        and interp_flat is not None
+        and baseline_flat.shape == interp_flat.shape
+    )
+
+    n_panels = 1 + (1 if shapes_match else 0) + (1 if shapes_match else 0)
+    if baseline_flat is not None and interp_flat is not None and not shapes_match:
+        n_panels = 2
+
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 5))
+    if n_panels == 1:
+        axes = [axes]
+
+    base_color = get_loss_color("baseline")
+    interp_color = get_loss_color("interpolated_latent")
+    base_label = get_loss_label("baseline")
+    interp_label = get_loss_label("interpolated_latent")
+
+    panel = 0
+
+    # Panel 1: overlapping latent value distributions
+    ax = axes[panel]
+    panel += 1
+    if baseline_flat is not None:
+        sns.histplot(
+            baseline_flat, bins=50, kde=True, stat="density",
+            color=base_color, alpha=0.35, edgecolor="none", ax=ax, label=base_label,
+        )
+    if interp_flat is not None:
+        sns.histplot(
+            interp_flat, bins=50, kde=True, stat="density",
+            color=interp_color, alpha=0.35, edgecolor="none", ax=ax, label=interp_label,
+        )
+    ax.set_xlabel("Latent value", fontsize=11)
+    ax.set_ylabel("Density", fontsize=11)
+    ax.set_title("Latent Value Distributions", fontsize=13, fontweight="bold")
+    ax.legend(frameon=False, fontsize=10)
+    for lv, color in [(baseline_flat, base_color), (interp_flat, interp_color)]:
+        if lv is not None:
+            ax.axvline(lv.mean(), color=color, linestyle="--", linewidth=1.5, alpha=0.8)
+    sns.despine(ax=ax)
+
+    if shapes_match:
+        assert baseline_flat is not None and interp_flat is not None
+        diff = interp_flat - baseline_flat
+
+        # Panel 2: difference distribution
+        ax = axes[panel]
+        panel += 1
+        sns.histplot(
+            diff, bins=50, kde=True, stat="density",
+            color="#4a90d9", alpha=0.7, edgecolor="none", ax=ax,
+        )
+        ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.7, label="Zero")
+        ax.axvline(diff.mean(), color="#e74c3c", linestyle="-", linewidth=1.5, alpha=0.9,
+                   label=f"Mean = {diff.mean():.4f}")
+        ax.set_xlabel(f"Latent difference ({interp_label} - {base_label})", fontsize=11)
+        ax.set_ylabel("Density", fontsize=11)
+        ax.set_title("Per-BIN Latent Difference Distribution", fontsize=13, fontweight="bold")
+        n_pos = int((diff > 0).sum())
+        n_neg = int((diff < 0).sum())
+        ax.text(
+            0.97, 0.95,
+            f"std = {diff.std():.4f}\n"
+            f"pos: {n_pos} ({100*n_pos/len(diff):.1f}%)\n"
+            f"neg: {n_neg} ({100*n_neg/len(diff):.1f}%)",
+            transform=ax.transAxes, ha="right", va="top", fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+        )
+        ax.legend(frameon=False, fontsize=9)
+        sns.despine(ax=ax)
+
+        # Panel 3: per-bin scatter with density
+        ax = axes[panel]
+        panel += 1
+        try:
+            xy = np.vstack([baseline_flat, interp_flat])
+            xy = xy + np.random.default_rng(0).normal(0, 1e-9, xy.shape)
+            density = gaussian_kde(xy)(xy)
+        except Exception:
+            density = np.ones(len(baseline_flat))
+        idx_sort = density.argsort()
+        sc = ax.scatter(
+            baseline_flat[idx_sort], interp_flat[idx_sort],
+            c=density[idx_sort], cmap="viridis", s=6, alpha=0.6, edgecolors="none",
+        )
+        vmin = min(baseline_flat.min(), interp_flat.min())
+        vmax = max(baseline_flat.max(), interp_flat.max())
+        ax.plot([vmin, vmax], [vmin, vmax], "r--", linewidth=1.5, alpha=0.7, label="y = x")
+        corr = float(np.corrcoef(baseline_flat, interp_flat)[0, 1])
+        ax.set_xlabel(f"{base_label} latent", fontsize=11)
+        ax.set_ylabel(f"{interp_label} latent", fontsize=11)
+        ax.set_title(f"Per-BIN Latent Scatter\n(Pearson r = {corr:.3f})", fontsize=13, fontweight="bold")
+        plt.colorbar(sc, ax=ax, label="Point density", fraction=0.046, pad=0.04)
+        ax.legend(frameon=False, fontsize=9)
+        sns.despine(ax=ax)
+
+    elif baseline_flat is not None and interp_flat is not None and not shapes_match:
+        ax = axes[panel]
+        panel += 1
+        log.warning(
+            f"Latent vectors have different lengths "
+            f"({len(baseline_flat)} vs {len(interp_flat)}); skipping diff/scatter panels"
+        )
+        ax.text(
+            0.5, 0.5,
+            f"Shapes differ:\n{base_label}: {baseline_flat.shape}\n{interp_label}: {interp_flat.shape}",
+            ha="center", va="center", fontsize=11, transform=ax.transAxes,
+        )
+        ax.set_axis_off()
+
+    fig.suptitle("Latent Vector Comparison: Baseline vs Interpolated-Latent", fontsize=14, fontweight="bold", y=1.02)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "latent_comparison.png"), dpi=150, bbox_inches="tight")
+    plt.close()
+    log.info("  ✓ Saved: latent_comparison.png")
+
+
 def create_all_visualizations(results: Dict[str, Any], output_dir: str):
     """Create all visualization plots."""
     os.makedirs(output_dir, exist_ok=True)
@@ -1179,7 +1322,7 @@ def create_all_visualizations(results: Dict[str, Any], output_dir: str):
     # 10. Latent vector comparison
     log.info("10. Creating latent vector comparison...")
     plot_latent_comparison(results, output_dir)
-
+    
     log.info(f"\n✅ All visualizations saved to: {output_dir}/")
     log.info("   - metrics_comparison.png")
     log.info("   - scatter_predicted_vs_actual.png")
@@ -1194,150 +1337,6 @@ def create_all_visualizations(results: Dict[str, Any], output_dir: str):
     log.info("   - summary_table.png")
     log.info("   - model_comparison_results.csv")
     log.info("   - latent_comparison.png")
-
-
-def plot_latent_comparison(results: Dict[str, Any], output_dir: str) -> None:
-    """Compare the learned latent vectors between the taxonomy and BarcodeBERT models.
-
-    Produces a single figure with three panels:
-      1. Overlapping distributions (histogram + KDE) of latent values per model.
-      2. Distribution of per-bin differences (BarcodeBERT − Taxonomy).
-      3. Per-bin scatter: taxonomy latent vs BarcodeBERT latent, coloured by density.
-
-    If either model is missing a latent vector or the shapes differ, only the
-    distribution panels that are available are drawn.
-    """
-    set_style()
-
-    tax_lv = results.get("taxonomy", {}).get("latent_vector")
-    bb_lv  = results.get("barcodebert", {}).get("latent_vector")
-
-    if tax_lv is None and bb_lv is None:
-        log.warning("No latent vectors found in either model's results; skipping latent comparison.")
-        return
-
-    tax_flat = np.asarray(tax_lv).flatten() if tax_lv is not None else None
-    bb_flat  = np.asarray(bb_lv).flatten()  if bb_lv  is not None else None
-
-    shapes_match = (
-        tax_flat is not None
-        and bb_flat is not None
-        and tax_flat.shape == bb_flat.shape
-    )
-
-    # ── layout: up to 3 panels depending on availability ──────────────────────
-    n_panels = 1 + (1 if shapes_match else 0) + (1 if shapes_match else 0)  # 1 or 3
-    if tax_flat is not None and bb_flat is not None and not shapes_match:
-        n_panels = 2  # can still plot both distributions side-by-side
-
-    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 5))
-    if n_panels == 1:
-        axes = [axes]
-
-    tax_color = get_loss_color("taxonomy")
-    bb_color  = get_loss_color("barcodebert")
-    tax_label = get_loss_label("taxonomy")
-    bb_label  = get_loss_label("barcodebert")
-
-    panel = 0
-
-    # ── Panel 1: overlapping distributions ────────────────────────────────────
-    ax = axes[panel]; panel += 1
-    if tax_flat is not None:
-        sns.histplot(
-            tax_flat, bins=50, kde=True, stat="density",
-            color=tax_color, alpha=0.35, edgecolor="none", ax=ax, label=tax_label,
-        )
-    if bb_flat is not None:
-        sns.histplot(
-            bb_flat, bins=50, kde=True, stat="density",
-            color=bb_color, alpha=0.35, edgecolor="none", ax=ax, label=bb_label,
-        )
-    ax.set_xlabel("Latent value ($d_b$)", fontsize=11)
-    ax.set_ylabel("Density", fontsize=11)
-    ax.set_title("Latent Value Distributions", fontsize=13, fontweight="bold")
-    ax.legend(frameon=False, fontsize=10)
-    # Annotate means
-    for lv, color, label in [(tax_flat, tax_color, tax_label), (bb_flat, bb_color, bb_label)]:
-        if lv is not None:
-            ax.axvline(lv.mean(), color=color, linestyle="--", linewidth=1.5, alpha=0.8)
-    sns.despine(ax=ax)
-
-    if shapes_match:
-        diff = bb_flat - tax_flat
-
-        # ── Panel 2: difference distribution ──────────────────────────────────
-        ax = axes[panel]; panel += 1
-        sns.histplot(
-            diff, bins=50, kde=True, stat="density",
-            color="#4a90d9", alpha=0.7, edgecolor="none", ax=ax,
-        )
-        ax.axvline(0,          color="black", linestyle="--", linewidth=1.5, alpha=0.7, label="Zero")
-        ax.axvline(diff.mean(), color="#e74c3c", linestyle="-",  linewidth=1.5, alpha=0.9,
-                   label=f"Mean = {diff.mean():.4f}")
-        ax.set_xlabel(f"Latent difference ({bb_label} − {tax_label})", fontsize=11)
-        ax.set_ylabel("Density", fontsize=11)
-        ax.set_title("Per-BIN Latent Difference Distribution", fontsize=13, fontweight="bold")
-        n_pos = int((diff > 0).sum())
-        n_neg = int((diff < 0).sum())
-        ax.text(
-            0.97, 0.95,
-            f"std = {diff.std():.4f}\n"
-            f"pos: {n_pos} ({100*n_pos/len(diff):.1f}%)\n"
-            f"neg: {n_neg} ({100*n_neg/len(diff):.1f}%)",
-            transform=ax.transAxes, ha="right", va="top", fontsize=9,
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
-        )
-        ax.legend(frameon=False, fontsize=9)
-        sns.despine(ax=ax)
-
-        # ── Panel 3: per-bin scatter ───────────────────────────────────────────
-        ax = axes[panel]; panel += 1
-        try:
-            xy = np.vstack([tax_flat, bb_flat])
-            xy = xy + np.random.default_rng(0).normal(0, 1e-9, xy.shape)
-            density = gaussian_kde(xy)(xy)
-        except Exception:
-            density = np.ones(len(tax_flat))
-        idx_sort = density.argsort()
-        sc = ax.scatter(
-            tax_flat[idx_sort], bb_flat[idx_sort],
-            c=density[idx_sort], cmap="viridis", s=6, alpha=0.6, edgecolors="none",
-        )
-        # diagonal (perfect agreement)
-        vmin = min(tax_flat.min(), bb_flat.min())
-        vmax = max(tax_flat.max(), bb_flat.max())
-        ax.plot([vmin, vmax], [vmin, vmax], "r--", linewidth=1.5, alpha=0.7, label="y = x")
-        corr = float(np.corrcoef(tax_flat, bb_flat)[0, 1])
-        ax.set_xlabel(f"{tax_label} latent", fontsize=11)
-        ax.set_ylabel(f"{bb_label} latent", fontsize=11)
-        ax.set_title(f"Per-BIN Latent Scatter\n(Pearson r = {corr:.3f})", fontsize=13, fontweight="bold")
-        plt.colorbar(sc, ax=ax, label="Point density", fraction=0.046, pad=0.04)
-        ax.legend(frameon=False, fontsize=9)
-        sns.despine(ax=ax)
-
-    elif tax_flat is not None and bb_flat is not None and not shapes_match:
-        # shapes differ — just show both distributions in panel 2
-        ax = axes[panel]; panel += 1
-        log.warning(
-            f"Latent vectors have different lengths "
-            f"({len(tax_flat)} vs {len(bb_flat)}); skipping scatter and diff plots."
-        )
-        ax.text(
-            0.5, 0.5,
-            f"Shapes differ:\n{tax_label}: {tax_flat.shape}\n{bb_label}: {bb_flat.shape}",
-            ha="center", va="center", fontsize=11, transform=ax.transAxes,
-        )
-        ax.set_axis_off()
-
-    fig.suptitle(
-        "Latent Vector Comparison: Taxonomy vs BarcodeBERT Neighbours",
-        fontsize=14, fontweight="bold", y=1.02,
-    )
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "latent_comparison.png"), dpi=150, bbox_inches="tight")
-    plt.close()
-    log.info("  ✓ Saved: latent_comparison.png")
 
 
 def print_comparison(results: Dict[str, Any]):
@@ -1406,76 +1405,38 @@ def print_comparison(results: Dict[str, Any]):
 
 
 def load_results(results_path: str) -> Dict[str, Any]:
-    """Load results from a single combined pickle file."""
+    """Load results from pickle file."""
     with open(results_path, 'rb') as f:
         return pickle.load(f)
 
 
-def load_two_results(
-    taxonomy_path: str,
-    barcodebert_path: str,
-) -> Dict[str, Any]:
-    """Load two separate per-model pickle files and merge into the combined format.
-
-    Each pkl is expected to be the dict returned by ``Trainer.run()``:
-    keys: predictions, targets, best_val_loss, train_losses, val_losses,
-          cycle_train_losses, cycle_val_losses, timeline_train_losses,
-          timeline_val_losses, latent_vector.
-    """
-    with open(taxonomy_path, 'rb') as f:
-        taxonomy_results = pickle.load(f)
-    with open(barcodebert_path, 'rb') as f:
-        barcodebert_results = pickle.load(f)
-    return {
-        "taxonomy": taxonomy_results,
-        "barcodebert": barcodebert_results,
-    }
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Visualize Taxonomy vs BarcodeBERT Comparison Results"
-    )
-    # Option A: two separate per-model pkl files (recommended)
-    parser.add_argument("--taxonomy_results", type=str, default="results/taxonomy_results.pkl",
-                        help="Path to taxonomy-model results pickle")
-    parser.add_argument("--barcodebert_results", type=str, default="results/barcodebert_results.pkl",
-                        help="Path to BarcodeBERT-model results pickle")
-    # Option B: single combined pkl (backward compat / manual assembly)
-    parser.add_argument("--results_path", type=str, default=None,
-                        help="Path to a combined results pickle (overrides --taxonomy_results "
-                             "and --barcodebert_results when provided)")
-    parser.add_argument("--output_dir", type=str, default="figures",
+    parser = argparse.ArgumentParser(description="Visualize Model Comparison Results")
+    parser.add_argument("--results_path", type=str, default="results/model_comparison_results.pkl",
+                        help="Path to results pickle file")
+    parser.add_argument("--output_dir", type=str, default="figures", 
                         help="Output directory for plots")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     args = parser.parse_args()
-
+    
     # Setup logging
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
-
+    
+    # Load results
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    results_path = args.results_path
+    if not os.path.isabs(results_path):
+        results_path = os.path.join(script_dir, results_path)
+    output_dir = args.output_dir
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.join(script_dir, output_dir)
 
-    def _abs(p: str) -> str:
-        return p if os.path.isabs(p) else os.path.join(script_dir, p)
-
-    output_dir = _abs(args.output_dir)
-
-    if args.results_path is not None:
-        # Single combined pkl
-        results_path = _abs(args.results_path)
-        log.info(f"Loading combined results from {results_path}...")
-        results = load_results(results_path)
-    else:
-        # Two separate per-model pkls
-        t_path = _abs(args.taxonomy_results)
-        b_path = _abs(args.barcodebert_results)
-        log.info(f"Loading taxonomy results from   {t_path}")
-        log.info(f"Loading BarcodeBERT results from {b_path}")
-        results = load_two_results(t_path, b_path)
-
+    log.info(f"Loading results from {results_path}...")
+    results = load_results(results_path)
+    
     # Print comparison
     print_comparison(results)
-
+    
     # Create visualizations
     create_all_visualizations(results, output_dir)

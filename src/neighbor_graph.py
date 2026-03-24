@@ -33,7 +33,7 @@ class NeighbourGraph:
         self.n_bins = len(self.bins)
 
         # taxonomy columns expected: species, genus, subfamily, family, order, class, phylum
-        self.tax_levels = ["species", "genus", "subfamily", "family", "order", "class", "phylum"]
+        self.tax_levels = ["species", "genus", "subfamily", "family", "order", "class", "phylum", "kingdom"]
 
         # output structures
         self.neighbours: List[List[int]] = [[] for _ in range(self.n_bins)]

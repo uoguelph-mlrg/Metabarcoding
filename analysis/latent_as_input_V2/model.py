@@ -14,15 +14,20 @@ from latent_solver import LatentSolver
 
 class Model(nn.Module):
     """
-    Latent-as-input variant: Joint model combining:
-        - an MLPModel that takes features + latent embedding as input
-        - a latent embedding Z (one vector per BIN) in Euclidean space
-    
-    The latent is concatenated to input features: x_augmented = [x, z_b]
-    The model predicts: output = MLP([x, z_b]) in logit space
-    The predicted probability is: p = softmax(output) (cross-entropy mode)
-    
-    Loss: CE + lambda_smooth * R_smooth(Z) + lambda_norm * ||Z||^2
+    Latent-as-input-V2: blend of baseline src and latent_as_input (V1).
+
+    Architecture:
+        output = MLP([x, z_b]) + D[b]
+
+    Training protocol (EM-style):
+        Phase A: D (output scalar latent) is solved analytically using CG/L-BFGS,
+                 given fixed MLP and Z.  D has requires_grad=False.
+        Phase B: MLP and Z (input embedding) are trained jointly via gradient descent,
+                 given fixed D.  Z has requires_grad=True.
+
+    The only architectural difference from V1 (latent_as_input) is the +D[b] term.
+    The only training difference from baseline (src) is that Z is gradient-trained
+    alongside the MLP in Phase B instead of D being the sole latent.
     """
 
     def __init__(
@@ -51,7 +56,7 @@ class Model(nn.Module):
         self.latent_dim = latent_dim
 
         # Latent embedding Z: (n_bins, latent_dim) in Euclidean space
-        # Updated in Phase A, frozen during Phase B
+        # Co-trained with MLP and D via joint optimizer
         self.latent_embedding = nn.Embedding(n_bins, latent_dim)
         # Initialize with zeros to match baseline (Issue #5)
         # Note: latent_init_std kept in signature for compatibility but not used if 0.0
@@ -59,10 +64,10 @@ class Model(nn.Module):
             nn.init.normal_(self.latent_embedding.weight, mean=0.0, std=latent_init_std)
         else:
             nn.init.zeros_(self.latent_embedding.weight)
-        self.latent_embedding.weight.requires_grad = False  # Frozen by default
+        # Gradient enabled: Z is co-trained with MLP and D via a joint optimizer
 
         # Scalar latent vector D (one value per BIN) added to MLP output, as in src/model.py
-        # Updated in Phase A, frozen during Phase B
+        # Solved analytically in Phase A (EM style) — NOT trained by gradient.
         self.latent_vec = nn.Parameter(
             torch.zeros(n_bins, device=device),
             requires_grad=False,

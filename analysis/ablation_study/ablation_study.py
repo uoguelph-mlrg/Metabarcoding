@@ -386,7 +386,7 @@ class MLPOnlyTrainer:
             self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
         )
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=3, verbose=False
+            self.optimizer, mode='min', factor=0.5, patience=3
         )
         
         # Use cross-entropy loss (sample mode) like the original model

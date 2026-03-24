@@ -27,6 +27,17 @@ OBSERVATION_FEATURES = [
     "min_reads_norm",   # min_reads normalized by sample total
 ]
 
+TAXONOMY_FEATURES = [
+    "kingdom",
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "subfamily",
+    "genus",
+    "species"
+]
+
 def load(
     data_path: str, 
     config: Config, 
@@ -34,7 +45,7 @@ def load(
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None
 ) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
     """
-    Load and preprocess the CSV data with logarithmic preprocessing.
+    Load and preprocess the CSV data.
 
     Args:
         data_path: Path to CSV data file
@@ -83,6 +94,11 @@ def load(
     df["avg_reads_norm"] = np.log1p(df["avg_reads"])
     df["max_reads_norm"] = np.log1p(df["max_reads"])
     df["min_reads_norm"] = np.log1p(df["min_reads"])
+    
+    # Log a warning if any expected features are missing
+    missing_features = [c for c in OBSERVATION_FEATURES + TAXONOMY_FEATURES if c not in df.columns]
+    if missing_features:
+        log.warning(f"Missing features in dataset: {', '.join(missing_features)}.")
 
     # Build df_long with required columns + features
     base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
@@ -90,9 +106,7 @@ def load(
     df_long = df[base_cols + feature_cols_present].copy()
 
     # Build taxonomic_data with taxonomy and features
-    taxonomy_cols = ["phylum", "class", "order", "family", "subfamily", "genus", "species"] #+ ["length_min_mm", "length_max_mm"]
-
-    taxonomic_data = df.groupby("bin_uri").first()[[c for c in taxonomy_cols if c in df.columns]].reset_index()
+    taxonomic_data = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
 
     # Ensure taxonomic_data is ordered by bin_index
     taxonomic_data["_idx"] = taxonomic_data["bin_uri"].map(bin_index)
@@ -179,8 +193,7 @@ def load(
 
 
 def load_processed(
-    data_dir: str,
-    config: Optional[Config] = None,
+    data_dir: str
 ) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
     """
     Load preprocessed splits saved by `load()` from a directory.

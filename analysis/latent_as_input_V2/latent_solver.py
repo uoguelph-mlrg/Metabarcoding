@@ -120,6 +120,8 @@ class LatentSolver:
         sample_ids: Optional[np.ndarray] = None,
         loss_type: Literal["cross_entropy", "logistic"] = "logistic",
         x0: Optional[np.ndarray] = None,
+        prox_weight: float = 0.0,
+        x_anchor: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Args:
@@ -129,12 +131,14 @@ class LatentSolver:
             sample_ids: sample index per observation (N_obs,), required for cross_entropy
             loss_type: "logistic" (sigmoid/logit latent solve) or "cross_entropy" (softmax latent solve)
             x0: warm-start initial D (n_bins,)
+            prox_weight: proximal regularization weight ρ (adds ρ||D - x_anchor||^2 term)
+            x_anchor: anchor point for proximal term (defaults to zeros if None)
         
         Returns:
             D: latent vector (n_bins,) in logit space
         """
         if loss_type == "logistic":
-            return self._solve_logistic(y=y, intrinsic_vec=intrinsic_vec, x0=x0)
+            return self._solve_logistic(y=y, intrinsic_vec=intrinsic_vec, x0=x0, prox_weight=prox_weight, x_anchor=x_anchor)
         else:
             if bin_ids is None or sample_ids is None:
                 raise ValueError("bin_ids and sample_ids are required for cross_entropy latent solving")
@@ -144,12 +148,15 @@ class LatentSolver:
                 bin_ids=bin_ids,
                 sample_ids=sample_ids,
                 x0=x0,
+                prox_weight=prox_weight,
+                x_anchor=x_anchor,
             )
 
-    def _solve_logistic(self, y: np.ndarray, intrinsic_vec: np.ndarray, x0: Optional[np.ndarray] = None) -> np.ndarray:
+    def _solve_logistic(self, y: np.ndarray, intrinsic_vec: np.ndarray, x0: Optional[np.ndarray] = None, prox_weight: float = 0.0, x_anchor: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Logistic/sigmoid latent solve via linear system + CG:
             (V^T V + rI + λ(I-H)^T(I-H)) D = V^T (logit(y) - m)
+        With proximal term: adds ρI to A and ρ*x_anchor to b.
         """
         if self.V is None or self.A is None or self.H is None:
             raise RuntimeError("Matrices not built; call build_V_and_H first")
@@ -196,6 +203,12 @@ class LatentSolver:
         # Compute b = V^T residual
         b = V_use.T.dot(residual)
 
+        # Proximal anchoring: (A + ρI) D = b + ρ x_anchor
+        if prox_weight > 0.0:
+            x_anch = np.asarray(x_anchor, dtype=float).reshape(-1) if x_anchor is not None else np.zeros(self.n_bins, dtype=float)
+            A_use = A_use + prox_weight * sparse.identity(self.n_bins, format="csc")
+            b = b + prox_weight * x_anch
+
         # Solve A D = b using conjugate gradient
         if x0 is None:
             x0_use = np.zeros(self.n_bins, dtype=float)
@@ -227,6 +240,8 @@ class LatentSolver:
         bin_ids: np.ndarray,
         sample_ids: np.ndarray,
         x0: Optional[np.ndarray] = None,
+        prox_weight: float = 0.0,
+        x_anchor: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Cross-entropy latent solve (softmax over bins within each sample) with L-BFGS.
@@ -274,6 +289,11 @@ class LatentSolver:
             if x0_use.shape[0] != self.n_bins:
                 raise ValueError(f"x0 has shape {x0_use.shape}, expected ({self.n_bins},)")
 
+        # Prepare proximal anchor (evaluated once, closed over in fun_and_jac)
+        x_anchor_use: Optional[np.ndarray] = None
+        if prox_weight > 0.0:
+            x_anchor_use = np.asarray(x_anchor, dtype=np.float64).reshape(-1) if x_anchor is not None else np.zeros(self.n_bins, dtype=np.float64)
+
         def fun_and_jac(D_flat: np.ndarray) -> tuple[float, np.ndarray]:
             D_flat = D_flat.astype(np.float64, copy=False)
 
@@ -312,6 +332,12 @@ class LatentSolver:
                 diff = I_minus_H.dot(D_flat)  # (I-H)D
                 loss += 0.5 * lam * float(diff @ diff)
                 grad_bins += lam * I_minus_H.T.dot(diff)
+
+            # Proximal anchoring term: ρ/2 * ||D - x_anchor||^2
+            if prox_weight > 0.0 and x_anchor_use is not None:
+                diff_anch = D_flat - x_anchor_use
+                loss += 0.5 * prox_weight * float(diff_anch @ diff_anch)
+                grad_bins += prox_weight * diff_anch
 
             # Match training scale (average over samples) to keep magnitudes stable
             if n_samples > 0:

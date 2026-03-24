@@ -54,6 +54,7 @@ class Model(nn.Module):
         self.device = device
         self.embed_dim = embed_dim
         self.n_bins = n_bins
+        self._init_neighbor_smoothing()
 
         if embed_dim > 1:
             self.gating_fn = gating_fn
@@ -75,6 +76,39 @@ class Model(nn.Module):
                 requires_grad=False,
             )
 
+    def _init_neighbor_smoothing(self) -> None:
+        """Cache neighbor smoothing matrix from latent solver for interpolation."""
+        h_smooth = getattr(self.latent_solver, "H_smooth", None)
+        if h_smooth is None:
+            # Safe fallback if solver matrix was not built yet.
+            self.register_buffer("H_smooth_dense", torch.eye(self.n_bins, device=self.device))
+            return
+
+        h_smooth = h_smooth.tocoo()
+        indices = torch.tensor(
+            np.vstack((h_smooth.row, h_smooth.col)),
+            dtype=torch.long,
+            device=self.device,
+        )
+        values = torch.tensor(h_smooth.data, dtype=torch.float32, device=self.device)
+        H_sparse = torch.sparse_coo_tensor(indices, values, (self.n_bins, self.n_bins), device=self.device)
+        H_sparse = H_sparse.coalesce()
+        self.register_buffer("H_smooth_sparse", H_sparse)
+
+    def _interpolate_latent_all_bins(self) -> torch.Tensor:
+        """Compute neighbor-interpolated latent for all bins."""
+        if hasattr(self, "H_smooth_sparse"):
+            if self.embed_dim > 1:
+                return torch.sparse.mm(self.H_smooth_sparse, self.latent_vec)
+            return torch.sparse.mm(self.H_smooth_sparse, self.latent_vec.unsqueeze(1)).squeeze(1)
+
+        if hasattr(self, "H_smooth_dense"):
+            if self.embed_dim > 1:
+                return self.H_smooth_dense @ self.latent_vec
+            return (self.H_smooth_dense @ self.latent_vec.unsqueeze(1)).squeeze(1)
+
+        return self.latent_vec
+
     def forward(self, x: torch.Tensor, bin_ids: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
@@ -86,14 +120,16 @@ class Model(nn.Module):
         Returns:
             Predicted logits [N] (raw logits before sigmoid/softmax)
         """
+        latent_interp = self._interpolate_latent_all_bins()
+
         if self.embed_dim > 1:
             intrinsic = self.mlp(x)                                          # [N, d]
-            latent = self.latent_vec[bin_ids]                                # [N, d]
+            latent = latent_interp[bin_ids]                                  # [N, d]
             modulated = intrinsic * self.gating.gate_torch(latent)           # [N, d]
             return self.final_linear(modulated).squeeze(-1)                  # [N]
         else:
             intrinsic = self.mlp(x).squeeze(-1)                              # [N]
-            latent = self.latent_vec[bin_ids]                                # [N]
+            latent = latent_interp[bin_ids]                                  # [N]
             return intrinsic + latent                                        # [N]
 
     @torch.no_grad()

@@ -17,12 +17,14 @@ class LatentSolver:
     Build sparse matrices and solve the latent vector optimization.
 
     Scalar mode (embed_dim == 1):
-        min_D (1/2) sum_{s,b} (y_{s,b} - m(s,b) - d_b)^2 + (r/2)||D||^2 + (λ/2)||(I-H_smooth)D||^2
+        min_D (1/2) sum_{s,b} (y_{s,b} - m(s,b) - (H_smooth D)_b)^2 + (r/2)||D||^2 + (λ/2)||(I-H_smooth)D||^2
+        The interpolated latent (H_smooth @ D)[bin] is used instead of the raw D[bin].
         Solution via linear system + CG (logistic) or L-BFGS (cross-entropy).
 
     Vector mode (embed_dim > 1):
         min_H BCE(y, ŷ) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
-        where ŷ = sigmoid(w^T (m(x) ⊙ g(h[bin])))
+        where ŷ = sigmoid(w^T (m(x) ⊙ g((H_smooth H)[bin])))
+        The interpolated latent (H_smooth @ H)[bin] is used instead of the raw H[bin].
         Solution via L-BFGS.
 
     Where:
@@ -52,8 +54,9 @@ class LatentSolver:
         self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None  # (I - H_smooth)
 
         # scalar-mode precomputed matrices (embed_dim == 1 only)
-        self.A: Optional[sparse.csc_matrix] = None   # precomputed LHS matrix
-        self.S: Optional[sparse.csc_matrix] = None   # (I - H_smooth)^T (I - H_smooth)
+        self.A: Optional[sparse.csc_matrix] = None    # precomputed LHS (V@H_smooth)^T(V@H_smooth) + reg
+        self.S: Optional[sparse.csc_matrix] = None    # (I - H_smooth)^T (I - H_smooth)
+        self.VH: Optional[sparse.csr_matrix] = None   # V @ H_smooth, used for RHS in CG solve
 
     def build_V_and_H(
         self, 
@@ -113,11 +116,14 @@ class LatentSolver:
         self.I_minus_H_smooth = sparse.csr_matrix(I_minus_H_smooth)
 
         if self.embed_dim == 1:
-            # Step 3 (scalar only): Precompute A = V^T V + r*I + λ*(I - H_smooth)^T (I - H_smooth)
-            VtV = (V.T @ V).tocsc()
+            # Step 3 (scalar only): Precompute A = (VH)^T(VH) + r*I + λ*(I-H_smooth)^T(I-H_smooth)
+            # VH = V @ H_smooth so that the data-fidelity term uses the interpolated latent (H D)[b].
+            VH = sparse.csr_matrix(V @ H_smooth)
+            self.VH = VH
+            VHtVH = (VH.T @ VH).tocsc()
             smoothness_term = (I_minus_H_smooth.T @ I_minus_H_smooth).tocsc()
             l2_term = I.tocsc()
-            self.A = VtV + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
+            self.A = VHtVH + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
             self.S = smoothness_term
         
         log.info(f"Latent solver: V={V.shape}, H_smooth={H_smooth.shape}, embed_dim={self.embed_dim}, "
@@ -135,6 +141,9 @@ class LatentSolver:
         x0: Optional[np.ndarray] = None,
         prox_weight: float = 0.0,
         x_anchor: Optional[np.ndarray] = None,
+        use_interpolated_latent: bool = False,
+        interpolated_bin_mask: Optional[np.ndarray] = None,
+        interpolated_obs_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Args:
@@ -150,12 +159,19 @@ class LatentSolver:
                          to the objective, anchoring the update near the current latent.
                          Annealed to zero over the warmup phase (standard damped/proximal EM).
             x_anchor: anchor point in model-space (same shape as x0).  Defaults to x0.
+            use_interpolated_latent: if True and no mask is provided, all bins use interpolated latent.
+            interpolated_bin_mask: optional bool mask of shape (n_bins,). In mixed mode,
+                                   True bins use interpolated latent and False bins use raw latent.
+            interpolated_obs_mask: optional bool mask of shape (N_obs,). True observations
+                                   use interpolated latent and False observations use raw latent.
 
         Returns:
             latent: shape (n_bins,) for scalar mode, (n_bins, embed_dim) for vector mode
         """
         # Default anchor to warm-start if not explicitly provided
         anchor = x_anchor if x_anchor is not None else x0
+        mixed_mask = self._normalize_interpolated_bin_mask(interpolated_bin_mask)
+        obs_mask = self._normalize_interpolated_obs_mask(interpolated_obs_mask, y.shape[0])
 
         if self.embed_dim > 1:
             if final_weights is None:
@@ -166,6 +182,9 @@ class LatentSolver:
                 return self._solve_logistic_vector(
                     y=y, intrinsic_vec=intrinsic_vec, final_weights=final_weights,
                     bin_ids=bin_ids, x0=x0, prox_weight=prox_weight, x_anchor=anchor,
+                    use_interpolated_latent=use_interpolated_latent,
+                    interpolated_bin_mask=mixed_mask,
+                    interpolated_obs_mask=obs_mask,
                 )
             else:
                 if sample_ids is None:
@@ -174,12 +193,18 @@ class LatentSolver:
                     y=y, intrinsic_vec=intrinsic_vec, final_weights=final_weights,
                     bin_ids=bin_ids, sample_ids=sample_ids, x0=x0,
                     prox_weight=prox_weight, x_anchor=anchor,
+                    use_interpolated_latent=use_interpolated_latent,
+                    interpolated_bin_mask=mixed_mask,
+                    interpolated_obs_mask=obs_mask,
                 )
         else:
             if loss_type == "logistic":
                 return self._solve_logistic(
                     y=y, intrinsic_vec=intrinsic_vec, x0=x0,
                     prox_weight=prox_weight, x_anchor=anchor,
+                    use_interpolated_latent=use_interpolated_latent,
+                    interpolated_bin_mask=mixed_mask,
+                    interpolated_obs_mask=obs_mask,
                 )
             else:
                 if bin_ids is None or sample_ids is None:
@@ -192,12 +217,83 @@ class LatentSolver:
                     x0=x0,
                     prox_weight=prox_weight,
                     x_anchor=anchor,
+                    use_interpolated_latent=use_interpolated_latent,
+                    interpolated_bin_mask=mixed_mask,
+                    interpolated_obs_mask=obs_mask,
                 )
 
-    def _solve_logistic(self, y: np.ndarray, intrinsic_vec: np.ndarray, x0: Optional[np.ndarray] = None, prox_weight: float = 0.0, x_anchor: Optional[np.ndarray] = None) -> np.ndarray:
+    def _normalize_interpolated_obs_mask(
+        self,
+        interpolated_obs_mask: Optional[np.ndarray],
+        n_obs: int,
+    ) -> Optional[np.ndarray]:
+        """Validate and normalize optional per-observation interpolation mask."""
+        if interpolated_obs_mask is None:
+            return None
+        mask = np.asarray(interpolated_obs_mask, dtype=bool).reshape(-1)
+        if mask.shape[0] != n_obs:
+            raise ValueError(f"interpolated_obs_mask has shape {mask.shape}, expected ({n_obs},)")
+        return mask
+
+    def _normalize_interpolated_bin_mask(
+        self,
+        interpolated_bin_mask: Optional[np.ndarray],
+    ) -> Optional[np.ndarray]:
+        """Validate and normalize optional per-bin interpolation mask."""
+        if interpolated_bin_mask is None:
+            return None
+        mask = np.asarray(interpolated_bin_mask, dtype=bool).reshape(-1)
+        if mask.shape[0] != self.n_bins:
+            raise ValueError(f"interpolated_bin_mask has shape {mask.shape}, expected ({self.n_bins},)")
+        return mask
+
+    def _build_latent_mixing_matrix(
+        self,
+        use_interpolated_latent: bool,
+        interpolated_bin_mask: Optional[np.ndarray],
+    ) -> sparse.csr_matrix:
         """
-        Scalar logistic/sigmoid latent solve via linear system + CG:
-            (V^T V + rI + λ(I-H_smooth)^T(I-H_smooth)) D = V^T (logit(y) - m)
+        Build linear operator M mapping raw latent to effective latent used in data term.
+
+        effective_latent = M @ raw_latent
+        - normal mode:        M = I
+        - interpolated mode:  M = H_smooth
+        - mixed mode:         M[b,:] = H_smooth[b,:] if mask[b] else e_b^T
+        """
+        if self.H_smooth is None:
+            raise RuntimeError("H_smooth not built; call build_V_and_H first")
+
+        if interpolated_bin_mask is None:
+            if use_interpolated_latent:
+                return self.H_smooth
+            return sparse.csr_matrix(sparse.identity(self.n_bins, format="csr"))
+
+        if not np.any(interpolated_bin_mask):
+            return sparse.csr_matrix(sparse.identity(self.n_bins, format="csr"))
+        if np.all(interpolated_bin_mask):
+            return self.H_smooth
+
+        interp_diag = sparse.diags(interpolated_bin_mask.astype(np.float64), format="csr")
+        raw_diag = sparse.diags((~interpolated_bin_mask).astype(np.float64), format="csr")
+        return (raw_diag + interp_diag @ self.H_smooth).tocsr()
+
+    def _solve_logistic(
+        self,
+        y: np.ndarray,
+        intrinsic_vec: np.ndarray,
+        x0: Optional[np.ndarray] = None,
+        prox_weight: float = 0.0,
+        x_anchor: Optional[np.ndarray] = None,
+        use_interpolated_latent: bool = False,
+        interpolated_bin_mask: Optional[np.ndarray] = None,
+        interpolated_obs_mask: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Scalar logistic/sigmoid latent solve via linear system + CG.
+        Uses interpolated latent (H_smooth @ D)[bin] matching the forward pass.
+
+        System: ((VH)^T(VH) + rI + λ(I-H_smooth)^T(I-H_smooth)) D = (VH)^T (logit(y) - m)
+        where VH = V @ H_smooth.
 
         With proximal regularization (ρ > 0):
             System becomes (A + ρI) D = b + ρ * (anchor / latent_lr),
@@ -209,6 +305,8 @@ class LatentSolver:
         # Ensure y is a numpy array
         y = np.asarray(y)
         intrinsic_vec = np.asarray(intrinsic_vec)
+        mixing_matrix = self._build_latent_mixing_matrix(use_interpolated_latent, interpolated_bin_mask)
+        obs_mask = self._normalize_interpolated_obs_mask(interpolated_obs_mask, len(y))
 
         # Handle present-only mode: filter to observations where y > 0
         if self.cfg.latent_present_only:
@@ -216,26 +314,55 @@ class LatentSolver:
             y_filtered = y[present_mask]
             intrinsic_filtered = intrinsic_vec[present_mask]
             V_filtered = self.V[present_mask, :]
+            obs_mask_filtered = obs_mask[present_mask] if obs_mask is not None else None
             
             log.debug(f"Present-only: {present_mask.sum()}/{len(y)} obs ({100*present_mask.mean():.1f}%)")
             
-            # Recompute A matrix with filtered V
-            VtV = (V_filtered.T @ V_filtered).tocsc()
+            # Recompute A matrix with filtered design matrix for chosen latent mode.
+            if obs_mask_filtered is not None:
+                VH_filtered = sparse.csr_matrix(V_filtered @ self.H_smooth)
+                D_interp = sparse.diags(obs_mask_filtered.astype(np.float64), format="csr")
+                D_raw = sparse.diags((~obs_mask_filtered).astype(np.float64), format="csr")
+                VM_filtered = sparse.csr_matrix(D_interp @ VH_filtered + D_raw @ V_filtered)
+            else:
+                VM_filtered = sparse.csr_matrix(V_filtered @ mixing_matrix)
+            VMtVM = (VM_filtered.T @ VM_filtered).tocsc()
             I = sparse.identity(self.n_bins, format="csr")
             I_minus_H_smooth = self.I_minus_H_smooth
             smoothness_term = (I_minus_H_smooth.T @ I_minus_H_smooth).tocsc()
             l2_term = I.tocsc()
-            A_filtered = VtV + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
-            
+            A_filtered = VMtVM + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
+
             y_use = y_filtered
             intrinsic_use = intrinsic_filtered
-            V_use = V_filtered
+            VM_use = VM_filtered
             A_use = A_filtered
         else:
             y_use = y
             intrinsic_use = intrinsic_vec
-            V_use = self.V
-            A_use = self.A
+
+            if obs_mask is not None:
+                VH_all = self.VH if self.VH is not None else sparse.csr_matrix(self.V @ self.H_smooth)
+                D_interp = sparse.diags(obs_mask.astype(np.float64), format="csr")
+                D_raw = sparse.diags((~obs_mask).astype(np.float64), format="csr")
+                VM_use = sparse.csr_matrix(D_interp @ VH_all + D_raw @ self.V)
+                VMtVM = (VM_use.T @ VM_use).tocsc()
+                I = sparse.identity(self.n_bins, format="csr")
+                I_minus_H_smooth = self.I_minus_H_smooth
+                smoothness_term = (I_minus_H_smooth.T @ I_minus_H_smooth).tocsc()
+                l2_term = I.tocsc()
+                A_use = VMtVM + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
+            elif use_interpolated_latent and interpolated_bin_mask is None and self.VH is not None and self.A is not None:
+                VM_use = self.VH
+                A_use = self.A
+            else:
+                VM_use = sparse.csr_matrix(self.V @ mixing_matrix)
+                VMtVM = (VM_use.T @ VM_use).tocsc()
+                I = sparse.identity(self.n_bins, format="csr")
+                I_minus_H_smooth = self.I_minus_H_smooth
+                smoothness_term = (I_minus_H_smooth.T @ I_minus_H_smooth).tocsc()
+                l2_term = I.tocsc()
+                A_use = VMtVM + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
 
         # Clip y to avoid log(0) and convert to logits
         y_clipped = np.clip(y_use, 1e-7, 1 - 1e-7)
@@ -245,8 +372,8 @@ class LatentSolver:
         # So residual = logit(y) - intrinsic
         residual = y_logit - intrinsic_use
         
-        # Compute b = V^T residual
-        b = V_use.T.dot(residual)
+        # Compute b = (V@M)^T residual for chosen latent usage mode.
+        b = VM_use.T.dot(residual)
 
         # Solve A D = b using conjugate gradient
         if x0 is None:
@@ -262,7 +389,7 @@ class LatentSolver:
             lr = max(float(self.cfg.latent_lr), 1e-8)
             anchor_solver = np.asarray(x_anchor, dtype=float).reshape(-1) / lr
             def _matvec(v, _A=A_use, _p=prox_weight): return _A.dot(v) + _p * v
-            A_eff = LinearOperator(A_use.shape, matvec=_matvec, dtype=float)
+            A_eff = LinearOperator(A_use.shape, _matvec)
             b_eff = b + prox_weight * anchor_solver
         else:
             A_eff, b_eff = A_use, b
@@ -294,14 +421,18 @@ class LatentSolver:
         x0: Optional[np.ndarray] = None,
         prox_weight: float = 0.0,
         x_anchor: Optional[np.ndarray] = None,
+        use_interpolated_latent: bool = False,
+        interpolated_bin_mask: Optional[np.ndarray] = None,
+        interpolated_obs_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Cross-entropy latent solve (softmax over bins within each sample) with L-BFGS.
+        Uses interpolated latent (H_smooth @ D)[bin] matching the forward pass.
 
         We minimize:
-            sum_s CE(y_s, softmax(m_s + D_bins)) + (r/2)||D||^2 + (λ/2)|| (I-H)D ||^2
+            sum_s CE(y_s, softmax(m_s + (H_smooth D)_bins)) + (r/2)||D||^2 + (λ/2)||(I-H)D||^2
 
-        This matches the model's cross-entropy training mode.
+        Gradient chain rule: dL_data/dD = H_smooth^T @ (dL_data / d(H_smooth D))
         """
         if self.I_minus_H_smooth is None or self.H_smooth is None:
             raise RuntimeError("Matrices not built; call build_V_and_H first")
@@ -323,6 +454,8 @@ class LatentSolver:
         m_s = intrinsic_vec[order]
         b_s = bin_ids[order]
         s_s = sample_ids[order]
+        obs_mask = self._normalize_interpolated_obs_mask(interpolated_obs_mask, len(y))
+        obs_s = obs_mask[order] if obs_mask is not None else None
 
         # Segment boundaries for each sample id
         unique_s, starts = np.unique(s_s, return_index=True)
@@ -332,6 +465,9 @@ class LatentSolver:
         r = float(self.cfg.latent_l2_reg)
         lam = float(self.cfg.latent_smooth_reg)
         I_minus_H_smooth = self.I_minus_H_smooth  # csr
+        H_smooth = self.H_smooth
+        assert H_smooth is not None
+        mixing_matrix = self._build_latent_mixing_matrix(use_interpolated_latent, interpolated_bin_mask)
 
         # Warm start
         if x0 is None:
@@ -347,11 +483,15 @@ class LatentSolver:
         def fun_and_jac(D_flat: np.ndarray) -> tuple[float, np.ndarray]:
             D_flat = D_flat.astype(np.float64, copy=False)
 
-            # z_i = m_i + d_{bin(i)} in the sorted-by-sample order
-            z = m_s + D_flat[b_s]
+            if obs_s is None:
+                D_eff = mixing_matrix.dot(D_flat)
+                z = m_s + D_eff[b_s]
+            else:
+                D_interp = H_smooth.dot(D_flat)
+                z = m_s + np.where(obs_s, D_interp[b_s], D_flat[b_s])
 
-            # Gradient accumulator in observation space, then scatter-add into bins
-            grad_bins = np.zeros(self.n_bins, dtype=np.float64)
+            grad_D_raw = np.zeros(self.n_bins, dtype=np.float64)
+            grad_D_interp = np.zeros(self.n_bins, dtype=np.float64)
             loss = 0.0
 
             for st, en in zip(starts, ends):
@@ -371,9 +511,21 @@ class LatentSolver:
 
                 # grad wrt z is (p - y)
                 g_z = (p - y_seg)
-                np.add.at(grad_bins, b_s[st:en], g_z)
+                if obs_s is None:
+                    np.add.at(grad_D_raw, b_s[st:en], g_z)
+                else:
+                    seg_mask = obs_s[st:en]
+                    if np.any(seg_mask):
+                        np.add.at(grad_D_interp, b_s[st:en][seg_mask], g_z[seg_mask])
+                    if np.any(~seg_mask):
+                        np.add.at(grad_D_raw, b_s[st:en][~seg_mask], g_z[~seg_mask])
 
-            # Regularization
+            if obs_s is None:
+                grad_bins = mixing_matrix.T.dot(grad_D_raw)
+            else:
+                grad_bins = grad_D_raw + H_smooth.T.dot(grad_D_interp)
+
+            # Regularization (on D directly, not on the interpolated latent)
             if r > 0:
                 loss += 0.5 * r * float(D_flat @ D_flat)
                 grad_bins += r * D_flat
@@ -435,12 +587,17 @@ class LatentSolver:
         x0: Optional[np.ndarray] = None,
         prox_weight: float = 0.0,
         x_anchor: Optional[np.ndarray] = None,
+        use_interpolated_latent: bool = False,
+        interpolated_bin_mask: Optional[np.ndarray] = None,
+        interpolated_obs_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Vector logistic/sigmoid latent solve via L-BFGS with multiplicative gating.
+        Uses interpolated latent (H_smooth @ H)[bin] matching the forward pass.
 
-        Model: ŷ_i = sigmoid(w^T (m_i ⊙ g(h[bin_i])))
+        Model: ŷ_i = sigmoid(w^T (m_i ⊙ g((H_smooth H)[bin_i])))
         Objective: BCE(y, ŷ) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
+        Gradient chain rule: dL_data/dH = H_smooth^T @ (dL_data / d(H_smooth H))
         """
         if self.V is None or self.H_smooth is None or self.I_minus_H_smooth is None:
             raise RuntimeError("Matrices not built; call build_V_and_H first")
@@ -449,6 +606,7 @@ class LatentSolver:
         intrinsic_vec = np.asarray(intrinsic_vec, dtype=np.float64)  # (N_obs, d)
         final_weights = np.asarray(final_weights, dtype=np.float64).reshape(-1)  # (d,)
         bin_ids = np.asarray(bin_ids, dtype=np.int64).reshape(-1)
+        obs_mask = self._normalize_interpolated_obs_mask(interpolated_obs_mask, len(y))
 
         if intrinsic_vec.shape != (len(y), self.embed_dim):
             raise ValueError(f"intrinsic_vec has shape {intrinsic_vec.shape}, expected ({len(y)}, {self.embed_dim})")
@@ -460,15 +618,20 @@ class LatentSolver:
             y_use = y[present_mask]
             intrinsic_use = intrinsic_vec[present_mask]
             bin_ids_use = bin_ids[present_mask]
+            obs_use = obs_mask[present_mask] if obs_mask is not None else None
             log.debug(f"Present-only: {present_mask.sum()}/{len(y)} obs ({100*present_mask.mean():.1f}%)")
         else:
             y_use = y
             intrinsic_use = intrinsic_vec
             bin_ids_use = bin_ids
+            obs_use = obs_mask
 
         N_obs = len(y_use)
         r = float(self.cfg.latent_l2_reg)
         lam = float(self.cfg.latent_smooth_reg)
+        H_smooth = self.H_smooth
+        assert H_smooth is not None
+        mixing_matrix = self._build_latent_mixing_matrix(use_interpolated_latent, interpolated_bin_mask)
 
         if x0 is None:
             x0_use = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
@@ -484,9 +647,14 @@ class LatentSolver:
             H_flat = H_flat.astype(np.float64, copy=False)
             H = H_flat.reshape(self.n_bins, self.embed_dim)
 
-            h_obs = H[bin_ids_use]  # (N_obs, d)
-            m_tilde = intrinsic_use * self.gating.gate_np(h_obs)   # (N_obs, d)
-            logits = m_tilde @ final_weights                        # (N_obs,)
+            if obs_use is None:
+                H_eff = mixing_matrix.dot(H)
+                h_obs = H_eff[bin_ids_use]
+            else:
+                H_interp = H_smooth.dot(H)
+                h_obs = np.where(obs_use[:, None], H_interp[bin_ids_use], H[bin_ids_use])
+            m_tilde = intrinsic_use * self.gating.gate_np(h_obs)              # (N_obs, d)
+            logits = m_tilde @ final_weights                                   # (N_obs,)
 
             logits_stable = np.clip(logits, -20, 20)
             p = 1.0 / (1.0 + np.exp(-logits_stable))
@@ -497,8 +665,17 @@ class LatentSolver:
             grad_m_tilde = np.outer(grad_logits, final_weights)               # (N_obs, d)
             grad_h_obs = intrinsic_use * grad_m_tilde * self.gating.gate_grad_np(h_obs)  # (N_obs, d)
 
-            grad_H = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
-            np.add.at(grad_H, bin_ids_use, grad_h_obs)
+            grad_H_raw = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
+            grad_H_interp = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
+            if obs_use is None:
+                np.add.at(grad_H_raw, bin_ids_use, grad_h_obs)
+                grad_H = mixing_matrix.T.dot(grad_H_raw)
+            else:
+                if np.any(obs_use):
+                    np.add.at(grad_H_interp, bin_ids_use[obs_use], grad_h_obs[obs_use])
+                if np.any(~obs_use):
+                    np.add.at(grad_H_raw, bin_ids_use[~obs_use], grad_h_obs[~obs_use])
+                grad_H = grad_H_raw + H_smooth.T.dot(grad_H_interp)
 
             if r > 0:
                 loss += 0.5 * r * float(np.sum(H ** 2))
@@ -545,12 +722,17 @@ class LatentSolver:
         x0: Optional[np.ndarray] = None,
         prox_weight: float = 0.0,
         x_anchor: Optional[np.ndarray] = None,
+        use_interpolated_latent: bool = False,
+        interpolated_bin_mask: Optional[np.ndarray] = None,
+        interpolated_obs_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Vector cross-entropy latent solve (softmax over bins within each sample) via L-BFGS.
+        Uses interpolated latent (H_smooth @ H)[bin] matching the forward pass.
 
-        Model: p_i = softmax(w^T (m_i ⊙ g(h[bin_i])))_within_sample
+        Model: p_i = softmax(w^T (m_i ⊙ g((H_smooth H)[bin_i])))_within_sample
         Objective: CE(y, p) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
+        Gradient chain rule: dL_data/dH = H_smooth^T @ (dL_data / d(H_smooth H))
         """
         if self.I_minus_H_smooth is None or self.H_smooth is None:
             raise RuntimeError("Matrices not built; call build_V_and_H first")
@@ -562,6 +744,7 @@ class LatentSolver:
         final_weights = np.asarray(final_weights, dtype=np.float64).reshape(-1)  # (d,)
         bin_ids = np.asarray(bin_ids, dtype=np.int64).reshape(-1)
         sample_ids = np.asarray(sample_ids, dtype=np.int64).reshape(-1)
+        obs_mask = self._normalize_interpolated_obs_mask(interpolated_obs_mask, len(y))
 
         if not (len(y) == len(intrinsic_vec) == len(bin_ids) == len(sample_ids)):
             raise ValueError("y, intrinsic_vec, bin_ids, sample_ids must have the same length")
@@ -575,6 +758,7 @@ class LatentSolver:
         m_s = intrinsic_vec[order]  # (N_obs, d)
         b_s = bin_ids[order]
         s_s = sample_ids[order]
+        obs_s = obs_mask[order] if obs_mask is not None else None
 
         unique_s, starts = np.unique(s_s, return_index=True)
         ends = np.append(starts[1:], len(s_s))
@@ -582,6 +766,9 @@ class LatentSolver:
 
         r = float(self.cfg.latent_l2_reg)
         lam = float(self.cfg.latent_smooth_reg)
+        H_smooth = self.H_smooth
+        assert H_smooth is not None
+        mixing_matrix = self._build_latent_mixing_matrix(use_interpolated_latent, interpolated_bin_mask)
 
         if x0 is None:
             x0_use = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
@@ -597,11 +784,17 @@ class LatentSolver:
             H_flat = H_flat.astype(np.float64, copy=False)
             H = H_flat.reshape(self.n_bins, self.embed_dim)
 
-            h_obs = H[b_s]  # (N_obs, d)
-            m_tilde = m_s * self.gating.gate_np(h_obs)  # (N_obs, d)
-            logits = m_tilde @ final_weights             # (N_obs,)
+            if obs_s is None:
+                H_eff = mixing_matrix.dot(H)
+                h_obs = H_eff[b_s]
+            else:
+                H_interp = H_smooth.dot(H)
+                h_obs = np.where(obs_s[:, None], H_interp[b_s], H[b_s])
+            m_tilde = m_s * self.gating.gate_np(h_obs)            # (N_obs, d)
+            logits = m_tilde @ final_weights                       # (N_obs,)
 
-            grad_H = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
+            grad_H_raw = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
+            grad_H_interp = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
             loss = 0.0
 
             for st, en in zip(starts, ends):
@@ -622,7 +815,19 @@ class LatentSolver:
                 grad_logits_seg = p - y_seg
                 grad_m_tilde_seg = np.outer(grad_logits_seg, final_weights)             # (seg, d)
                 grad_h_obs_seg = m_seg * grad_m_tilde_seg * self.gating.gate_grad_np(h_obs_seg)  # (seg, d)
-                np.add.at(grad_H, b_seg, grad_h_obs_seg)
+                if obs_s is None:
+                    np.add.at(grad_H_raw, b_seg, grad_h_obs_seg)
+                else:
+                    seg_mask = obs_s[st:en]
+                    if np.any(seg_mask):
+                        np.add.at(grad_H_interp, b_seg[seg_mask], grad_h_obs_seg[seg_mask])
+                    if np.any(~seg_mask):
+                        np.add.at(grad_H_raw, b_seg[~seg_mask], grad_h_obs_seg[~seg_mask])
+
+            if obs_s is None:
+                grad_H = mixing_matrix.T.dot(grad_H_raw)
+            else:
+                grad_H = grad_H_raw + H_smooth.T.dot(grad_H_interp)
 
             if r > 0:
                 loss += 0.5 * r * float(np.sum(H ** 2))

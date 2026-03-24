@@ -1,15 +1,18 @@
 from __future__ import annotations
+import os
+# Prevent BLAS/OMP threading conflict with PyTorch MPS on macOS
+#os.environ.setdefault("OMP_NUM_THREADS", "1")
+#os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import argparse
 import re
 import time
-from typing import Literal, Optional, List, Tuple, Dict, Any, Union, Callable
+from typing import Literal, Optional, List, Tuple, Dict, Any
 import logging as log
 from dataclasses import asdict
-import os
 
+import pickle
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 try:
@@ -28,15 +31,13 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from neighbor_graph import NeighbourGraph
+from latent_solver import LatentSolver
 from dataset import MBDataset, collate_samples
 from loss import Loss
 from mlp import MLPModel
-from utils import load, load_processed
-
-# Import from local folder (modified for latent-as-input)
-from latent_solver import LatentSolver
 from model import Model
 from config import Config, set_seed
+from utils import load, load_processed
 
 class Trainer:
     """
@@ -54,7 +55,7 @@ class Trainer:
         
         # Load data
         if data_dir is not None:
-            data, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir, config=self.cfg)
+            data, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir)
         else:
             if data_path is None:
                 raise ValueError("Either data_path or data_dir must be provided")
@@ -82,7 +83,7 @@ class Trainer:
         # _expand_mlp_for_latent() will expand the first layer after Phase 1.
         # Otherwise, build the full input_dim + latent_dim MLP from the start.
         mlp_input_dim = input_dim + self.cfg.latent_dim
-        mlp_model = MLPModel(mlp_input_dim, hidden_dims=[128, 64], dropout=self.cfg.dropout).to(self.device)
+        mlp_model = MLPModel(mlp_input_dim, hidden_dims=[64, 128, 64, 32], dropout=self.cfg.dropout).to(self.device)
         
         self.model = Model(
             mlp_model, 
@@ -106,8 +107,17 @@ class Trainer:
             {"params": self.model.mlp.parameters(), "lr": cfg.lr, "weight_decay": cfg.weight_decay},
             {"params": [self.model.latent_embedding.weight], "lr": cfg.latent_lr, "weight_decay": 0.0},
         ])
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5, verbose=False
+        # LR scheduler — total steps = epochs (one scheduler step per epoch)
+        total_steps = self.cfg.epochs
+        warmup_steps = max(1, int(0.1 * total_steps))
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
+        )
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=1e-6
+        )
+        self.scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps]
         )
         
         # Loss configuration
@@ -144,10 +154,6 @@ class Trainer:
             collate_fn=None,
         )
         
-        # Early stopping variables
-        self.best_val_loss = float('inf')
-        self.no_improve_epochs = 0
-
         # Loss tracking for visualization
         self.train_losses = []  # List of (0, epoch, loss) tuples
         self.val_losses = []    # List of (0, epoch, loss) tuples
@@ -156,10 +162,6 @@ class Trainer:
         # Each entry: dict with keys epoch, weight_norm_ratio, embedding_std,
         #             ablation_delta (only every diag_ablation_interval epochs)
         self.latent_diagnostics: List[Dict[str, Any]] = []
-
-        # Warmup training loss per epoch (populated during latent pre-warmup).
-        # List of (warmup_epoch, train_loss) tuples.
-        self.warmup_train_losses: List[Tuple[int, float]] = []
 
         # Prepare save path
         root = os.path.dirname(os.path.abspath(__file__))
@@ -495,82 +497,8 @@ class Trainer:
         )
 
     def run(self, use_wandb: bool = True) -> Dict[str, Any]:
-        """Run (optional) latent pre-warmup then joint MLP+latent training."""
+        """Run joint MLP+latent training."""
 
-        # ------------------------------------------------------------------ #
-        # Phase 0: Latent pre-warmup — freeze MLP, train only latent          #
-        # ------------------------------------------------------------------ #
-        # This prevents the feature-deactivation failure mode:                #
-        #   zero-init latent → MLP never sees informative latent input →       #
-        #   latent input weights decay to ≈0 and stay useless forever.        #
-        # After warmup the embedding already carries signal, so the MLP will  #
-        # keep and grow the latent input weights from the very first joint    #
-        # backward pass.                                                       #
-        # ------------------------------------------------------------------ #
-        if self.cfg.latent_warmup_epochs > 0:
-            log.info(
-                f"Latent pre-warmup: training only latent embedding for "
-                f"{self.cfg.latent_warmup_epochs} epochs (MLP frozen)."
-            )
-            # Freeze MLP weights
-            for p in self.model.mlp.parameters():
-                p.requires_grad = False
-
-            warmup_optimizer = torch.optim.AdamW(
-                [self.model.latent_embedding.weight],
-                lr=self.cfg.latent_lr, weight_decay=0.0,
-            )
-
-            for wu_epoch in tqdm(range(self.cfg.latent_warmup_epochs),
-                                 desc="Latent warmup", leave=False):
-                self.model.train()
-                epoch_loss_sum = 0.0
-                epoch_n_batches = 0
-                for batch in self.train_loader:
-                    inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
-                    if self.loss_mode == "sample":
-                        B, max_bins, n_feat = inputs.shape
-                        outputs = self.model(
-                            inputs.view(B * max_bins, n_feat),
-                            bin_idx.view(B * max_bins),
-                        ).view(B, max_bins)
-                        outputs = outputs.masked_fill(mask == 0, float('-inf'))
-                        loss = self.criterion(outputs, targets, mask)
-                    else:
-                        loss = self.criterion(self.model(inputs, bin_idx), targets)
-
-                    Z = self.model.latent_embedding.weight
-                    HZ = torch.sparse.mm(self.H_torch, Z)
-                    loss = (loss
-                            + self.cfg.latent_smooth_reg * torch.sum((Z - HZ) ** 2)
-                            + self.cfg.latent_norm_reg  * torch.sum(Z ** 2))
-
-                    warmup_optimizer.zero_grad()
-                    loss.backward()
-                    if self.cfg.grad_clip is not None:
-                        torch.nn.utils.clip_grad_norm_(
-                            [self.model.latent_embedding.weight], self.cfg.grad_clip
-                        )
-                    warmup_optimizer.step()
-                    epoch_loss_sum += loss.item()
-                    epoch_n_batches += 1
-                self.warmup_train_losses.append(
-                    (wu_epoch, epoch_loss_sum / max(epoch_n_batches, 1))
-                )
-
-            # Unfreeze MLP before joint training
-            for p in self.model.mlp.parameters():
-                p.requires_grad = True
-
-            log.info(
-                f"Latent pre-warmup complete — embedding std: "
-                f"{self.model.latent_embedding.weight.data.std():.6f}, "
-                f"weight norm ratio: {self._compute_latent_weight_ratio():.4f}"
-            )
-
-        # ------------------------------------------------------------------ #
-        # Phase 1: Joint training                                              #
-        # ------------------------------------------------------------------ #
         best_val = float('inf')
         pbar = tqdm(range(self.cfg.epochs), desc="Training", leave=True)
         for epoch in pbar:
@@ -600,7 +528,7 @@ class Trainer:
                        if diag["ablation_delta"] is not None else {}),
                 })
 
-            self.scheduler.step(val_loss)
+            self.scheduler.step()
 
             if epoch % 10 == 0:
                 pbar.set_postfix({
@@ -617,9 +545,9 @@ class Trainer:
                        if diag["ablation_delta"] is not None else "")
                 )
 
-            stop, best_val = self.early_stop_and_save(val_loss, best_val, cycle=0, epoch=epoch)
-            if stop:
-                break
+            if val_loss < best_val:
+                best_val = val_loss
+                self.model.save_model(self.save_path)
 
         self._plot_training_progress()
         self._plot_latent_importance()
@@ -632,7 +560,7 @@ class Trainer:
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
         latent_embeddings = self.model.get_latent()  # [n_bins, latent_dim]
         return {
-            "best_val_loss": self.best_val_loss,
+            "best_val_loss": best_val,
             "predictions": predictions,
             "targets": targets,
             "sample_labels": sample_labels,
@@ -641,9 +569,6 @@ class Trainer:
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "latent_diagnostics": self.latent_diagnostics,
-            # Warmup phase tracking (latent-only, before joint training)
-            "warmup_train_losses": self.warmup_train_losses,
-            "latent_warmup_epochs": self.cfg.latent_warmup_epochs,
             # Provide timeline-compatible format for the visualisation script:
             # (phase, cycle, step, loss) — here all are in a single "joint" phase
             "timeline_train_losses": [("joint", 0, e, l) for _, e, l in self.train_losses],
@@ -748,25 +673,6 @@ class Trainer:
         if mask is not None:
             mask = mask.to(self.device)
         return inputs, targets, bin_idx, sample_idx, mask
-    
-    
-    def early_stop_and_save(
-        self, val_loss: float, best_val: float, cycle: int, epoch: int
-    ) -> Tuple[bool, float]:
-        """Check early-stopping criterion and save the best checkpoint."""
-        if val_loss < best_val - 1e-4:
-            best_val = val_loss
-            if val_loss < self.best_val_loss - 1e-4:
-                self.best_val_loss = val_loss
-                self.model.save_model(self.save_path)
-            self.no_improve_epochs = 0
-            return False, best_val
-        else:
-            self.no_improve_epochs += 1
-            if self.cfg.patience is not None and self.no_improve_epochs >= self.cfg.patience:
-                log.info(f"Early stopping at epoch {epoch} due to no improvement in val loss.")
-                return True, best_val
-        return False, best_val
 
 
 if __name__ == "__main__":
@@ -812,8 +718,15 @@ if __name__ == "__main__":
     trainer = Trainer(cfg, data_path=data_path, data_dir=data_dir, loss_type=args.loss_type)
 
     log.debug(f"\n   Starting training...")
-    trainer.run(use_wandb=use_wandb)
-    
+    results = trainer.run(use_wandb=use_wandb)
+
+    # Save results to pickle for downstream visualization
+    os.makedirs(cfg.results_dir, exist_ok=True)
+    pkl_path = os.path.join(cfg.results_dir, f"results_{time.strftime('%Y-%m-%d_%H-%M')}.pkl")
+    with open(pkl_path, "wb") as fh:
+        pickle.dump(results, fh)
+    log.info(f"Results saved to: {pkl_path}")
+
     # Evaluate on test set
     log.debug(f"\n   Final evaluation...")
 

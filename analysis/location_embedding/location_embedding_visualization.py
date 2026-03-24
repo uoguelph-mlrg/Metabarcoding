@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 """
-Visualization module for model comparison results.
-Creates clean, presentation-ready plots comparing the baseline model and the
-latent-as-input variant.
+Visualization module for location embedding comparison results.
+Creates clean, presentation-ready plots comparing Baseline vs Location Embedding Variants.
 
-This script is separate from training to allow re-generating visualizations
+This script is separate from location_embedding.py to allow re-generating visualizations
 without re-running the expensive training.
 
 Usage:
-    python latent_as_input_visualisation.py --results_path results/model_comparison_results.pkl --output_dir figures
+    python location_embedding_visualization.py --results_path results/location_embeddings_comparison.pkl --output_dir figures
 """
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ import argparse
 import os
 import pickle
 import logging as log
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -65,46 +64,40 @@ def compute_95ci_bootstrap(errors: np.ndarray, n_bootstrap: int = 1000) -> tuple
     return (ci_lower, ci_upper)
 
 
-def compute_95ci_bootstrap_metric(values: np.ndarray) -> tuple:
-    """Compute 95% CI with n_bootstrap = len(values).
-    
-    Used for KL Divergence and Correlation. Computes metric for each
-    sample and takes 2.5/97.5 percentiles of the distribution.
-    
-    Returns:
-        tuple: (lower, upper) percentiles (2.5, 97.5)
-    """
-    if len(values) < 2:
-        return (0.0, 0.0)
-    n = len(values)
-    return compute_95ci_bootstrap(values, n_bootstrap=n)
-    return 1.96 * np.std(errors, ddof=1) / np.sqrt(n)
-
-
 # ============================================================================
 # Style Configuration
 # ============================================================================
 
-# Model colors
-LOSS_COLORS = {
-    "taxonomy": "#2ecc71",     # Green  — taxonomy-based neighbour graph (baseline)
-    "barcodebert": "#9b59b6",  # Purple — BarcodeBERT DNA-embedding neighbour graph
+# Location embedder colors - baseline + 4 location embedding variants
+ARCH_COLORS = {
+    "baseline": "#95a5a6",              # Grey - Baseline (no embeddings)
+    "satclip": "#e74c3c",               # Red - SatCLIP
+    "range": "#3498db",                 # Blue - RANGE
+    "geoclip": "#2ecc71",               # Green - GeoCLIP
+    "alphaearth": "#f39c12",            # Orange - AlphaEarth
 }
 
-LOSS_LABELS = {
-    "taxonomy": "Taxonomy Neighbours",
-    "barcodebert": "BarcodeBERT Embeddings",
+ARCH_LABELS = {
+    "baseline": "Baseline (No Location Embedding)",
+    "satclip": "SatCLIP (256D)",
+    "range": "RANGE (1280D)",
+    "geoclip": "GeoCLIP (512D)",
+    "alphaearth": "AlphaEarth (64D)",
 }
 
 
-def get_loss_label(loss_type: str) -> str:
-    """Get display label for a model type."""
-    return LOSS_LABELS.get(loss_type, loss_type)
+def get_arch_label(arch_type: str) -> str:
+    """Get display label for an architecture type."""
+    return ARCH_LABELS.get(arch_type, arch_type.replace('_', ' ').title())
 
 
-def get_loss_color(loss_type: str) -> str:
-    """Get consistent color for a model type."""
-    return LOSS_COLORS.get(loss_type, "#333333")
+def get_arch_color(arch_type: str) -> str:
+    """Get consistent color for an architecture type."""
+    if arch_type in ARCH_COLORS:
+        return ARCH_COLORS[arch_type]
+    # Generate color for unknown architectures
+    colors = ['#34495e', '#16a085', '#27ae60', '#d35400', '#c0392b', '#8e44ad']
+    return colors[hash(arch_type) % len(colors)]
 
 
 def set_style():
@@ -262,37 +255,37 @@ def compute_extended_metrics(
     }
 
 def plot_metrics_comparison(results: Dict[str, Any], output_dir: str):
-    """Create bar plots comparing key metrics between the 2 loss types."""
+    """Create bar plots comparing key metrics between all architectures."""
     set_style()
     
-    loss_types = list(results.keys())
+    arch_types = list(results.keys())
+    n_archs = len(arch_types)
     
-    # Compute extended metrics for both loss types
+    # Compute extended metrics for all architectures
     extended_metrics = {}
-    for lt in loss_types:
-        preds = results[lt]["predictions"]
-        targets = results[lt]["targets"]
-        extended_metrics[lt] = compute_extended_metrics(
+    for arch in arch_types:
+        preds = results[arch]["predictions"]
+        targets = results[arch]["targets"]
+        extended_metrics[arch] = compute_extended_metrics(
             targets, preds,
-            sample_labels=results[lt].get("sample_labels"),
-            bin_labels=results[lt].get("bin_labels"),
+            sample_labels=results[arch].get("sample_labels"),
+            bin_labels=results[arch].get("bin_labels"),
         )
     
     # Metrics to plot
     metrics_to_plot = ['RMSE_micro', 'MAE_micro', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
-    
-    fig, axes = plt.subplots(1, 7, figsize=(24, 4))
-    axes = axes.flatten()
+    n_metrics = len(metrics_to_plot)
 
+    # Compute 95% CIs per metric per architecture
     metric_cis: Dict[str, Dict[str, Any]] = {}
-    for lt in loss_types:
-        y_true = results[lt]["targets"].flatten()
-        y_pred = results[lt]["predictions"].flatten()
+    for arch in arch_types:
+        y_true = results[arch]["targets"].flatten()
+        y_pred = results[arch]["predictions"].flatten()
         valid_mask = np.isfinite(y_true) & np.isfinite(y_pred)
         y_true = y_true[valid_mask]
         y_pred = y_pred[valid_mask]
         if len(y_true) < 2:
-            metric_cis[lt] = {k: None for k in metrics_to_plot}
+            metric_cis[arch] = {k: None for k in metrics_to_plot}
             continue
         y_pred = np.clip(y_pred, 0, 1)
         abs_err = np.abs(y_true - y_pred)
@@ -309,7 +302,7 @@ def plot_metrics_comparison(results: Dict[str, Any], output_dir: str):
         mae_zeros_ci_tuple = compute_95ci_bootstrap(abs_err[zero_mask]) if zero_mask.sum() > 1 else (0.0, 0.0)
         mae_nz_ci_tuple = compute_95ci_bootstrap(abs_err[nonzero_mask]) if nonzero_mask.sum() > 1 else (0.0, 0.0)
 
-        metric_cis[lt] = {
+        metric_cis[arch] = {
             'RMSE_micro': rmse_ci_tuple,
             'MAE_micro': mae_ci_tuple,
             'Absolute Relative Error': are_ci_tuple,
@@ -319,13 +312,21 @@ def plot_metrics_comparison(results: Dict[str, Any], output_dir: str):
             'Correlation': None,
         }
     
+    # Create subplots with appropriate sizing
+    n_cols = min(4, n_metrics)
+    n_rows = (n_metrics + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows))
+    axes = axes.flatten() if n_metrics > 1 else [axes]
+    
     for idx, metric in enumerate(metrics_to_plot):
         ax = axes[idx]
-        values = [extended_metrics[lt][metric] for lt in loss_types]
-        ci_info = [metric_cis[lt].get(metric, None) for lt in loss_types]
-        colors = [get_loss_color(lt) for lt in loss_types]
-        labels = [get_loss_label(lt) for lt in loss_types]
-
+        values = [extended_metrics[arch][metric] for arch in arch_types]
+        ci_info = [metric_cis[arch].get(metric, None) for arch in arch_types]
+        colors = [get_arch_color(arch) for arch in arch_types]
+        labels = [get_arch_label(arch) for arch in arch_types]
+        
+        x_pos = np.arange(len(arch_types))
         if metric in ['KL Divergence', 'Correlation']:
             yerr = None
         else:
@@ -334,16 +335,21 @@ def plot_metrics_comparison(results: Dict[str, Any], output_dir: str):
             lower_err = np.abs(np.array(values) - np.array(ci_lower))
             upper_err = np.abs(np.array(ci_upper) - np.array(values))
             yerr = [lower_err, upper_err]
-        
-        bars = ax.bar(labels, values, color=colors, edgecolor='white', linewidth=1.5,
+
+        bars = ax.bar(x_pos, values, color=colors, edgecolor='white', linewidth=1.5,
                       yerr=yerr, capsize=4, error_kw={'elinewidth': 1.5} if yerr is not None else None)
         
-        ax.set_title(metric, fontsize=12, fontweight='bold')
+        ax.set_title(metric, fontsize=11, fontweight='bold')
         ax.set_ylim(0, max(values) * 1.25)
-        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=10)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
         sns.despine(ax=ax)
     
-    plt.suptitle('Model Performance Comparison', fontsize=16, fontweight='bold', y=1.02)
+    # Hide unused subplots
+    for idx in range(n_metrics, len(axes)):
+        axes[idx].set_visible(False)
+    
+    plt.suptitle('Location Embedding Performance Comparison', fontsize=14, fontweight='bold', y=0.995)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "metrics_comparison.png"), dpi=150, bbox_inches='tight')
     plt.close()
@@ -351,14 +357,17 @@ def plot_metrics_comparison(results: Dict[str, Any], output_dir: str):
 
 
 def plot_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir: str):
-    """Create scatter plots of actual vs predicted values with dynamic axis limits."""
+    """Create scatter plots of actual vs predicted values with dynamic axis limits (4x2 grid)."""
     set_style()
     
-    loss_types = list(results.keys())
+    arch_types = list(results.keys())
+    n_archs = len(arch_types)
     
-    fig, axes = plt.subplots(1, len(loss_types), figsize=(7 * len(loss_types), 6))
-    if len(loss_types) == 1:
-        axes = [axes]
+    n_cols = 4
+    n_rows = 2
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+    axes = axes.flatten()
     
     # First pass: compute densities and find global max for axis limits
     all_densities = []
@@ -366,9 +375,9 @@ def plot_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir: str):
     global_max_target = 0
     global_max_pred = 0
     
-    for lt in loss_types:
-        preds = results[lt]["predictions"].flatten()
-        targets = results[lt]["targets"].flatten()
+    for arch in arch_types:
+        preds = results[arch]["predictions"].flatten()
+        targets = results[arch]["targets"].flatten()
         
         # Filter out NaN values (padding)
         valid_mask = np.isfinite(preds) & np.isfinite(targets)
@@ -384,21 +393,23 @@ def plot_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir: str):
             xy = xy + np.random.normal(0, 1e-8, xy.shape)
             density = gaussian_kde(xy)(xy)
         except Exception as e:
-            log.warning(f"Could not compute density for {lt}: {e}")
+            log.warning(f"Could not compute density for {arch}: {e}")
             density = np.ones(len(preds))
         
         all_densities.extend(density)
-        scatter_data.append((lt, preds, targets, density))
+        scatter_data.append((arch, preds, targets, density))
     
     # Create shared normalization
     vmin, vmax = min(all_densities), max(all_densities)
     norm = Normalize(vmin=vmin, vmax=vmax)
     
     sc = None
-    for ax, (lt, preds, targets, density) in zip(axes, scatter_data):
+    for idx, (arch, preds, targets, density) in enumerate(scatter_data):
+        ax = axes[idx]
+        
         # Sort by density so densest points are plotted last
-        idx = density.argsort()
-        preds_sorted, targets_sorted, density_sorted = preds[idx], targets[idx], density[idx]
+        idx_sorted = density.argsort()
+        preds_sorted, targets_sorted, density_sorted = preds[idx_sorted], targets[idx_sorted], density[idx_sorted]
         
         sc = ax.scatter(targets_sorted, preds_sorted, c=density_sorted, 
                         cmap='viridis', norm=norm, s=8, alpha=0.6, edgecolors='none')
@@ -410,9 +421,9 @@ def plot_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir: str):
         # Compute Pearson correlation
         corr = np.corrcoef(targets, preds)[0, 1]
         
-        ax.set_xlabel("Actual", fontsize=12)
-        ax.set_ylabel("Predicted", fontsize=12)
-        ax.set_title(f"{get_loss_label(lt)}\n(Pearson r = {corr:.3f})", fontsize=14, fontweight='bold')
+        ax.set_xlabel("Actual", fontsize=11)
+        ax.set_ylabel("Predicted", fontsize=11)
+        ax.set_title(f"{get_arch_label(arch)}\n(Pearson r = {corr:.3f})", fontsize=12, fontweight='bold')
         
         # Dynamic axis limits
         ax.set_xlim(0, global_max_target)
@@ -420,13 +431,16 @@ def plot_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir: str):
         
         sns.despine(ax=ax)
     
+    # Hide unused subplots
+    for idx in range(n_archs, len(axes)):
+        axes[idx].set_visible(False)
+    
     # Add shared colorbar
     plt.tight_layout()
-    fig.subplots_adjust(right=0.92)
-    cbar_ax = fig.add_axes((0.94, 0.15, 0.02, 0.7))
-    if sc is not None:
-        cbar = fig.colorbar(sc, cax=cbar_ax)
-        cbar.set_label('Point Density', fontsize=10)
+    fig.subplots_adjust(right=0.93)
+    cbar_ax = fig.add_axes([0.95, 0.15, 0.015, 0.7])
+    cbar = fig.colorbar(sc, cax=cbar_ax)
+    cbar.set_label('Point Density', fontsize=10)
     
     plt.savefig(os.path.join(output_dir, "scatter_predicted_vs_actual.png"), dpi=150, bbox_inches='tight')
     plt.close()
@@ -434,14 +448,17 @@ def plot_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir: str):
 
 
 def plot_scatter_zoomed(results: Dict[str, Any], output_dir: str, max_actual: float = 0.01):
-    """Create scatter plots zoomed on ground truth <1% range with dynamic axis limits."""
+    """Create scatter plots zoomed on ground truth <1% range with dynamic axis limits (4x2 grid)."""
     set_style()
     
-    loss_types = list(results.keys())
+    arch_types = list(results.keys())
+    n_archs = len(arch_types)
     
-    fig, axes = plt.subplots(1, len(loss_types), figsize=(7 * len(loss_types), 6))
-    if len(loss_types) == 1:
-        axes = [axes]
+    n_cols = 4
+    n_rows = 2
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+    axes = axes.flatten()
     
     # First pass: compute densities and find max in zoomed region
     all_densities = []
@@ -449,9 +466,9 @@ def plot_scatter_zoomed(results: Dict[str, Any], output_dir: str, max_actual: fl
     global_max_target = 0
     global_max_pred = 0
     
-    for lt in loss_types:
-        targets = results[lt]["targets"].flatten()
-        preds = results[lt]["predictions"].flatten()
+    for arch in arch_types:
+        targets = results[arch]["targets"].flatten()
+        preds = results[arch]["predictions"].flatten()
         
         # Filter out NaN values (padding)
         valid_mask = np.isfinite(targets) & np.isfinite(preds)
@@ -473,11 +490,11 @@ def plot_scatter_zoomed(results: Dict[str, Any], output_dir: str, max_actual: fl
             xy = xy + np.random.normal(0, 1e-8, xy.shape)
             density = gaussian_kde(xy)(xy)
         except Exception as e:
-            log.warning(f"Could not compute density for {lt}: {e}")
-            density = np.ones(len(preds_zoomed))
+            log.warning(f"Could not compute density for {arch}: {e}")
+            density = np.ones(len(preds_zoomed)) if len(preds_zoomed) > 0 else np.array([])
         
         all_densities.extend(density)
-        scatter_data.append((lt, preds_zoomed, targets_zoomed, density))
+        scatter_data.append((arch, preds_zoomed, targets_zoomed, density))
     
     # Create shared normalization
     if len(all_densities) > 0:
@@ -487,10 +504,18 @@ def plot_scatter_zoomed(results: Dict[str, Any], output_dir: str, max_actual: fl
     norm = Normalize(vmin=vmin, vmax=vmax)
     
     sc = None
-    for ax, (lt, preds_zoomed, targets_zoomed, density) in zip(axes, scatter_data):
+    for idx, (arch, preds_zoomed, targets_zoomed, density) in enumerate(scatter_data):
+        ax = axes[idx]
+        
+        if len(preds_zoomed) == 0:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(get_arch_label(arch), fontsize=12, fontweight='bold')
+            sns.despine(ax=ax)
+            continue
+        
         # Sort by density so densest points are plotted last
-        idx = density.argsort()
-        preds_sorted, targets_sorted, density_sorted = preds_zoomed[idx], targets_zoomed[idx], density[idx]
+        idx_sorted = density.argsort()
+        preds_sorted, targets_sorted, density_sorted = preds_zoomed[idx_sorted], targets_zoomed[idx_sorted], density[idx_sorted]
         
         sc = ax.scatter(targets_sorted, preds_sorted, c=density_sorted, 
                         cmap='viridis', norm=norm, s=8, alpha=0.6, edgecolors='none')
@@ -500,11 +525,11 @@ def plot_scatter_zoomed(results: Dict[str, Any], output_dir: str, max_actual: fl
         ax.plot([0, axis_max], [0, axis_max], 'r--', lw=1.5, alpha=0.7)
         
         # Compute Pearson correlation on zoomed data
-        corr = np.corrcoef(targets_zoomed, preds_zoomed)[0, 1]
+        corr = np.corrcoef(targets_zoomed, preds_zoomed)[0, 1] if len(targets_zoomed) > 1 else 0.0
         
-        ax.set_xlabel("Actual", fontsize=12)
-        ax.set_ylabel("Predicted", fontsize=12)
-        ax.set_title(f"{get_loss_label(lt)}\n(Pearson r = {corr:.3f})", fontsize=14, fontweight='bold')
+        ax.set_xlabel("Actual", fontsize=11)
+        ax.set_ylabel("Predicted", fontsize=11)
+        ax.set_title(f"{get_arch_label(arch)}\n(Pearson r = {corr:.3f})", fontsize=12, fontweight='bold')
         
         # Dynamic axis limits
         ax.set_xlim(0, global_max_target)
@@ -512,27 +537,33 @@ def plot_scatter_zoomed(results: Dict[str, Any], output_dir: str, max_actual: fl
         
         sns.despine(ax=ax)
     
+    # Hide unused subplots
+    for idx in range(n_archs, len(axes)):
+        axes[idx].set_visible(False)
+    
     # Add shared colorbar
     plt.tight_layout()
-    fig.subplots_adjust(right=0.92)
-    cbar_ax = fig.add_axes((0.94, 0.15, 0.02, 0.7))
+    fig.subplots_adjust(right=0.93)
+    cbar_ax = fig.add_axes([0.95, 0.15, 0.015, 0.7])
     if sc is not None:
         cbar = fig.colorbar(sc, cax=cbar_ax)
         cbar.set_label('Point Density', fontsize=10)
     
-    plt.suptitle('Predicted vs Actual (Ground Truth <1%)', fontsize=14, fontweight='bold', y=1.02)
+    plt.suptitle('Predicted vs Actual (Ground Truth <1%)', fontsize=13, fontweight='bold', y=0.995)
     plt.savefig(os.path.join(output_dir, "scatter_zoomed.png"), dpi=150, bbox_inches='tight')
+    plt.close()
     plt.close()
     log.info(f"  ✓ Saved: scatter_zoomed.png")
     
     
 def plot_loglog_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir: str):
-    """Create log-log scatter plots of actual vs predicted values."""
+    """Create log-log scatter plots of actual vs predicted values (4x2 grid)."""
     set_style()
-    loss_types = list(results.keys())
-    fig, axes = plt.subplots(1, len(loss_types), figsize=(7 * len(loss_types), 6))
-    if len(loss_types) == 1:
-        axes = [axes]
+    arch_types = list(results.keys())
+    n_cols = 4
+    n_rows = 2
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 6 * n_rows))
+    axes = axes.flatten()
 
     # First pass: compute densities and find global min/max for color normalization
     all_densities = []
@@ -540,9 +571,9 @@ def plot_loglog_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir:
     global_min = float('inf')
     global_max = float('-inf')
 
-    for lt in loss_types:
-        preds = results[lt]["predictions"].flatten()
-        targets = results[lt]["targets"].flatten()
+    for arch in arch_types:
+        preds = results[arch]["predictions"].flatten()
+        targets = results[arch]["targets"].flatten()
         
         # Filter out NaN values (padding)
         valid_mask = np.isfinite(preds) & np.isfinite(targets)
@@ -558,10 +589,10 @@ def plot_loglog_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir:
             xy = xy + np.random.normal(0, 1e-8, xy.shape)
             density = gaussian_kde(xy)(xy)
         except Exception as e:
-            log.warning(f"Could not compute density for {lt}: {e}")
+            log.warning(f"Could not compute density for {arch}: {e}")
             density = np.ones(len(preds_log))
         all_densities.extend(density)
-        scatter_data.append((lt, preds_log, targets_log, density))
+        scatter_data.append((arch, preds_log, targets_log, density))
         # Track min/max for axis
         global_min = min(global_min, np.min(targets_log), np.min(preds_log))
         global_max = max(global_max, np.max(targets_log), np.max(preds_log))
@@ -571,7 +602,7 @@ def plot_loglog_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir:
     norm = Normalize(vmin=vmin, vmax=vmax)
 
     sc = None
-    for ax, (lt, preds_log, targets_log, density) in zip(axes, scatter_data):
+    for ax, (arch, preds_log, targets_log, density) in zip(axes[:len(scatter_data)], scatter_data):
         # Sort by density so densest points are plotted last
         idx = density.argsort()
         preds_sorted, targets_sorted, density_sorted = preds_log[idx], targets_log[idx], density[idx]
@@ -581,29 +612,28 @@ def plot_loglog_scatter_actual_vs_predicted(results: Dict[str, Any], output_dir:
         corr = np.corrcoef(targets_log, preds_log)[0, 1]
         ax.set_xlabel("Log10 Actual", fontsize=12)
         ax.set_ylabel("Log10 Predicted", fontsize=12)
-        ax.set_title(f"{get_loss_label(lt)}\n(Log-Log Pearson r = {corr:.3f})", fontsize=14, fontweight='bold')
+        ax.set_title(f"{get_arch_label(arch)}\n(Log-Log Pearson r = {corr:.3f})", fontsize=14, fontweight='bold')
         sns.despine(ax=ax)
 
     # Add shared colorbar
     plt.tight_layout()
     fig.subplots_adjust(right=0.92)
-    cbar_ax = fig.add_axes((0.94, 0.15, 0.02, 0.7))
-    if sc is not None:
-        cbar = fig.colorbar(sc, cax=cbar_ax)
-        cbar.set_label('Point Density', fontsize=10)
+    cbar_ax = fig.add_axes([0.94, 0.15, 0.02, 0.7])
+    cbar = fig.colorbar(sc, cax=cbar_ax)
+    cbar.set_label('Point Density', fontsize=10)
 
+    # Hide unused subplots for loglog
+    for idx in range(len(scatter_data), len(axes)):
+        axes[idx].set_visible(False)
     plt.savefig(os.path.join(output_dir, "scatter_loglog_predicted_vs_actual.png"), dpi=150, bbox_inches='tight')
     plt.close()
     log.info(f"  ✓ Saved: scatter_loglog_predicted_vs_actual.png")
 
 
-
 def plot_mae_per_range(results: Dict[str, Any], output_dir: str):
     """Create bar plot of MAE per target value range using specified bins."""
     set_style()
-    
-    loss_types = list(results.keys())
-    
+    arch_types = list(results.keys())
     bins = [
         ('zero', 'Zero'),
         (0, 0.001, '>0% to 0.1%'),
@@ -612,9 +642,9 @@ def plot_mae_per_range(results: Dict[str, Any], output_dir: str):
         (0.1, 1.0, '>10%'),
     ]
     error_data = []
-    for lt in loss_types:
-        y_pred = results[lt]["predictions"].flatten()
-        y_true = results[lt]["targets"].flatten()
+    for arch in arch_types:
+        y_pred = results[arch]["predictions"].flatten()
+        y_true = results[arch]["targets"].flatten()
         valid_mask = np.isfinite(y_pred) & np.isfinite(y_true)
         y_pred = y_pred[valid_mask]
         y_true = y_true[valid_mask]
@@ -629,30 +659,30 @@ def plot_mae_per_range(results: Dict[str, Any], output_dir: str):
                 abs_errors = np.abs(y_true[mask] - y_pred[mask])
                 mae = np.mean(abs_errors)
                 ci_lower, ci_upper = compute_95ci_bootstrap(abs_errors) if mask.sum() > 1 else (0.0, 0.0)
-                error_data.append({'Loss': get_loss_label(lt), 'Range': range_label,
+                error_data.append({'Architecture': get_arch_label(arch), 'Range': range_label,
                                    'MAE': mae, 'MAE_CI_Lower': ci_lower,
-                    'MAE_CI_Upper': ci_upper, 'Count': int(mask.sum()), 'loss_key': lt})
+                    'MAE_CI_Upper': ci_upper, 'Count': int(mask.sum()), 'arch_key': arch})
     error_df = pd.DataFrame(error_data)
     if len(error_df) == 0:
         log.warning("No data for MAE per range plot")
         return
     fig, ax = plt.subplots(figsize=(12, 6))
-    pivot_df = error_df.pivot(index='Range', columns='Loss', values='MAE')
-    pivot_ci_lower = error_df.pivot(index='Range', columns='Loss', values='MAE_CI_Lower')
-    pivot_ci_upper = error_df.pivot(index='Range', columns='Loss', values='MAE_CI_Upper')
-    pivot_count_df = error_df.pivot(index='Range', columns='Loss', values='Count')
-    count_df = error_df[error_df['Loss'] == get_loss_label(loss_types[0])][['Range', 'Count']].set_index('Range')
+    pivot_df = error_df.pivot(index='Range', columns='Architecture', values='MAE')
+    pivot_ci_lower = error_df.pivot(index='Range', columns='Architecture', values='MAE_CI_Lower')
+    pivot_ci_upper = error_df.pivot(index='Range', columns='Architecture', values='MAE_CI_Upper')
+    pivot_count_df = error_df.pivot(index='Range', columns='Architecture', values='Count')
+    count_df = error_df[error_df['Architecture'] == get_arch_label(arch_types[0])][['Range', 'Count']].set_index('Range')
     range_order = ['Zero', '>0% to 0.1%', '0.1-1%', '1-10%', '>10%']
     range_order = [r for r in range_order if r in pivot_df.index]
     pivot_df = pivot_df.reindex(range_order)
     pivot_ci_lower = pivot_ci_lower.reindex(range_order)
     pivot_ci_upper = pivot_ci_upper.reindex(range_order)
     pivot_count_df = pivot_count_df.reindex(range_order)
-    loss_labels_ordered = [get_loss_label(lt) for lt in loss_types]
-    pivot_df = pivot_df[[col for col in loss_labels_ordered if col in pivot_df.columns]]
-    pivot_ci_lower = pivot_ci_lower[[col for col in loss_labels_ordered if col in pivot_ci_lower.columns]]
-    pivot_ci_upper = pivot_ci_upper[[col for col in loss_labels_ordered if col in pivot_ci_upper.columns]]
-    pivot_count_df = pivot_count_df[[col for col in loss_labels_ordered if col in pivot_count_df.columns]]
+    arch_labels_ordered = [get_arch_label(arch) for arch in arch_types]
+    pivot_df = pivot_df[[col for col in arch_labels_ordered if col in pivot_df.columns]]
+    pivot_ci_lower = pivot_ci_lower[[col for col in arch_labels_ordered if col in pivot_ci_lower.columns]]
+    pivot_ci_upper = pivot_ci_upper[[col for col in arch_labels_ordered if col in pivot_ci_upper.columns]]
+    pivot_count_df = pivot_count_df[[col for col in arch_labels_ordered if col in pivot_count_df.columns]]
 
     mean_vals = pivot_df.values
     pivot_ci_lower = pivot_ci_lower.fillna(0)
@@ -660,7 +690,7 @@ def plot_mae_per_range(results: Dict[str, Any], output_dir: str):
     lower_err = np.abs(mean_vals - pivot_ci_lower.values)
     upper_err = np.abs(pivot_ci_upper.values - mean_vals)
 
-    colors = [get_loss_color(lt) for lt in loss_types]
+    colors = [get_arch_color(arch) for arch in arch_types]
     x = np.arange(len(range_order))
     width = 0.7 / len(pivot_df.columns)
     for i, col in enumerate(pivot_df.columns):
@@ -668,12 +698,13 @@ def plot_mae_per_range(results: Dict[str, Any], output_dir: str):
         ax.bar(x + offset, pivot_df[col], width, label=col, color=colors[i],
                edgecolor='white', yerr=[lower_err[:, i], upper_err[:, i]],
                capsize=5, error_kw={'elinewidth': 2})
+
     range_labels_with_counts = [f"{r}\n(n={int(count_df.loc[r, 'Count']):,})" if r in count_df.index else r
                                  for r in range_order]
     ax.set_xlabel('Abundance Range', fontsize=12)
     ax.set_ylabel('Mean Absolute Error', fontsize=12)
     ax.set_title('Prediction Error by Abundance Range', fontsize=14, fontweight='bold')
-    ax.legend(title='Model', frameon=False, loc='upper left')
+    ax.legend(title='Architecture', frameon=False, loc='upper left')
     ax.set_xticks(x)
     ax.set_xticklabels(range_labels_with_counts, rotation=0)
     sns.despine(ax=ax)
@@ -686,7 +717,7 @@ def plot_mae_per_range(results: Dict[str, Any], output_dir: str):
 def plot_RAE_per_range(results: Dict[str, Any], output_dir: str):
     """Create bar plot of Relative Absolute Error per range (excluding zeros)."""
     set_style()
-    loss_types = list(results.keys())
+    arch_types = list(results.keys())
     bins = [
         (0, 0.001, '>0% to 0.1%'),
         (0.001, 0.01, '0.1-1%'),
@@ -694,9 +725,9 @@ def plot_RAE_per_range(results: Dict[str, Any], output_dir: str):
         (0.1, 1.0, '>10%'),
     ]
     error_data = []
-    for lt in loss_types:
-        y_pred = results[lt]["predictions"].flatten()
-        y_true = results[lt]["targets"].flatten()
+    for arch in arch_types:
+        y_pred = results[arch]["predictions"].flatten()
+        y_true = results[arch]["targets"].flatten()
         valid_mask = np.isfinite(y_pred) & np.isfinite(y_true)
         y_pred = y_pred[valid_mask]
         y_true = y_true[valid_mask]
@@ -706,30 +737,30 @@ def plot_RAE_per_range(results: Dict[str, Any], output_dir: str):
                 rel_error = np.abs(y_true[mask] - y_pred[mask]) / np.abs(y_true[mask])
                 rae = np.mean(rel_error)
                 ci_lower, ci_upper = compute_95ci_bootstrap(rel_error) if mask.sum() > 1 else (0.0, 0.0)
-                error_data.append({'Loss': get_loss_label(lt), 'Range': range_label,
+                error_data.append({'Architecture': get_arch_label(arch), 'Range': range_label,
                                    'RAE': rae, 'RAE_CI_Lower': ci_lower,
-                    'RAE_CI_Upper': ci_upper, 'Count': int(mask.sum()), 'loss_key': lt})
+                    'RAE_CI_Upper': ci_upper, 'Count': int(mask.sum()), 'arch_key': arch})
     error_df = pd.DataFrame(error_data)
     if len(error_df) == 0:
         log.warning("No data for RAE per range plot")
         return
-    count_df = error_df[error_df['Loss'] == get_loss_label(loss_types[0])][['Range', 'Count']].set_index('Range')
+    count_df = error_df[error_df['Architecture'] == get_arch_label(arch_types[0])][['Range', 'Count']].set_index('Range')
     fig, ax = plt.subplots(figsize=(12, 6))
-    pivot_df = error_df.pivot(index='Range', columns='Loss', values='RAE')
-    pivot_ci_lower = error_df.pivot(index='Range', columns='Loss', values='RAE_CI_Lower')
-    pivot_ci_upper = error_df.pivot(index='Range', columns='Loss', values='RAE_CI_Upper')
-    pivot_count_df = error_df.pivot(index='Range', columns='Loss', values='Count')
+    pivot_df = error_df.pivot(index='Range', columns='Architecture', values='RAE')
+    pivot_ci_lower = error_df.pivot(index='Range', columns='Architecture', values='RAE_CI_Lower')
+    pivot_ci_upper = error_df.pivot(index='Range', columns='Architecture', values='RAE_CI_Upper')
+    pivot_count_df = error_df.pivot(index='Range', columns='Architecture', values='Count')
     range_order = ['>0% to 0.1%', '0.1-1%', '1-10%', '>10%']
     range_order = [r for r in range_order if r in pivot_df.index]
     pivot_df = pivot_df.reindex(range_order)
     pivot_ci_lower = pivot_ci_lower.reindex(range_order)
     pivot_ci_upper = pivot_ci_upper.reindex(range_order)
     pivot_count_df = pivot_count_df.reindex(range_order)
-    loss_labels_ordered = [get_loss_label(lt) for lt in loss_types]
-    pivot_df = pivot_df[[col for col in loss_labels_ordered if col in pivot_df.columns]]
-    pivot_ci_lower = pivot_ci_lower[[col for col in loss_labels_ordered if col in pivot_ci_lower.columns]]
-    pivot_ci_upper = pivot_ci_upper[[col for col in loss_labels_ordered if col in pivot_ci_upper.columns]]
-    pivot_count_df = pivot_count_df[[col for col in loss_labels_ordered if col in pivot_count_df.columns]]
+    arch_labels_ordered = [get_arch_label(arch) for arch in arch_types]
+    pivot_df = pivot_df[[col for col in arch_labels_ordered if col in pivot_df.columns]]
+    pivot_ci_lower = pivot_ci_lower[[col for col in arch_labels_ordered if col in pivot_ci_lower.columns]]
+    pivot_ci_upper = pivot_ci_upper[[col for col in arch_labels_ordered if col in pivot_ci_upper.columns]]
+    pivot_count_df = pivot_count_df[[col for col in arch_labels_ordered if col in pivot_count_df.columns]]
 
     mean_vals = pivot_df.values
     pivot_ci_lower = pivot_ci_lower.fillna(0)
@@ -737,7 +768,7 @@ def plot_RAE_per_range(results: Dict[str, Any], output_dir: str):
     lower_err = np.abs(mean_vals - pivot_ci_lower.values)
     upper_err = np.abs(pivot_ci_upper.values - mean_vals)
 
-    colors = [get_loss_color(lt) for lt in loss_types]
+    colors = [get_arch_color(arch) for arch in arch_types]
     x = np.arange(len(range_order))
     width = 0.7 / len(pivot_df.columns)
     for i, col in enumerate(pivot_df.columns):
@@ -752,7 +783,7 @@ def plot_RAE_per_range(results: Dict[str, Any], output_dir: str):
     ax.set_xlabel('Abundance Range', fontsize=12)
     ax.set_ylabel('Relative Absolute Error', fontsize=12)
     ax.set_title('Relative Absolute Error by Abundance Range', fontsize=14, fontweight='bold')
-    ax.legend(title='Model', frameon=False, loc='upper left')
+    ax.legend(title='Architecture', frameon=False, loc='upper right')
     sns.despine(ax=ax)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "relative_err_by_range.png"), dpi=150, bbox_inches='tight')
@@ -763,7 +794,7 @@ def plot_mae_per_range_zoomed(results: Dict[str, Any], output_dir: str):
     """Create bar plot of MAE per range zoomed with quantile bins and sample counts."""
     set_style()
     
-    loss_types = list(results.keys())
+    arch_types = list(results.keys())
     
     # Zoomed bins for <1% range
     bins = [
@@ -777,9 +808,9 @@ def plot_mae_per_range_zoomed(results: Dict[str, Any], output_dir: str):
     # Compute MAE for each range
     error_data = []
     
-    for lt in loss_types:
-        y_pred = results[lt]["predictions"].flatten()
-        y_true = results[lt]["targets"].flatten()
+    for arch in arch_types:
+        y_pred = results[arch]["predictions"].flatten()
+        y_true = results[arch]["targets"].flatten()
         
         # Filter out NaN values (padding)
         valid_mask = np.isfinite(y_pred) & np.isfinite(y_true)
@@ -793,34 +824,51 @@ def plot_mae_per_range_zoomed(results: Dict[str, Any], output_dir: str):
             else:
                 low, high, range_label = bin_def
                 mask = (y_true > low) & (y_true <= high)
+            
             if mask.sum() > 0:
                 abs_errors = np.abs(y_true[mask] - y_pred[mask])
                 mae = np.mean(abs_errors)
                 ci_lower, ci_upper = compute_95ci_bootstrap(abs_errors) if mask.sum() > 1 else (0.0, 0.0)
-                error_data.append({'Loss': get_loss_label(lt), 'Range': range_label,
-                                   'MAE': mae, 'MAE_CI_Lower': ci_lower,
-                    'MAE_CI_Upper': ci_upper, 'Count': int(mask.sum()), 'loss_key': lt})
+                error_data.append({
+                    'Architecture': get_arch_label(arch),
+                    'Range': range_label,
+                    'MAE': mae,
+                    'MAE_CI_Lower': ci_lower,
+                    'MAE_CI_Upper': ci_upper,
+                    'Count': int(mask.sum()),
+                    'arch_key': arch
+                })
+    
     error_df = pd.DataFrame(error_data)
+    
     if len(error_df) == 0:
         log.warning("No data for zoomed MAE per range plot")
         return
-    count_df = error_df[error_df['Loss'] == get_loss_label(loss_types[0])][['Range', 'Count']].set_index('Range')
+    
+    # Get counts for labels (use first architecture since counts should be same)
+    count_df = error_df[error_df['Architecture'] == get_arch_label(arch_types[0])][['Range', 'Count']].set_index('Range')
+    
+    # Create grouped bar plot
     fig, ax = plt.subplots(figsize=(12, 6))
-    pivot_df = error_df.pivot(index='Range', columns='Loss', values='MAE')
-    pivot_ci_lower = error_df.pivot(index='Range', columns='Loss', values='MAE_CI_Lower')
-    pivot_ci_upper = error_df.pivot(index='Range', columns='Loss', values='MAE_CI_Upper')
-    pivot_count_df = error_df.pivot(index='Range', columns='Loss', values='Count')
+    
+    # Pivot for plotting
+    pivot_df = error_df.pivot(index='Range', columns='Architecture', values='MAE')
+    pivot_ci_lower = error_df.pivot(index='Range', columns='Architecture', values='MAE_CI_Lower')
+    pivot_ci_upper = error_df.pivot(index='Range', columns='Architecture', values='MAE_CI_Upper')
+    
+    # Ensure correct order of ranges
     range_order = ['Zero', '0-0.11%', '0.11-0.15%', '0.15-0.22%', '0.22-1%']
     range_order = [r for r in range_order if r in pivot_df.index]
     pivot_df = pivot_df.reindex(range_order)
     pivot_ci_lower = pivot_ci_lower.reindex(range_order)
     pivot_ci_upper = pivot_ci_upper.reindex(range_order)
-    pivot_count_df = pivot_count_df.reindex(range_order)
-    loss_labels_ordered = [get_loss_label(lt) for lt in loss_types]
-    pivot_df = pivot_df[[col for col in loss_labels_ordered if col in pivot_df.columns]]
-    pivot_ci_lower = pivot_ci_lower[[col for col in loss_labels_ordered if col in pivot_ci_lower.columns]]
-    pivot_ci_upper = pivot_ci_upper[[col for col in loss_labels_ordered if col in pivot_ci_upper.columns]]
-    pivot_count_df = pivot_count_df[[col for col in loss_labels_ordered if col in pivot_count_df.columns]]
+    
+    arch_labels_ordered = [get_arch_label(arch) for arch in arch_types]
+    pivot_df = pivot_df[[col for col in arch_labels_ordered if col in pivot_df.columns]]
+    pivot_ci_lower = pivot_ci_lower[[col for col in arch_labels_ordered if col in pivot_ci_lower.columns]]
+    pivot_ci_upper = pivot_ci_upper[[col for col in arch_labels_ordered if col in pivot_ci_upper.columns]]
+    pivot_count_df = error_df.pivot(index='Range', columns='Architecture', values='Count').reindex(range_order)
+    pivot_count_df = pivot_count_df[[col for col in arch_labels_ordered if col in pivot_count_df.columns]]
 
     mean_vals = pivot_df.values
     pivot_ci_lower = pivot_ci_lower.fillna(0)
@@ -828,7 +876,7 @@ def plot_mae_per_range_zoomed(results: Dict[str, Any], output_dir: str):
     lower_err = np.abs(mean_vals - pivot_ci_lower.values)
     upper_err = np.abs(pivot_ci_upper.values - mean_vals)
 
-    colors = [get_loss_color(lt) for lt in loss_types]
+    colors = [get_arch_color(arch) for arch in arch_types]
     x = np.arange(len(range_order))
     width = 0.7 / len(pivot_df.columns)
     for i, col in enumerate(pivot_df.columns):
@@ -841,7 +889,7 @@ def plot_mae_per_range_zoomed(results: Dict[str, Any], output_dir: str):
     ax.set_xlabel('Abundance Range', fontsize=12)
     ax.set_ylabel('Mean Absolute Error', fontsize=12)
     ax.set_title('Prediction Error by Abundance Range (Zoomed: <1%)', fontsize=14, fontweight='bold')
-    ax.legend(title='Model', frameon=False, loc='upper left')
+    ax.legend(title='Architecture', frameon=False, loc='upper left')
     ax.set_xticks(x)
     ax.set_xticklabels(range_labels_with_counts, rotation=0)
     sns.despine(ax=ax)
@@ -852,18 +900,18 @@ def plot_mae_per_range_zoomed(results: Dict[str, Any], output_dir: str):
 
 
 def plot_residual_distribution(results: Dict[str, Any], output_dir: str):
-    """Create overlapping residual distribution histograms with KDE for all loss types."""
+    """Create overlapping residual distribution histograms with KDE for all architectures."""
     set_style()
-    loss_types = list(results.keys())
+    arch_types = list(results.keys())
     fig, ax = plt.subplots(figsize=(9, 5))
     all_res_flat = []
-    lt_residuals = {}
-    for lt in loss_types:
-        targets = results[lt]["targets"].flatten()
-        preds = results[lt]["predictions"].flatten()
+    arch_residuals = {}
+    for arch in arch_types:
+        targets = results[arch]["targets"].flatten()
+        preds = results[arch]["predictions"].flatten()
         valid_mask = np.isfinite(targets) & np.isfinite(preds)
         residuals = (targets - preds)[valid_mask]
-        lt_residuals[lt] = residuals
+        arch_residuals[arch] = residuals
         all_res_flat.extend(residuals.tolist())
     if len(all_res_flat) == 0:
         log.warning("No residuals available for plotting")
@@ -871,9 +919,9 @@ def plot_residual_distribution(results: Dict[str, Any], output_dir: str):
     x_kde = np.linspace(min(all_res_flat), max(all_res_flat), 300)
     legend_handles = []
     max_count = 0
-    for lt, residuals in lt_residuals.items():
-        color = get_loss_color(lt)
-        label = get_loss_label(lt)
+    for arch, residuals in arch_residuals.items():
+        color = get_arch_color(arch)
+        label = get_arch_label(arch)
         mean_res = np.mean(residuals)
         std_res = np.std(residuals)
         counts, _, _ = ax.hist(residuals, bins=60, color=color, alpha=0.3, edgecolor='none')
@@ -899,18 +947,18 @@ def plot_residual_distribution(results: Dict[str, Any], output_dir: str):
 
 
 def plot_zero_vs_nonzero_comparison(results: Dict[str, Any], output_dir: str):
-    """Create MAE bar chart comparing zero vs non-zero values."""
+    """Create a comparison plot for MAE on zero vs non-zero values."""
     set_style()
-    loss_types = list(results.keys())
+    arch_types = list(results.keys())
     fig, ax = plt.subplots(figsize=(10, 5))
-    x = np.arange(len(loss_types))
+    x = np.arange(len(arch_types))
     width = 0.35
     def _blend_with_white(color, alpha=0.6):
         r, g, b = mc.to_rgb(color)
         return (r * (1 - alpha) + alpha, g * (1 - alpha) + alpha, b * (1 - alpha) + alpha)
-    for i, lt in enumerate(loss_types):
-        targets = results[lt]["targets"].flatten()
-        preds = results[lt]["predictions"].flatten()
+    for i, arch in enumerate(arch_types):
+        targets = results[arch]["targets"].flatten()
+        preds = results[arch]["predictions"].flatten()
         valid_mask = np.isfinite(targets) & np.isfinite(preds)
         targets = targets[valid_mask]
         preds = preds[valid_mask]
@@ -920,7 +968,7 @@ def plot_zero_vs_nonzero_comparison(results: Dict[str, Any], output_dir: str):
         errs_nz = np.abs(targets[nonzero_mask] - preds[nonzero_mask]) if nonzero_mask.sum() > 0 else np.array([0.0])
         mae_z = np.mean(errs_z)
         mae_nz = np.mean(errs_nz)
-        base_color = get_loss_color(lt)
+        base_color = get_arch_color(arch)
         zero_color = _blend_with_white(base_color, alpha=0.6)
         nonzero_color = base_color
         ci_z = _ci_tuple_to_errorbar(mae_z, compute_95ci_bootstrap(errs_z))
@@ -937,9 +985,9 @@ def plot_zero_vs_nonzero_comparison(results: Dict[str, Any], output_dir: str):
         Patch(facecolor='#cccccc', edgecolor='white', label='Zero GT (lighter)'),
         Patch(facecolor='#666666', edgecolor='white', label='Non-zero GT (darker)')
     ]
-    ax.legend(handles=legend_elements, frameon=False, loc='upper left')
+    ax.legend(handles=legend_elements, frameon=False, loc='upper right')
     ax.set_xticks(x)
-    ax.set_xticklabels([get_loss_label(lt) for lt in loss_types], rotation=45, ha='right', fontsize=10)
+    ax.set_xticklabels([get_arch_label(arch) for arch in arch_types], rotation=45, ha='right', fontsize=9)
     ax.set_ylabel('MAE', fontsize=12)
     ax.set_title('MAE: Zero vs Non-Zero Values', fontsize=14, fontweight='bold')
     sns.despine(ax=ax)
@@ -947,6 +995,107 @@ def plot_zero_vs_nonzero_comparison(results: Dict[str, Any], output_dir: str):
     plt.savefig(os.path.join(output_dir, "zero_vs_nonzero_comparison.png"), dpi=150, bbox_inches='tight')
     plt.close()
     log.info(f"  ✓ Saved: zero_vs_nonzero_comparison.png")
+
+
+def plot_summary_table(results: Dict[str, Any], output_dir: str):
+    """Create a clean summary table as an image with best values highlighted."""
+    set_style()
+    
+    arch_types = list(results.keys())
+    
+    # Compute extended metrics
+    extended_metrics = {}
+    for arch in arch_types:
+        preds = results[arch]["predictions"]
+        targets = results[arch]["targets"]
+        extended_metrics[arch] = compute_extended_metrics(
+            targets, preds,
+            sample_labels=results[arch].get("sample_labels"),
+            bin_labels=results[arch].get("bin_labels"),
+        )
+    
+    # Metrics to include in table
+    metrics = ['RMSE_micro', 'MAE_micro', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
+    
+    # Build table data
+    data = []
+    for arch in arch_types:
+        row = {'Architecture': get_arch_label(arch)}
+        for m in metrics:
+            row[m] = extended_metrics[arch][m]
+        data.append(row)
+    
+    df = pd.DataFrame(data)
+    
+    # Determine best values for each metric (lower is better except Correlation)
+    best_indices = {}  # col -> list of row indices with best value
+    for col in metrics:
+        if col == 'Correlation':
+            best_value = df[col].max()
+            best_indices[col] = df[df[col] == best_value].index.tolist()
+        else:
+            best_value = df[col].min()
+            best_indices[col] = df[df[col] == best_value].index.tolist()
+    
+    # Format numeric columns
+    display_df = df.copy()
+    for col in metrics:
+        display_df[col] = display_df[col].apply(lambda x: f'{x:.6f}')
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(16, 2.5))
+    ax.axis('off')
+    
+    # Create table
+    table = ax.table(
+        cellText=display_df.values,
+        colLabels=display_df.columns,
+        cellLoc='center',
+        loc='center',
+        colColours=['#f0f0f0'] * len(display_df.columns)
+    )
+    
+    # Style table
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.8)
+    
+    # Header row: light gray bold
+    for i in range(len(display_df.columns)):
+        table[(0, i)].set_text_props(fontweight='bold')
+        table[(0, i)].set_facecolor('#d0d0d0')
+
+    # Color first column (Architecture) with each arch's color
+    arch_col_idx = list(display_df.columns).index('Architecture')
+    for row_idx, arch in enumerate(arch_types):
+        cell = table[(row_idx + 1, arch_col_idx)]
+        hex_color = get_arch_color(arch)
+        cell.set_facecolor(hex_color)
+        cell.set_text_props(fontweight='bold', color='white')
+        # Prevent title overlap by adjusting cell height
+        cell.set_height(0.15)
+
+    # Best value: bold dark green text + light green background
+    for col_idx, col in enumerate(display_df.columns):
+        if col == 'Architecture':
+            continue
+        if col in best_indices:
+            # Highlight all rows that have the best value for this metric
+            for best_row_idx in best_indices[col]:
+                table[(best_row_idx + 1, col_idx)].set_facecolor('#d5f5e3')
+                table[(best_row_idx + 1, col_idx)].set_text_props(fontweight='bold', color='#1a7a40')
+
+    plt.title('Architecture Comparison Summary', fontweight='bold', fontsize=14, y=1.15)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "summary_table.png"), dpi=150, bbox_inches='tight')
+    plt.close()
+    log.info(f"  ✓ Saved: summary_table.png")
+    
+    # Also save as CSV
+    df.to_csv(os.path.join(output_dir, "architecture_comparison_results.csv"), index=False)
+    log.info(f"  ✓ Saved: architecture_comparison_results.csv")
+    
+    return df
 
 
 def plot_training_progress_comparison(results: Dict[str, Any], output_dir: str) -> None:
@@ -975,8 +1124,8 @@ def plot_training_progress_comparison(results: Dict[str, Any], output_dir: str) 
         axes = np.array([[axes[0]], [axes[1]]])
 
     for idx, model_key in enumerate(model_keys):
-        label = get_loss_label(model_key)
-        color = get_loss_color(model_key)
+        label = get_arch_label(model_key)
+        color = get_arch_color(model_key)
         train_vals, val_vals = extract_timeline(results[model_key])
         cycle_train = results[model_key].get("cycle_train_losses", [])
         cycle_val = results[model_key].get("cycle_val_losses", [])
@@ -1015,7 +1164,9 @@ def plot_training_progress_comparison(results: Dict[str, Any], output_dir: str) 
         ax2.set_ylabel('Loss')
         ax2.set_title(f'{label}: End-of-Cycle Losses')
         ax2.grid(True, alpha=0.3)
-        ax2.legend(frameon=True, fontsize=10, loc='upper right')
+        handles, labels = ax2.get_legend_handles_labels()
+        if handles:
+            ax2.legend(frameon=True, fontsize=10, loc='upper right')
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "training_progress.png"), dpi=150, bbox_inches='tight')
@@ -1023,109 +1174,16 @@ def plot_training_progress_comparison(results: Dict[str, Any], output_dir: str) 
     log.info("  ✓ Saved: training_progress.png")
 
 
-def plot_summary_table(results: Dict[str, Any], output_dir: str):
-    """Create a clean summary table as an image with best values highlighted."""
-    set_style()
-    
-    loss_types = list(results.keys())
-    
-    # Compute extended metrics
-    extended_metrics = {}
-    for lt in loss_types:
-        preds = results[lt]["predictions"]
-        targets = results[lt]["targets"]
-        extended_metrics[lt] = compute_extended_metrics(
-            targets, preds,
-            sample_labels=results[lt].get("sample_labels"),
-            bin_labels=results[lt].get("bin_labels"),
-        )
-    
-    # Metrics to include in table
-    metrics = ['RMSE_micro', 'MAE_micro', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
-    
-    # Build table data
-    data = []
-    for lt in loss_types:
-        row = {'Model': get_loss_label(lt)}
-        for m in metrics:
-            row[m] = extended_metrics[lt][m]
-        data.append(row)
-    
-    df = pd.DataFrame(data)
-    
-    # Determine best values for each metric (lower is better except Correlation)
-    best_indices = {}  # col -> list of row indices with best value
-    for col in metrics:
-        if col == 'Correlation':
-            best_value = df[col].max()
-            best_indices[col] = df[df[col] == best_value].index.tolist()
-        else:
-            best_value = df[col].min()
-            best_indices[col] = df[df[col] == best_value].index.tolist()
-    
-    # Format numeric columns
-    display_df = df.copy()
-    for col in metrics:
-        display_df[col] = display_df[col].apply(lambda x: f'{x:.6f}')
-    
-    # Create figure
-    fig, ax = plt.subplots(figsize=(16, 2.5))
-    ax.axis('off')
-    
-    # Create table
-    table = ax.table(
-        cellText=display_df.astype(str).values.tolist(),
-        colLabels=list(display_df.columns),
-        cellLoc='center',
-        loc='center',
-        colColours=['#f0f0f0'] * len(display_df.columns)
-    )
-    
-    # Style table
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1.2, 1.8)
-    
-    # Header row: light gray bold
-    for i in range(len(display_df.columns)):
-        table[(0, i)].set_text_props(fontweight='bold')
-        table[(0, i)].set_facecolor('#d0d0d0')
-
-    # Color first column (Model) with each model's color
-    model_col_idx = list(display_df.columns).index('Model')
-    for row_idx, lt in enumerate(loss_types):
-        cell = table[(row_idx + 1, model_col_idx)]
-        hex_color = get_loss_color(lt)
-        cell.set_facecolor(hex_color)
-        cell.set_text_props(fontweight='bold', color='white')
-        # Prevent title overlap by adjusting cell height
-        cell.set_height(0.15)
-
-    # Best value: bold dark green text + light green background
-    for col_idx, col in enumerate(display_df.columns):
-        if col == 'Model':
-            continue
-        if col in best_indices:
-            # Highlight all rows that have the best value for this metric
-            for best_row_idx in best_indices[col]:
-                table[(best_row_idx + 1, col_idx)].set_facecolor('#d5f5e3')
-                table[(best_row_idx + 1, col_idx)].set_text_props(fontweight='bold', color='#1a7a40')
-
-    plt.title('Model Comparison Summary', fontweight='bold', fontsize=14, y=0.98)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "summary_table.png"), dpi=150, bbox_inches='tight')
-    plt.close()
-    log.info(f"  ✓ Saved: summary_table.png")
-    
-    # Also save as CSV
-    df.to_csv(os.path.join(output_dir, "model_comparison_results.csv"), index=False)
-    log.info(f"  ✓ Saved: model_comparison_results.csv")
-    
-    return df
-
 
 def create_all_visualizations(results: Dict[str, Any], output_dir: str):
     """Create all visualization plots."""
+    # Filter out architectures with errors
+    results = {arch: data for arch, data in results.items() if "error" not in data}
+    
+    if not results:
+        log.error("No successful results to visualize!")
+        return
+    
     os.makedirs(output_dir, exist_ok=True)
     
     log.info("\n" + "="*60)
@@ -1172,14 +1230,11 @@ def create_all_visualizations(results: Dict[str, Any], output_dir: str):
     log.info("8. Creating training progress comparison plot...")
     plot_training_progress_comparison(results, output_dir)
 
+    
     # 9. Summary table
     log.info("9. Creating summary table...")
     results_df = plot_summary_table(results, output_dir)
-
-    # 10. Latent vector comparison
-    log.info("10. Creating latent vector comparison...")
-    plot_latent_comparison(results, output_dir)
-
+    
     log.info(f"\n✅ All visualizations saved to: {output_dir}/")
     log.info("   - metrics_comparison.png")
     log.info("   - scatter_predicted_vs_actual.png")
@@ -1190,292 +1245,157 @@ def create_all_visualizations(results: Dict[str, Any], output_dir: str):
     log.info("   - relative_err_by_range.png")
     log.info("   - residual_distribution.png")
     log.info("   - zero_vs_nonzero_comparison.png")
-    log.info("   - training_progress.png")
     log.info("   - summary_table.png")
-    log.info("   - model_comparison_results.csv")
-    log.info("   - latent_comparison.png")
-
-
-def plot_latent_comparison(results: Dict[str, Any], output_dir: str) -> None:
-    """Compare the learned latent vectors between the taxonomy and BarcodeBERT models.
-
-    Produces a single figure with three panels:
-      1. Overlapping distributions (histogram + KDE) of latent values per model.
-      2. Distribution of per-bin differences (BarcodeBERT − Taxonomy).
-      3. Per-bin scatter: taxonomy latent vs BarcodeBERT latent, coloured by density.
-
-    If either model is missing a latent vector or the shapes differ, only the
-    distribution panels that are available are drawn.
-    """
-    set_style()
-
-    tax_lv = results.get("taxonomy", {}).get("latent_vector")
-    bb_lv  = results.get("barcodebert", {}).get("latent_vector")
-
-    if tax_lv is None and bb_lv is None:
-        log.warning("No latent vectors found in either model's results; skipping latent comparison.")
-        return
-
-    tax_flat = np.asarray(tax_lv).flatten() if tax_lv is not None else None
-    bb_flat  = np.asarray(bb_lv).flatten()  if bb_lv  is not None else None
-
-    shapes_match = (
-        tax_flat is not None
-        and bb_flat is not None
-        and tax_flat.shape == bb_flat.shape
-    )
-
-    # ── layout: up to 3 panels depending on availability ──────────────────────
-    n_panels = 1 + (1 if shapes_match else 0) + (1 if shapes_match else 0)  # 1 or 3
-    if tax_flat is not None and bb_flat is not None and not shapes_match:
-        n_panels = 2  # can still plot both distributions side-by-side
-
-    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 5))
-    if n_panels == 1:
-        axes = [axes]
-
-    tax_color = get_loss_color("taxonomy")
-    bb_color  = get_loss_color("barcodebert")
-    tax_label = get_loss_label("taxonomy")
-    bb_label  = get_loss_label("barcodebert")
-
-    panel = 0
-
-    # ── Panel 1: overlapping distributions ────────────────────────────────────
-    ax = axes[panel]; panel += 1
-    if tax_flat is not None:
-        sns.histplot(
-            tax_flat, bins=50, kde=True, stat="density",
-            color=tax_color, alpha=0.35, edgecolor="none", ax=ax, label=tax_label,
-        )
-    if bb_flat is not None:
-        sns.histplot(
-            bb_flat, bins=50, kde=True, stat="density",
-            color=bb_color, alpha=0.35, edgecolor="none", ax=ax, label=bb_label,
-        )
-    ax.set_xlabel("Latent value ($d_b$)", fontsize=11)
-    ax.set_ylabel("Density", fontsize=11)
-    ax.set_title("Latent Value Distributions", fontsize=13, fontweight="bold")
-    ax.legend(frameon=False, fontsize=10)
-    # Annotate means
-    for lv, color, label in [(tax_flat, tax_color, tax_label), (bb_flat, bb_color, bb_label)]:
-        if lv is not None:
-            ax.axvline(lv.mean(), color=color, linestyle="--", linewidth=1.5, alpha=0.8)
-    sns.despine(ax=ax)
-
-    if shapes_match:
-        diff = bb_flat - tax_flat
-
-        # ── Panel 2: difference distribution ──────────────────────────────────
-        ax = axes[panel]; panel += 1
-        sns.histplot(
-            diff, bins=50, kde=True, stat="density",
-            color="#4a90d9", alpha=0.7, edgecolor="none", ax=ax,
-        )
-        ax.axvline(0,          color="black", linestyle="--", linewidth=1.5, alpha=0.7, label="Zero")
-        ax.axvline(diff.mean(), color="#e74c3c", linestyle="-",  linewidth=1.5, alpha=0.9,
-                   label=f"Mean = {diff.mean():.4f}")
-        ax.set_xlabel(f"Latent difference ({bb_label} − {tax_label})", fontsize=11)
-        ax.set_ylabel("Density", fontsize=11)
-        ax.set_title("Per-BIN Latent Difference Distribution", fontsize=13, fontweight="bold")
-        n_pos = int((diff > 0).sum())
-        n_neg = int((diff < 0).sum())
-        ax.text(
-            0.97, 0.95,
-            f"std = {diff.std():.4f}\n"
-            f"pos: {n_pos} ({100*n_pos/len(diff):.1f}%)\n"
-            f"neg: {n_neg} ({100*n_neg/len(diff):.1f}%)",
-            transform=ax.transAxes, ha="right", va="top", fontsize=9,
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
-        )
-        ax.legend(frameon=False, fontsize=9)
-        sns.despine(ax=ax)
-
-        # ── Panel 3: per-bin scatter ───────────────────────────────────────────
-        ax = axes[panel]; panel += 1
-        try:
-            xy = np.vstack([tax_flat, bb_flat])
-            xy = xy + np.random.default_rng(0).normal(0, 1e-9, xy.shape)
-            density = gaussian_kde(xy)(xy)
-        except Exception:
-            density = np.ones(len(tax_flat))
-        idx_sort = density.argsort()
-        sc = ax.scatter(
-            tax_flat[idx_sort], bb_flat[idx_sort],
-            c=density[idx_sort], cmap="viridis", s=6, alpha=0.6, edgecolors="none",
-        )
-        # diagonal (perfect agreement)
-        vmin = min(tax_flat.min(), bb_flat.min())
-        vmax = max(tax_flat.max(), bb_flat.max())
-        ax.plot([vmin, vmax], [vmin, vmax], "r--", linewidth=1.5, alpha=0.7, label="y = x")
-        corr = float(np.corrcoef(tax_flat, bb_flat)[0, 1])
-        ax.set_xlabel(f"{tax_label} latent", fontsize=11)
-        ax.set_ylabel(f"{bb_label} latent", fontsize=11)
-        ax.set_title(f"Per-BIN Latent Scatter\n(Pearson r = {corr:.3f})", fontsize=13, fontweight="bold")
-        plt.colorbar(sc, ax=ax, label="Point density", fraction=0.046, pad=0.04)
-        ax.legend(frameon=False, fontsize=9)
-        sns.despine(ax=ax)
-
-    elif tax_flat is not None and bb_flat is not None and not shapes_match:
-        # shapes differ — just show both distributions in panel 2
-        ax = axes[panel]; panel += 1
-        log.warning(
-            f"Latent vectors have different lengths "
-            f"({len(tax_flat)} vs {len(bb_flat)}); skipping scatter and diff plots."
-        )
-        ax.text(
-            0.5, 0.5,
-            f"Shapes differ:\n{tax_label}: {tax_flat.shape}\n{bb_label}: {bb_flat.shape}",
-            ha="center", va="center", fontsize=11, transform=ax.transAxes,
-        )
-        ax.set_axis_off()
-
-    fig.suptitle(
-        "Latent Vector Comparison: Taxonomy vs BarcodeBERT Neighbours",
-        fontsize=14, fontweight="bold", y=1.02,
-    )
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "latent_comparison.png"), dpi=150, bbox_inches="tight")
-    plt.close()
-    log.info("  ✓ Saved: latent_comparison.png")
+    log.info("   - architecture_comparison_results.csv")
 
 
 def print_comparison(results: Dict[str, Any]):
     """Print comparison table to console."""
-    log.info("\n" + "="*80)
-    log.info("MODEL COMPARISON RESULTS")
-    log.info("="*80)
+    log.info("\n" + "="*100)
+    log.info("LOCATION EMBEDDING COMPARISON RESULTS")
+    log.info("="*100)
     
-    loss_types = list(results.keys())
+    # Filter out architectures with errors
+    arch_types = [arch for arch in results.keys() if "error" not in results[arch]]
+    
+    # Report skipped architectures
+    skipped = [arch for arch in results.keys() if "error" in results[arch]]
+    if skipped:
+        log.info("\nSkipped architectures (errors):")
+        for arch in skipped:
+            log.info(f"  - {get_arch_label(arch)}: {results[arch]['error']}")
+        log.info("")
+    
+    if not arch_types:
+        log.error("No successful results to visualize!")
+        return
+    
+    n_archs = len(arch_types)
     
     # Compute extended metrics
     extended_metrics = {}
-    for lt in loss_types:
-        preds = results[lt]["predictions"]
-        targets = results[lt]["targets"]
-        extended_metrics[lt] = compute_extended_metrics(
+    for arch in arch_types:
+        preds = results[arch]["predictions"]
+        targets = results[arch]["targets"]
+        extended_metrics[arch] = compute_extended_metrics(
             targets, preds,
-            sample_labels=results[lt].get("sample_labels"),
-            bin_labels=results[lt].get("bin_labels"),
+            sample_labels=results[arch].get("sample_labels"),
+            bin_labels=results[arch].get("bin_labels"),
         )
     
-    # Print comparison table
-    headers = ["Metric", get_loss_label(loss_types[0]), get_loss_label(loss_types[1]), "Winner"]
-    row_format = "{:<25} {:<18} {:<18} {:<15}"
-    
-    log.info(row_format.format(*headers))
-    log.info("-" * 76)
-    
-    metrics_to_compare = [
-        ("RMSE_micro", "RMSE_micro", False),
-        ("MAE_micro", "MAE_micro", False),
-        ("MAE_macro", "MAE_macro", False),
-        ("Absolute Relative Error", "Absolute Relative Error", False),
-        ("KL Divergence", "KL Divergence", False),
-        ("MAE (zeros)", "MAE (zeros)", False),
-        ("MAE (non-zeros)", "MAE (non-zeros)", False),
-        ("Correlation", "Correlation", True),
+    # Print table with all architectures
+    metrics_to_display = [
+        ("RMSE_micro", False),
+        ("MAE_micro", False),
+        ("Absolute Relative Error", False),
+        ("KL Divergence", False),
+        ("MAE (zeros)", False),
+        ("MAE (non-zeros)", False),
+        ("Correlation", True),
     ]
     
-    wins = {lt: 0 for lt in loss_types}
+    # Create header
+    col_width = 20
+    header = f"{'Metric':<{col_width}}"
+    for arch in arch_types:
+        header += f"{get_arch_label(arch):<{col_width}}"
+    header += f"{'Best':<{col_width}}"
     
-    for metric_name, metric_key, higher_better in metrics_to_compare:
-        val1 = extended_metrics[loss_types[0]][metric_key]
-        val2 = extended_metrics[loss_types[1]][metric_key]
+    log.info(header)
+    log.info("-" * len(header))
+    
+    # Track wins for each architecture
+    wins = {arch: 0 for arch in arch_types}
+    
+    # Print each metric
+    for metric_name, higher_better in metrics_to_display:
+        row = f"{metric_name:<{col_width}}"
+        values = [extended_metrics[arch][metric_name] for arch in arch_types]
         
+        # Determine best
         if higher_better:
-            winner = loss_types[0] if val1 > val2 else loss_types[1]
+            best_idx = values.index(max(values))
         else:
-            winner = loss_types[0] if val1 < val2 else loss_types[1]
+            best_idx = values.index(min(values))
         
-        wins[winner] += 1
+        best_arch = arch_types[best_idx]
+        wins[best_arch] += 1
         
-        log.info(row_format.format(
-            metric_name,
-            f"{val1:.6f}",
-            f"{val2:.6f}",
-            get_loss_label(winner)
-        ))
+        # Add values to row
+        for val in values:
+            row += f"{val:<{col_width}.6f}"
+        row += f"{get_arch_label(best_arch):<{col_width}}"
+        
+        log.info(row)
     
-    log.info("-" * 76)
-    log.info(f"\nOverall: {get_loss_label(loss_types[0])} wins {wins[loss_types[0]]}, "
-             f"{get_loss_label(loss_types[1])} wins {wins[loss_types[1]]}")
+    # Print summary
+    log.info("-" * len(header))
+    log.info("\nWin Summary:")
+    for arch in arch_types:
+        log.info(f"  {get_arch_label(arch)}: {wins[arch]} wins")
     
-    overall_winner = max(wins, key=lambda k: wins[k])
-    log.info(f"Recommended model: {get_loss_label(overall_winner)}")
+    overall_winner = max(wins, key=wins.get)
+    log.info(f"\n✓ Best overall: {get_arch_label(overall_winner)} ({wins[overall_winner]}/{len(metrics_to_display)} metrics)")
+    
+    # Print location embedder comparison vs baseline
+    if "baseline" in arch_types:
+        log.info("\n" + "="*100)
+        log.info("IMPROVEMENT OVER BASELINE")
+        log.info("="*100)
+        
+        baseline_metrics = extended_metrics["baseline"]
+        for arch in arch_types:
+            if arch == "baseline":
+                continue
+            
+            log.info(f"\n{get_arch_label(arch)}:")
+            for metric_name, higher_better in metrics_to_display:
+                baseline_val = baseline_metrics[metric_name]
+                arch_val = extended_metrics[arch][metric_name]
+                
+                if higher_better:
+                    improvement = ((arch_val - baseline_val) / abs(baseline_val)) * 100
+                    symbol = "↑" if improvement > 0 else "↓"
+                else:
+                    improvement = ((baseline_val - arch_val) / abs(baseline_val)) * 100
+                    symbol = "↓" if improvement < 0 else "↑"
+                
+                log.info(f"  {metric_name:<30}: {improvement:>6.2f}% {symbol}")
 
 
 def load_results(results_path: str) -> Dict[str, Any]:
-    """Load results from a single combined pickle file."""
+    """Load results from pickle file."""
     with open(results_path, 'rb') as f:
         return pickle.load(f)
 
 
-def load_two_results(
-    taxonomy_path: str,
-    barcodebert_path: str,
-) -> Dict[str, Any]:
-    """Load two separate per-model pickle files and merge into the combined format.
-
-    Each pkl is expected to be the dict returned by ``Trainer.run()``:
-    keys: predictions, targets, best_val_loss, train_losses, val_losses,
-          cycle_train_losses, cycle_val_losses, timeline_train_losses,
-          timeline_val_losses, latent_vector.
-    """
-    with open(taxonomy_path, 'rb') as f:
-        taxonomy_results = pickle.load(f)
-    with open(barcodebert_path, 'rb') as f:
-        barcodebert_results = pickle.load(f)
-    return {
-        "taxonomy": taxonomy_results,
-        "barcodebert": barcodebert_results,
-    }
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Visualize Taxonomy vs BarcodeBERT Comparison Results"
-    )
-    # Option A: two separate per-model pkl files (recommended)
-    parser.add_argument("--taxonomy_results", type=str, default="results/taxonomy_results.pkl",
-                        help="Path to taxonomy-model results pickle")
-    parser.add_argument("--barcodebert_results", type=str, default="results/barcodebert_results.pkl",
-                        help="Path to BarcodeBERT-model results pickle")
-    # Option B: single combined pkl (backward compat / manual assembly)
-    parser.add_argument("--results_path", type=str, default=None,
-                        help="Path to a combined results pickle (overrides --taxonomy_results "
-                             "and --barcodebert_results when provided)")
-    parser.add_argument("--output_dir", type=str, default="figures",
+    parser = argparse.ArgumentParser(description="Visualize Location Embedding Comparison Results")
+    parser.add_argument("--results_path", type=str, default="results/location_embeddings_comparison.pkl",
+                        help="Path to results pickle file")
+    parser.add_argument("--output_dir", type=str, default="figures", 
                         help="Output directory for plots")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     args = parser.parse_args()
-
+    
     # Setup logging
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
-
+    
+    # Load results
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    results_path = args.results_path
+    if not os.path.isabs(results_path):
+        results_path = os.path.join(script_dir, results_path)
+    output_dir = args.output_dir
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.join(script_dir, output_dir)
 
-    def _abs(p: str) -> str:
-        return p if os.path.isabs(p) else os.path.join(script_dir, p)
-
-    output_dir = _abs(args.output_dir)
-
-    if args.results_path is not None:
-        # Single combined pkl
-        results_path = _abs(args.results_path)
-        log.info(f"Loading combined results from {results_path}...")
-        results = load_results(results_path)
-    else:
-        # Two separate per-model pkls
-        t_path = _abs(args.taxonomy_results)
-        b_path = _abs(args.barcodebert_results)
-        log.info(f"Loading taxonomy results from   {t_path}")
-        log.info(f"Loading BarcodeBERT results from {b_path}")
-        results = load_two_results(t_path, b_path)
-
+    log.info(f"Loading results from {results_path}...")
+    results = load_results(results_path)
+    
     # Print comparison
     print_comparison(results)
-
+    
     # Create visualizations
     create_all_visualizations(results, output_dir)

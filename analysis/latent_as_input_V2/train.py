@@ -8,6 +8,7 @@ import logging as log
 from dataclasses import asdict
 import os
 
+import pickle
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -40,7 +41,16 @@ from config import Config, set_seed
 
 class Trainer:
     """
-    Orchestrates alternation between LatentSolver (Phase A) and MLP training (Phase B).
+    EM-style alternation trainer for the V2 (blend) model:
+        Phase A: Solve D (output scalar latent) analytically using CG/L-BFGS, given fixed MLP + Z.
+        Phase B: Train MLP + Z (input embedding) jointly via gradient descent, given fixed D.
+
+    This is a direct blend of:
+      - V1 (latent_as_input): Phase B is identical — MLP and Z are gradient-trained together.
+      - Baseline (src):       Phase A is identical — D is solved analytically each cycle.
+
+    The sole architectural difference from V1 is the +D[b] output term.
+    The sole architectural difference from baseline is the Z embedding concatenated to MLP input.
     """
     def __init__(
         self,
@@ -54,7 +64,7 @@ class Trainer:
         
         # Load data
         if data_dir is not None:
-            data, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir, config=self.cfg)
+            data, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir)
         else:
             if data_path is None:
                 raise ValueError("Either data_path or data_dir must be provided")
@@ -76,10 +86,11 @@ class Trainer:
         # Build model
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
+        self.input_dim = input_dim
         
         # Adjust MLP input dimension: original features + latent_dim
         mlp_input_dim = input_dim + self.cfg.latent_dim
-        mlp_model = MLPModel(mlp_input_dim, hidden_dims=[128, 64], dropout=self.cfg.dropout).to(self.device)
+        mlp_model = MLPModel(mlp_input_dim, hidden_dims=[64, 128, 64, 32], dropout=self.cfg.dropout).to(self.device)
         
         self.model = Model(
             mlp_model, 
@@ -90,26 +101,19 @@ class Trainer:
             device=self.device
         )
         
-        # Initialize optimizer for MLP (Phase B), scheduler, criterion
-        self.optimizer = torch.optim.AdamW(
-            self.model.mlp.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay
+        # Pre-compute H as a torch sparse tensor for smoothness regularization in train_epoch
+        H_coo = latent_solver.H.tocoo()
+        H_indices = torch.LongTensor(np.vstack([H_coo.row, H_coo.col]))
+        H_values = torch.FloatTensor(H_coo.data)
+        self.H_torch = torch.sparse_coo_tensor(
+            H_indices, H_values, size=H_coo.shape, device=self.device
         )
-        
-        # Separate optimizers for Z (embedding, input side) and D (scalar, output side).
-        # Staged Phase A: Z is optimised first so it develops before D can hijack gradients.
-        self.latent_z_optimizer = torch.optim.AdamW(
-            [self.model.latent_embedding.weight], lr=self.cfg.latent_lr
-        )
-        self.latent_d_optimizer = torch.optim.AdamW(
-            [self.model.latent_vec], lr=self.cfg.latent_scalar_lr
-        )
-        # Keep a unified reference used by external code (e.g. diagnostics)
-        self.latent_optimizer = torch.optim.AdamW(
-            [self.model.latent_embedding.weight, self.model.latent_vec], lr=self.cfg.latent_lr
-        )
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=3, verbose=False
-        )
+
+        # Phase B optimizer: MLP + Z jointly; D is excluded (solved analytically in Phase A)
+        self.optimizer = torch.optim.AdamW([
+            {"params": self.model.mlp.parameters(), "lr": cfg.lr, "weight_decay": cfg.weight_decay},
+            {"params": [self.model.latent_embedding.weight], "lr": cfg.latent_lr, "weight_decay": 0.0},
+        ])
         
         # Loss configuration
         self.loss_type = loss_type
@@ -144,18 +148,36 @@ class Trainer:
             shuffle=False,
             collate_fn=None,
         )
+
+        # LR scheduler — total steps = cycles × batches per epoch (one scheduler step per batch)
+        # Must be built after train_loader is defined so len(self.train_loader) is available.
+        total_steps = self.cfg.max_cycles * len(self.train_loader)
+        warmup_steps = max(1, int(0.1 * total_steps))
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
+        )
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=1e-6
+        )
+        self.scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps]
+        )
         
-        # Early stopping variables
-        self.best_val_loss = float('inf')
-        self.no_improve_epochs = 0
-        
-        # Loss tracking for visualization
-        self.train_losses = []  # List of (cycle, epoch, loss) tuples (MLP epochs only)
-        self.val_losses = []    # List of (cycle, epoch, loss) tuples (MLP epochs only)
-        self.cycle_train_losses = []  # End-of-cycle train losses
-        self.cycle_val_losses = []    # End-of-cycle val losses
-        self.timeline_train_losses = []  # List of (phase, cycle, step, loss) tuples
-        self.timeline_val_losses = []    # List of (phase, cycle, step, loss) tuples
+        # Loss tracking for visualization (EM-style, mirrors baseline src)
+        self.train_losses = []              # List of (cycle, epoch, loss) tuples (Phase B only)
+        self.val_losses = []                # List of (cycle, epoch, loss) tuples (Phase B only)
+        self.cycle_train_losses = []        # End-of-cycle train losses
+        self.cycle_val_losses = []          # End-of-cycle val losses
+        self.timeline_train_losses = []     # List of (phase, cycle, step, loss) tuples
+        self.timeline_val_losses = []       # List of (phase, cycle, step, loss) tuples
+
+        # Latent importance diagnostics for Z (populated during Phase B of each cycle)
+        # Each entry: dict with keys epoch, weight_norm_ratio, embedding_std,
+        #             ablation_delta (only every diag_ablation_interval epochs)
+        self.latent_diagnostics: List[Dict[str, Any]] = []
+
+        # D std per cycle (recorded at end of each Phase A solve)
+        self.d_stds_per_cycle: List[Tuple[int, float]] = []
         
         # Prepare save path
         root = os.path.dirname(os.path.abspath(__file__))
@@ -163,61 +185,160 @@ class Trainer:
         os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
 
 
-    def train_epoch(self) -> float:
-        """Train for one epoch. Returns average loss."""
+    def _train_batch(self, batch: Dict[str, torch.Tensor]) -> float:
+        """Perform one MLP+Z gradient step on a single batch. Returns batch CE loss (regularization excluded)."""
         self.model.train()
-        running_loss = 0.0
-        n_samples = 0
+        inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
 
-        for batch in self.train_loader:
-            inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
+        if self.loss_mode == "sample":
+            B, max_bins, n_feat = inputs.shape
+            inputs_flat = inputs.view(B * max_bins, n_feat)
+            bin_idx_flat = bin_idx.view(B * max_bins)
+            outputs_flat = self.model(inputs_flat, bin_idx_flat)
+            outputs = outputs_flat.view(B, max_bins)
+            outputs = outputs.masked_fill(mask == 0, float('-inf'))
+            loss = self.criterion(outputs, targets, mask)
+        else:
+            outputs = self.model(inputs, bin_idx)
+            loss = self.criterion(outputs, targets)
 
-            if self.loss_mode == "sample":
-                # Sample mode: inputs [B, max_bins, features], bin_idx [B, max_bins]
-                # Forward pass on all bins at once
-                B, max_bins, n_feat = inputs.shape
-                inputs_flat = inputs.view(B * max_bins, n_feat)  # [B*max_bins, features]
-                bin_idx_flat = bin_idx.view(B * max_bins)        # [B*max_bins]
-                
-                outputs_flat = self.model(inputs_flat, bin_idx_flat)  # [B*max_bins]
-                outputs = outputs_flat.view(B, max_bins)              # [B, max_bins]
-                
-                # Apply mask: set padded positions to large negative (will become ~0 after softmax)
-                outputs = outputs.masked_fill(mask == 0, float('-inf'))
-                
-                # Loss expects [B, max_bins] logits, [B, max_bins] target probs, and mask
-                loss = self.criterion(outputs, targets, mask)
-            else:
-                # Bin mode: standard forward pass
-                outputs = self.model(inputs, bin_idx)
-                loss = self.criterion(outputs, targets)
+        # Smoothness regularization on Z: λ * ||Z - HZ||^2 (D is fixed, solved analytically)
+        Z = self.model.latent_embedding.weight  # [n_bins, latent_dim]
+        HZ = torch.sparse.mm(self.H_torch, Z)   # [n_bins, latent_dim]
+        smooth_loss_z = self.cfg.latent_smooth_reg * torch.sum((Z - HZ) ** 2)
+        norm_loss_z = self.cfg.latent_norm_reg * torch.sum(Z ** 2)
 
-            self.optimizer.zero_grad()
-            loss.backward()
+        total_loss = loss + smooth_loss_z + norm_loss_z
 
-            if self.cfg.grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.mlp.parameters(), self.cfg.grad_clip)
+        self.optimizer.zero_grad()
+        total_loss.backward()
 
-            self.optimizer.step()
+        if self.cfg.grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(
+                list(self.model.mlp.parameters()) + [self.model.latent_embedding.weight],
+                self.cfg.grad_clip,
+            )
 
-            batch_size = targets.size(0)
-            running_loss += loss.item() * batch_size
-            n_samples += batch_size
+        self.optimizer.step()
+        return loss.item()
 
-        epoch_loss = running_loss / max(1, n_samples)
-        return epoch_loss
+    def solve_latent(self, prox_weight: float = 0.0) -> np.ndarray:
+        """Phase A: Solve for scalar output latent D analytically (CG/L-BFGS), MLP + Z fixed.
 
+        The 'intrinsic' vector passed to the solver is mlp([x, z_b]) — the MLP output
+        that already incorporates the current Z embedding, so D is solved as:
+            output = mlp([x, z_b]) + D[b]
+
+        This mirrors baseline src/train.py solve_latent() but the intrinsic now includes Z.
+        """
+        self.model.eval()
+
+        intrinsic_list: List[np.ndarray] = []
+        y_list: List[np.ndarray] = []
+        bin_list: List[np.ndarray] = []
+        sample_list: List[np.ndarray] = []
+
+        with torch.no_grad():
+            for batch in self.train_loader_bin_ordered:
+                x = batch["input"].to(self.device)
+                bin_idx_t = batch["bin_idx"].to(self.device)
+                y = batch["target"].cpu().numpy()
+                bin_idx = batch["bin_idx"].cpu().numpy()
+                sample_idx = batch["sample_idx"].cpu().numpy()
+
+                # Augment input with current Z embeddings (Z is fixed during Phase A)
+                z = self.model.latent_embedding(bin_idx_t)  # [N, latent_dim]
+                x_aug = torch.cat([x, z], dim=-1)           # [N, input_dim + latent_dim]
+                intrinsic = self.model.mlp(x_aug).detach().cpu().numpy().reshape(-1)
+
+                intrinsic_list.append(intrinsic)
+                y_list.append(y.reshape(-1))
+                bin_list.append(bin_idx.reshape(-1))
+                sample_list.append(sample_idx.reshape(-1))
+
+        intrinsic_vec = np.concatenate(intrinsic_list, axis=0)
+        y_vec = np.concatenate(y_list, axis=0)
+        bin_ids = np.concatenate(bin_list, axis=0).astype(np.int64)
+        sample_ids = np.concatenate(sample_list, axis=0).astype(np.int64)
+
+        x0_latent = self.model.latent_vec.detach().cpu().numpy()
+        latent_vec = self.model.latent_solver.solve(
+            y=y_vec,
+            intrinsic_vec=intrinsic_vec,
+            bin_ids=bin_ids,
+            sample_ids=sample_ids,
+            loss_type=self.loss_type,
+            x0=x0_latent,
+            prox_weight=prox_weight,
+            x_anchor=x0_latent,
+        )
+        self.model.set_latent_vec(latent_vec)
+        return latent_vec
+
+    # ------------------------------------------------------------------
+    # Diagnostic helpers
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _compute_latent_weight_ratio(self) -> float:
+        """
+        Compute the per-column weight activity ratio of latent Z vs feature inputs
+        in the MLP first layer.
+
+        Returns latent_col_mean_norm / feat_col_mean_norm, where:
+            feat_col_mean_norm  = ||W[:, :input_dim]||_F  / input_dim
+            latent_col_mean_norm= ||W[:, input_dim:]||_F  / latent_dim
+
+        A ratio < 1 means latent columns are weaker than feature columns on
+        average; approaching 0 signals the MLP is ignoring the latent input.
+        """
+        W = self.model.mlp.net[0].weight.data  # [hidden0, input_dim + latent_dim]
+        W_feat   = W[:, :self.input_dim]
+        W_latent = W[:, self.input_dim:]
+        feat_col_mean   = W_feat.norm(p='fro').item()   / self.input_dim
+        latent_col_mean = W_latent.norm(p='fro').item() / self.cfg.latent_dim
+        return latent_col_mean / (feat_col_mean + 1e-12)
+
+    @torch.no_grad()
+    def _compute_ablation_delta(self) -> float:
+        """
+        Compute the increase in validation loss when Z is zeroed (D is kept intact).
+        A small delta (≈ 0) means the MLP is not using the latent input Z at all.
+        """
+        # Save Z embeddings
+        saved = self.model.latent_embedding.weight.data.clone()
+        # Zero out Z only (D is untouched to isolate Z's contribution)
+        self.model.latent_embedding.weight.data.zero_()
+        loss_no_latent = self.validate(split="val")
+        # Restore
+        self.model.latent_embedding.weight.data.copy_(saved)
+        loss_with_latent = self.validate(split="val")
+        return loss_no_latent - loss_with_latent
+
+    def _collect_diagnostics(self, epoch: int, run_ablation: bool = False) -> Dict[str, Any]:
+        """Collect one snapshot of Z latent importance diagnostics (Phase B, per epoch)."""
+        diag: Dict[str, Any] = {
+            "epoch": epoch,
+            "weight_norm_ratio": self._compute_latent_weight_ratio(),
+            "embedding_std": float(self.model.latent_embedding.weight.data.std()),
+            "ablation_delta": None,
+        }
+        if run_ablation:
+            diag["ablation_delta"] = self._compute_ablation_delta()
+        return diag
+
+    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def validate(self, split: Literal["train", "val", "test"]) -> float:
         data_loader = (
-            self.val_loader if split == "val" else 
-            self.test_loader if split == "test" else 
+            self.val_loader if split == "val" else
+            self.test_loader if split == "test" else
             self.train_loader
         )
         if data_loader is None:
             raise ValueError(f"Unknown split {split}")
-        
+
         self.model.eval()
         running_loss = 0.0
         n_samples = 0
@@ -334,44 +455,6 @@ class Trainer:
             "mae_when_absent": float(np.mean(mae_when_absent)) if mae_when_absent else 0.0,
         }
 
-    def solve_latent(self) -> np.ndarray:
-        """
-        Staged Phase A: optimise Z first (latent-as-input embedding), then D (output scalar).
-
-        This prevents D from hijacking all gradient signal before Z has a chance to develop,
-        which was the primary reason V2 showed no improvement over the baseline:
-        Z was staying near-zero (std~0.009) while D alone captured the bin-level signal.
-
-        Returns:
-            Updated Z (latent_embedding) as numpy array [n_bins, latent_dim]
-        """
-        total_steps = self.cfg.latent_steps
-        z_steps = max(1, int(total_steps * self.cfg.latent_z_frac))
-        d_steps = max(1, total_steps - z_steps)
-
-        # Phase A-Z: update Z with D frozen
-        self.model.latent_solver.solve_gradient_based(
-            model=self.model,
-            data_loader=self.train_loader,
-            z_optimizer=self.latent_z_optimizer,
-            d_optimizer=None,                      # D frozen during Z phase
-            n_z_steps=z_steps,
-            n_d_steps=0,
-            loss_mode=self.loss_mode,
-        )
-
-        # Phase A-D: update D with Z frozen
-        latent_matrix = self.model.latent_solver.solve_gradient_based(
-            model=self.model,
-            data_loader=self.train_loader,
-            z_optimizer=None,                      # Z frozen during D phase
-            d_optimizer=self.latent_d_optimizer,
-            n_z_steps=0,
-            n_d_steps=d_steps,
-            loss_mode=self.loss_mode,
-        )
-        return latent_matrix
-
     @torch.no_grad()
     def get_predictions(self, split: Literal["train", "val", "test"] = "test") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Get predictions and targets for a given split.
@@ -466,149 +549,169 @@ class Trainer:
         )
 
     def run(self, use_wandb: bool = True) -> Dict[str, Any]:
-        """Run full alternation training."""
-        # initial stabilize training
-        log.debug("Initial stabilization training...")
-        best_val = float('inf')
-        for epoch in tqdm(range(self.cfg.epochs_init), desc="Init epochs", leave=False):
-            self.train_epoch()                              # optimize weights
-            train_loss = self.validate(split="train")      # eval-mode — consistent with latent phases
-            val_loss   = self.validate(split="val")
-            
-            # Track losses (cycle=-1 for initialization phase)
-            self.train_losses.append((-1, epoch, train_loss))
-            self.val_losses.append((-1, epoch, val_loss))
-            self.timeline_train_losses.append(("init", -1, epoch, train_loss))
-            self.timeline_val_losses.append(("init", -1, epoch, val_loss))
-            
-            if use_wandb and WANDB_AVAILABLE:
-                wandb.log({"epoch": epoch, "init_train_loss": train_loss, "init_val_loss": val_loss})
-                
-            # Early stopping check
-            stop, best_val = self.early_stop_and_save(val_loss, best_val, cycle=-1, epoch=epoch)
-            if stop:
-                break
-        
-        log.debug("\nStarting alternation cycles...")
-        # Reset counter so init early-stopping state doesn't bleed into alternation cycles
-        self.no_improve_epochs = 0
+        """Run EM-style per-batch alternation: for each batch, solve D then take one MLP+Z gradient step."""
+        warmup_cycles = max(1, int(self.cfg.latent_warmup_frac * self.cfg.max_cycles))
+        log.debug(f"Starting per-batch alternation training (D warms up over first {warmup_cycles} cycles)...")
+        best_val_loss = float('inf')
+
         for cycle in tqdm(range(self.cfg.max_cycles), desc="Cycles", leave=False):
-            # Phase A: solve for latent embeddings with fixed MLP
-            latent_matrix = self.solve_latent()  # [n_bins, latent_dim]
+            # Proximal weight ρ: decays from ρ₀ → 0 over warmup_cycles (damped EM).
+            alpha = min(1.0, cycle / warmup_cycles)
+            phase_tag = "latent_warmup" if alpha < 1.0 else "latent"
+            prox_weight = self.cfg.latent_prox_scale * self.cfg.latent_l2_reg * (1.0 - alpha)
 
-            latent_train_loss = self.validate(split="train")
-            latent_val_loss = self.validate(split="val")
-            self.timeline_train_losses.append(("latent", cycle, 0, latent_train_loss))
-            self.timeline_val_losses.append(("latent", cycle, 0, latent_val_loss))
+            # Per-batch alternation: solve D then take one MLP+Z gradient step
+            latent_vec = self.model.latent_vec.detach().cpu().numpy()  # fallback if loader is empty
+            for batch in self.train_loader:
+                latent_vec = self.solve_latent(prox_weight=prox_weight)
+                self._train_batch(batch)
+                self.scheduler.step()
 
-            # Phase B: train MLP with fixed latent embeddings
-            best_val = float('inf')
-            pbar = tqdm(range(self.cfg.epochs), desc=f"Cycle {cycle+1}", leave=False)
-            for epoch in pbar:
-                self.train_epoch()                             # optimize weights
-                val_loss   = self.validate(split="val")
-                train_loss = self.validate(split="train")     # eval-mode — consistent with latent phases
-                
-                # Track losses
-                self.train_losses.append((cycle, epoch, train_loss))
-                self.val_losses.append((cycle, epoch, val_loss))
-                self.timeline_train_losses.append(("mlp", cycle, epoch, train_loss))
-                self.timeline_val_losses.append(("mlp", cycle, epoch, val_loss))
+            d_std = float(np.std(latent_vec))
+            self.d_stds_per_cycle.append((cycle, d_std))
 
-                if use_wandb and WANDB_AVAILABLE:
-                    wandb.log({
-                        "cycle": cycle,
-                        "epoch": epoch,
-                        "train_loss_in_cycle": train_loss,
-                        "val_loss_in_cycle": val_loss
-                    })
-
-                # Step scheduler based on validation loss (once per epoch)
-                self.scheduler.step(val_loss)
-
-                if epoch % 10 == 0:
-                    pbar.set_postfix(
-                        {"train loss": f"{train_loss:.6f}", "val loss": f"{val_loss:.6f}"}
-                    )
-
-                # Early stopping on small improvements
-                stop, best_val = self.early_stop_and_save(val_loss, best_val, cycle=cycle, epoch=epoch)
-                if stop:
-                    break
-            
-            # Track end-of-cycle losses
+            # End-of-cycle evaluation
             train_loss = self.validate(split="train")
             val_loss = self.validate(split="val")
+
+            self.timeline_train_losses.append((phase_tag, cycle, 0, train_loss))
+            self.timeline_val_losses.append((phase_tag, cycle, 0, val_loss))
+            self.train_losses.append((cycle, 0, train_loss))
+            self.val_losses.append((cycle, 0, val_loss))
             self.cycle_train_losses.append((cycle, train_loss))
             self.cycle_val_losses.append((cycle, val_loss))
-            
+
+            # Z diagnostics (once per cycle)
+            run_ablation = (
+                self.cfg.diag_ablation_interval > 0
+                and cycle % self.cfg.diag_ablation_interval == 0
+            )
+            diag = self._collect_diagnostics(cycle, run_ablation=run_ablation)
+            self.latent_diagnostics.append(diag)
+
             if use_wandb and WANDB_AVAILABLE:
                 metrics = self.compute_metrics(split="val")
                 wandb.log({
                     "cycle": cycle,
                     "final_train_loss": train_loss,
                     "final_val_loss": val_loss,
+                    "latent_vec_std": d_std,
                     **{f"val_{k}": v for k, v in metrics.items()},
-                    "latent_mean": float(latent_matrix.mean()),
-                    "latent_std": float(latent_matrix.std()),
-                    "latent_min": float(latent_matrix.min()),
-                    "latent_max": float(latent_matrix.max()),
-                    "latent_norm": float(np.linalg.norm(latent_matrix)),
+                    "latent_weight_ratio": diag["weight_norm_ratio"],
+                    "latent_embedding_std": diag["embedding_std"],
+                    **({"ablation_delta": diag["ablation_delta"]}
+                       if diag["ablation_delta"] is not None else {}),
                 })
 
-            # Early stopping on no improvement after full cycle
-            stop, self.best_val_loss = self.early_stop_and_save(
-                val_loss, self.best_val_loss, cycle=cycle, epoch=-1
-            )
-            if stop:
-                break
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                self.model.save_model(self.save_path)
 
-            log.info(f"Cycle {cycle}: val_loss={val_loss:.6f}, train_loss={train_loss:.6f}")
-        
-        # Load best saved model before final evaluation (end-of-training weights may be worse)
+            log.info(
+                f"Cycle {cycle} (ρ={prox_weight:.4f}): val_loss={val_loss:.6f}, "
+                f"train_loss={train_loss:.6f}, D_std={d_std:.4f}"
+            )
+
+        # ----------------------------------------------------------------
+        # Final evaluation
+        # ----------------------------------------------------------------
         if os.path.exists(self.save_path):
             self.model.load_model(self.save_path)
             log.debug(f"Loaded best checkpoint from {self.save_path} for final evaluation")
 
-        # Plot training progress
         self._plot_training_progress()
-        
-        # Return results for external use
+        self._plot_latent_importance()
+
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
-        # Save the final latent embeddings and scalar vec for downstream analysis
-        latent_embeddings = self.model.get_latent()  # [n_bins, latent_dim]
-        latent_vec = self.model.latent_vec.detach().cpu().numpy()  # [n_bins]
+        latent_embeddings = self.model.get_latent()
+        latent_vec_final = self.model.latent_vec.detach().cpu().numpy()
         return {
-            "best_val_loss": self.best_val_loss,
+            "best_val_loss": best_val_loss,
             "predictions": predictions,
             "targets": targets,
             "sample_labels": sample_labels,
             "bin_labels": bin_labels,
             "latent_embeddings": latent_embeddings,
-            "latent_vec": latent_vec,
+            "latent_vec": latent_vec_final,
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "cycle_train_losses": self.cycle_train_losses,
             "cycle_val_losses": self.cycle_val_losses,
             "timeline_train_losses": self.timeline_train_losses,
             "timeline_val_losses": self.timeline_val_losses,
+            "latent_diagnostics": self.latent_diagnostics,
         }
 
+    def _plot_latent_importance(self) -> None:
+        """Plot Z latent importance diagnostics (collected in Phase B across all cycles)."""
+        if not self.latent_diagnostics:
+            return
+
+        epochs   = [d["epoch"]             for d in self.latent_diagnostics]
+        ratios   = [d["weight_norm_ratio"]  for d in self.latent_diagnostics]
+        emb_stds = [d["embedding_std"]      for d in self.latent_diagnostics]
+
+        # Ablation deltas (sparse — only recorded every diag_ablation_interval epochs)
+        ab_epochs  = [d["epoch"]          for d in self.latent_diagnostics if d["ablation_delta"] is not None]
+        ab_deltas  = [d["ablation_delta"] for d in self.latent_diagnostics if d["ablation_delta"] is not None]
+
+        n_plots = 3 if ab_epochs else 2
+        fig, axes = plt.subplots(1, n_plots, figsize=(6 * n_plots, 5))
+
+        # Panel 1: Weight norm ratio (Z vs features in MLP first layer)
+        ax = axes[0]
+        ax.plot(epochs, ratios, color='steelblue', linewidth=1.8)
+        ax.axhline(1.0, color='gray', linestyle='--', linewidth=1, alpha=0.6, label='ratio = 1 (equal activity)')
+        ax.set_xlabel('Phase-B epoch (cumulative)')
+        ax.set_ylabel('Latent Z / Feature column mean norm')
+        ax.set_title('MLP First-Layer: Latent Z Input Weight Activity\n(ratio < 1 → MLP underusing latent)')
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+        # Panel 2: Embedding Z std
+        ax = axes[1]
+        ax.plot(epochs, emb_stds, color='darkorange', linewidth=1.8)
+        ax.axhline(0.0, color='gray', linestyle='--', linewidth=1, alpha=0.6)
+        ax.set_xlabel('Phase-B epoch (cumulative)')
+        ax.set_ylabel('Std of Z embedding weights')
+        ax.set_title('Z Embedding Activity\n(≈ 0 → embedding collapsed)')
+        ax.grid(True, alpha=0.3)
+
+        # Panel 3 (optional): Z ablation delta
+        if ab_epochs:
+            ax = axes[2]
+            colors = ['green' if d >= 0 else 'crimson' for d in ab_deltas]
+            ax.bar(ab_epochs, ab_deltas, color=colors, alpha=0.75,
+                   width=max(1, ab_epochs[1]-ab_epochs[0]) * 0.8 if len(ab_epochs)>1 else 5)
+            ax.axhline(0.0, color='gray', linestyle='--', linewidth=1, alpha=0.6)
+            ax.set_xlabel('Phase-B epoch (cumulative)')
+            ax.set_ylabel('Val loss increase when Z zeroed')
+            ax.set_title('Z Ablation Delta\n(> 0 → Z is helping; ≈ 0 → Z ignored)')
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        root = os.path.dirname(os.path.abspath(__file__))
+        save_path = os.path.join(root, "figures", "latent_importance.png")
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        log.info(f"Latent importance plot saved to: {save_path}")
+        plt.close()
+
     def _plot_training_progress(self) -> None:
-        """Plot training and validation losses over time."""
+        """Plot training and validation losses over time (EM cycle view + timeline view)."""
         import matplotlib.pyplot as plt
-        
+
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-        
-        # Plot 1: Overall evolution (init + latent + mlp)
+
+        # Plot 1: Full timeline (init + Phase A markers + Phase B epochs)
         train_vals = [l for _, _, _, l in self.timeline_train_losses]
-        val_vals = [l for _, _, _, l in self.timeline_val_losses]
+        val_vals   = [l for _, _, _, l in self.timeline_val_losses]
         steps = list(range(len(train_vals)))
 
         ax1.plot(steps, train_vals, 'b-', alpha=0.7, linewidth=1.2, label='Train Loss')
-        ax1.plot(steps, val_vals, 'r-', alpha=0.7, linewidth=1.2, label='Val Loss')
+        ax1.plot(steps, val_vals,   'r-', alpha=0.7, linewidth=1.2, label='Val Loss')
 
-        # Mark latent phase starts for visual separation
+        # Mark Phase A (latent solve) steps with gray dashed lines
         latent_steps = [
             i for i, (phase, _, _, _) in enumerate(self.timeline_train_losses)
             if phase == "latent"
@@ -616,29 +719,26 @@ class Trainer:
         for boundary in latent_steps:
             ax1.axvline(x=boundary, color='gray', linestyle='--', alpha=0.25, linewidth=1)
 
-        ax1.set_xlabel('Training Step (Latent + MLP)')
+        ax1.set_xlabel('Training Step (Init + EM Cycles)')
         ax1.set_ylabel('Loss')
-        ax1.set_title('Training Progress: Overall Loss Evolution')
+        ax1.set_title('Training Progress: Full Timeline (Phase A markers = dashed)')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: End-of-cycle losses (summary view)
-        if len(self.cycle_train_losses) > 0:
-            cycle_nums = [c for c, l in self.cycle_train_losses]
+
+        # Plot 2: End-of-cycle losses
+        if self.cycle_train_losses:
+            cycle_nums  = [c for c, l in self.cycle_train_losses]
             cycle_train = [l for c, l in self.cycle_train_losses]
-            cycle_val = [l for c, l in self.cycle_val_losses]
-            
+            cycle_val   = [l for c, l in self.cycle_val_losses]
             ax2.plot(cycle_nums, cycle_train, 'bo-', linewidth=2, markersize=8, label='Train Loss', alpha=0.7)
-            ax2.plot(cycle_nums, cycle_val, 'ro-', linewidth=2, markersize=8, label='Val Loss', alpha=0.7)
+            ax2.plot(cycle_nums, cycle_val,   'ro-', linewidth=2, markersize=8, label='Val Loss',   alpha=0.7)
             ax2.set_xlabel('EM Cycle')
             ax2.set_ylabel('Loss')
-            ax2.set_title('Training Progress: End-of-Cycle Losses')
+            ax2.set_title('End-of-Cycle Losses')
             ax2.legend()
             ax2.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
-        # Save figure
         root = os.path.dirname(os.path.abspath(__file__))
         save_path = os.path.join(root, "figures", "training_progress.png")
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -658,24 +758,6 @@ class Trainer:
         if mask is not None:
             mask = mask.to(self.device)
         return inputs, targets, bin_idx, sample_idx, mask
-    
-    
-    def early_stop_and_save(
-        self, val_loss: float, best_val: float, cycle: int, epoch: int
-    ) -> Tuple[bool, float]:
-        """Check if early stopping criterion is met."""
-        if val_loss < best_val - 1e-4:
-            best_val = val_loss
-            if val_loss < self.best_val_loss - 1e-4:
-                self.model.save_model(self.save_path)
-            self.no_improve_epochs = 0
-            return False, best_val
-        else:
-            self.no_improve_epochs += 1
-            if self.cfg.patience is not None and self.no_improve_epochs >= self.cfg.patience:
-                log.info(f"Early stopping at cycle {cycle} epoch {epoch} due to no improvement in val loss.")
-                return True, best_val
-        return False, best_val
 
 
 if __name__ == "__main__":
@@ -688,6 +770,7 @@ if __name__ == "__main__":
     parser.add_argument("--loss_type", type=str, choices=["cross_entropy", "logistic"], 
                         default="cross_entropy", help="Type of loss function to use")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--no_wandb", action="store_true", help="Disable Weights & Biases logging")
     args = parser.parse_args()
     
     # Set some generic configurations
@@ -698,7 +781,7 @@ if __name__ == "__main__":
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
     # Initialize Weights & Biases (optional)
-    use_wandb = WANDB_AVAILABLE
+    use_wandb = WANDB_AVAILABLE and not args.no_wandb
     if not WANDB_AVAILABLE:
         log.warning("wandb is not installed; continuing without wandb logging")
     else:
@@ -720,8 +803,15 @@ if __name__ == "__main__":
     trainer = Trainer(cfg, data_path=data_path, data_dir=data_dir, loss_type=args.loss_type)
 
     log.debug(f"\n   Starting training...")
-    trainer.run(use_wandb=use_wandb)
-    
+    results = trainer.run(use_wandb=use_wandb)
+
+    # Save results to pickle for downstream visualization
+    os.makedirs(cfg.results_dir, exist_ok=True)
+    pkl_path = os.path.join(cfg.results_dir, f"results_{time.strftime('%Y-%m-%d_%H-%M')}.pkl")
+    with open(pkl_path, "wb") as fh:
+        pickle.dump(results, fh)
+    log.info(f"Results saved to: {pkl_path}")
+
     # Evaluate on test set
     log.debug(f"\n   Final evaluation...")
 

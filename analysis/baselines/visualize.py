@@ -4,8 +4,248 @@ import pandas as pd
 from typing import Dict
 from matplotlib.patches import Patch
 
-# ...existing code...
+#!/usr/bin/env python
+"""
+Visualization module for baseline model results.
+Creates clean, presentation-ready plots for non-technical audiences.
 
+Usage:
+    python visualize.py --data_path data/ecuador_training_data.csv --output_dir figures
+"""
+import os
+import argparse
+import warnings
+from typing import Dict, List, Tuple, Optional, Any
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+
+from preprocess import load_data
+from models import get_all_models, TwoStageModel, LatentMLPModel
+from evaluate import compute_metrics
+
+warnings.filterwarnings('ignore')
+
+# =============================================================================
+# Style Configuration
+# =============================================================================
+
+# Fixed color mapping for consistent colors across all plots
+MODEL_COLORS = {}
+MODEL_ORDER = []
+
+def get_model_colors(model_names: List[str], sort_by_mae: bool = True, 
+                     results_df: pd.DataFrame = None) -> Tuple[Dict[str, str], List[str]]:
+    """
+    Create consistent color mapping for models.
+    Mean and Zero baselines get grey colors and are placed at the bottom.
+    
+    Args:
+        model_names: List of model names
+        sort_by_mae: If True and results_df provided, sort by MAE_micro
+        results_df: DataFrame with results to determine ordering
+        
+    Returns:
+        Tuple of (color_dict, ordered_model_list)
+    """
+    global MODEL_COLORS, MODEL_ORDER
+    
+    # Baseline models to place at bottom with grey colors
+    baseline_names = ['mean', 'zero']
+    grey_colors = {
+        'mean': (0.65, 0.65, 0.65),  # Lighter grey
+        'zero': (0.45, 0.45, 0.45),  # Darker grey
+    }
+    
+    # Determine order by MAE
+    if sort_by_mae and results_df is not None and 'MAE_micro' in results_df.columns:
+        ordered_df = results_df.sort_values('MAE_micro', ascending=True)
+        all_models = ordered_df['Model'].tolist()
+    else:
+        all_models = sorted(model_names)
+    
+    # Separate baselines from other models
+    other_models = [m for m in all_models if m not in baseline_names]
+    baselines = [m for m in all_models if m in baseline_names]
+    
+    # Order: best models first, baselines at the end (will be reversed for bar chart so best is on top)
+    MODEL_ORDER = other_models + baselines
+    
+    # Create color palette for non-baseline models
+    palette = sns.color_palette("muted", n_colors=len(other_models))
+    MODEL_COLORS = {}
+    for i, name in enumerate(other_models):
+        MODEL_COLORS[name] = palette[i]
+    
+    # Assign grey colors to baselines
+    for name in baselines:
+        MODEL_COLORS[name] = grey_colors.get(name, (0.5, 0.5, 0.5))
+    
+    return MODEL_COLORS, MODEL_ORDER
+
+
+def get_color(model_name: str) -> tuple:
+    """Get the consistent color for a model."""
+    return MODEL_COLORS.get(model_name, (0.5, 0.5, 0.5))
+
+
+def set_style():
+    """Set clean, minimal style for all plots."""
+    sns.set_theme(style="white", font_scale=1.1)
+    plt.rcParams.update({
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'axes.grid': False,
+        'figure.facecolor': 'white',
+        'axes.facecolor': 'white',
+        'savefig.facecolor': 'white',
+        'savefig.dpi': 150,
+        'savefig.bbox': 'tight',
+        'font.family': 'sans-serif',
+    })
+
+# =============================================================================
+# Extended Metrics with KL Divergence
+# =============================================================================
+
+def compute_extended_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sample_labels: Optional[np.ndarray] = None,
+    bin_labels: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Compute comprehensive metrics with proper per-sample handling.
+    
+    If sample_labels is provided (new flat format), computes per-sample KL
+    divergence and macro MAE/RMSE rigorously. Otherwise falls back to
+    micro (global) metrics.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    rmse_macro: Optional[float] = None
+    mae_macro: Optional[float] = None
+    kl_divergence_macro: Optional[float] = None
+    eps = 1e-10
+
+    # ==================== Path A: flat 1D + sample_labels ====================
+    if y_true.ndim == 1 and sample_labels is not None:
+        sl = np.asarray(sample_labels)
+        valid = np.isfinite(y_true) & np.isfinite(y_pred)
+        yt_v = y_true[valid]
+        yp_v = np.clip(y_pred[valid], 0, 1)
+        sl_v = sl[valid]
+
+        rmse_per, mae_per, kl_per = [], [], []
+        for s in np.unique(sl_v):
+            mask = sl_v == s
+            rt = yt_v[mask]
+            rp = yp_v[mask]
+            if len(rt) == 0:
+                continue
+            rmse_per.append(float(np.sqrt(np.mean((rt - rp) ** 2))))
+            mae_per.append(float(np.mean(np.abs(rt - rp))))
+            # KL per sample: each sample's values form a probability distribution
+            rt_norm = (rt + eps) / (rt + eps).sum()
+            rp_norm = (rp + eps) / (rp + eps).sum()
+            kl_per.append(float(np.sum(rt_norm * np.log(rt_norm / rp_norm))))
+
+        if rmse_per:
+            rmse_macro = float(np.mean(rmse_per))
+            mae_macro = float(np.mean(mae_per))
+            kl_divergence_macro = float(np.mean(kl_per))
+
+    # ==================== Path B: 2D NaN-padded (backward compat) ====================
+    elif y_true.ndim == 2:
+        rmse_per, mae_per, kl_per = [], [], []
+        for i in range(y_true.shape[0]):
+            row_t = y_true[i]
+            row_p = y_pred[i]
+            valid_i = np.isfinite(row_t) & np.isfinite(row_p)
+            if valid_i.sum() == 0:
+                continue
+            rt = row_t[valid_i]
+            rp = np.clip(row_p[valid_i], 0, 1)
+            rmse_per.append(float(np.sqrt(np.mean((rt - rp) ** 2))))
+            mae_per.append(float(np.mean(np.abs(rt - rp))))
+            rt_norm = (rt + eps) / (rt + eps).sum()
+            rp_norm = (rp + eps) / (rp + eps).sum()
+            kl_per.append(float(np.sum(rt_norm * np.log(rt_norm / rp_norm))))
+        if rmse_per:
+            rmse_macro = float(np.mean(rmse_per))
+            mae_macro = float(np.mean(mae_per))
+            kl_divergence_macro = float(np.mean(kl_per))
+
+    # ===================== Flatten for micro (global) metrics =====================
+    y_true_flat = y_true.flatten()
+    y_pred_flat = y_pred.flatten()
+    valid = np.isfinite(y_true_flat) & np.isfinite(y_pred_flat)
+    y_true = y_true_flat[valid]
+    y_pred = np.clip(y_pred_flat[valid], 0, 1)
+
+    mse = np.mean((y_true - y_pred) ** 2)
+    rmse_micro = float(np.sqrt(mse))
+    mae_micro = float(np.mean(np.abs(y_true - y_pred)))
+
+    # Fall back to micro when no grouping available
+    if rmse_macro is None:
+        rmse_macro = rmse_micro
+        mae_macro = mae_micro
+
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    r2 = float(1 - ss_res / (ss_tot + 1e-10))
+
+    zero_mask = y_true == 0
+    nonzero_mask = y_true > 0
+
+    if zero_mask.sum() > 0:
+        rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2)))
+        mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask])))
+    else:
+        rmse_zeros = mae_zeros = 0.0
+
+    if nonzero_mask.sum() > 0:
+        rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2)))
+        mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask])))
+    else:
+        rmse_nonzeros = mae_nonzeros = 0.0
+
+    # Micro KL — fallback when no sample grouping available
+    y_tn = (y_true + eps) / (y_true + eps).sum()
+    y_pn = (y_pred + eps) / (y_pred + eps).sum()
+    kl_divergence_micro = float(np.sum(y_tn * np.log(y_tn / y_pn)))
+    kl_divergence = kl_divergence_macro if kl_divergence_macro is not None else kl_divergence_micro
+
+    corr = np.corrcoef(y_true, y_pred)[0, 1]
+    correlation = 0.0 if np.isnan(corr) else float(corr)
+
+    nz = y_true != 0
+    rel_error = np.zeros_like(y_true, dtype=float)
+    rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
+    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else 0.0
+
+    return {
+        'RMSE_micro': rmse_micro,
+        'RMSE_macro': rmse_macro,
+        'MAE_micro': mae_micro,
+        'MAE_macro': mae_macro,
+        'Absolute Relative Error': absolute_relative_error,
+        'R²': r2,
+        'RMSE (zeros)': rmse_zeros,
+        'MAE (zeros)': mae_zeros,
+        'RMSE (non-zeros)': rmse_nonzeros,
+        'MAE (non-zeros)': mae_nonzeros,
+        'KL Divergence': kl_divergence,
+        'Correlation': correlation,
+        'n_zeros': int(zero_mask.sum()),
+        'n_nonzeros': int(nonzero_mask.sum()),
+    }
+    
+    
 def _contrasting_text_color(hex_color: str) -> str:
     """Return 'white' or 'black' depending on the luminance of hex_color."""
     import matplotlib.colors as mc
@@ -101,191 +341,7 @@ def plot_rae_by_range(
     plt.savefig(os.path.join(output_dir, 'relative_err_by_range.png'), dpi=150)
     plt.close()
     print(f"Saved: relative_err_by_range.png")
-#!/usr/bin/env python
-"""
-Visualization module for baseline model results.
-Creates clean, presentation-ready plots for non-technical audiences.
 
-Usage:
-    python visualize.py --data_path data/ecuador_training_data.csv --output_dir figures
-"""
-import os
-import argparse
-import warnings
-from typing import Dict, List, Tuple, Optional
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy import stats
-
-from preprocess import load_data
-from models import get_all_models, TwoStageModel, LatentMLPModel
-from evaluate import compute_metrics
-
-warnings.filterwarnings('ignore')
-
-# =============================================================================
-# Style Configuration
-# =============================================================================
-
-# Fixed color mapping for consistent colors across all plots
-MODEL_COLORS = {}
-MODEL_ORDER = []
-
-def get_model_colors(model_names: List[str], sort_by_rmse: bool = True, 
-                     results_df: pd.DataFrame = None) -> Tuple[Dict[str, str], List[str]]:
-    """
-    Create consistent color mapping for models.
-    Mean and Zero baselines get grey colors and are placed at the bottom.
-    
-    Args:
-        model_names: List of model names
-        sort_by_rmse: If True and results_df provided, sort by RMSE
-        results_df: DataFrame with results to determine ordering
-        
-    Returns:
-        Tuple of (color_dict, ordered_model_list)
-    """
-    global MODEL_COLORS, MODEL_ORDER
-    
-    # Baseline models to place at bottom with grey colors
-    baseline_names = ['mean', 'zero']
-    grey_colors = {
-        'mean': (0.65, 0.65, 0.65),  # Lighter grey
-        'zero': (0.45, 0.45, 0.45),  # Darker grey
-    }
-    
-    # Determine order by RMSE
-    if sort_by_rmse and results_df is not None and 'RMSE' in results_df.columns:
-        ordered_df = results_df.sort_values('RMSE', ascending=True)
-        all_models = ordered_df['Model'].tolist()
-    else:
-        all_models = sorted(model_names)
-    
-    # Separate baselines from other models
-    other_models = [m for m in all_models if m not in baseline_names]
-    baselines = [m for m in all_models if m in baseline_names]
-    
-    # Order: best models first, baselines at the end (will be reversed for bar chart so best is on top)
-    MODEL_ORDER = other_models + baselines
-    
-    # Create color palette for non-baseline models
-    palette = sns.color_palette("muted", n_colors=len(other_models))
-    MODEL_COLORS = {}
-    for i, name in enumerate(other_models):
-        MODEL_COLORS[name] = palette[i]
-    
-    # Assign grey colors to baselines
-    for name in baselines:
-        MODEL_COLORS[name] = grey_colors.get(name, (0.5, 0.5, 0.5))
-    
-    return MODEL_COLORS, MODEL_ORDER
-
-
-def get_color(model_name: str) -> tuple:
-    """Get the consistent color for a model."""
-    return MODEL_COLORS.get(model_name, (0.5, 0.5, 0.5))
-
-
-def set_style():
-    """Set clean, minimal style for all plots."""
-    sns.set_theme(style="white", font_scale=1.1)
-    plt.rcParams.update({
-        'axes.spines.top': False,
-        'axes.spines.right': False,
-        'axes.grid': False,
-        'figure.facecolor': 'white',
-        'axes.facecolor': 'white',
-        'savefig.facecolor': 'white',
-        'savefig.dpi': 150,
-        'savefig.bbox': 'tight',
-        'font.family': 'sans-serif',
-    })
-
-
-# =============================================================================
-# Extended Metrics with KL Divergence
-# =============================================================================
-
-def compute_extended_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """
-    Compute comprehensive metrics including KL divergence.
-    
-    Returns metrics split by zero/non-zero values.
-    """
-    y_true = np.asarray(y_true)
-    y_pred = np.clip(np.asarray(y_pred), 0, 1)
-
-    # Overall metrics
-    mse = np.mean((y_true - y_pred) ** 2)
-    rmse = np.sqrt(mse)
-    mae = np.mean(np.abs(y_true - y_pred))
-
-    # Absolute Relative Error: |prediction - ground_truth| / ground_truth
-    rel_error = np.zeros_like(y_true, dtype=float)
-    nonzero_mask = y_true != 0
-    rel_error[nonzero_mask] = np.abs(y_pred[nonzero_mask] - y_true[nonzero_mask]) / np.abs(y_true[nonzero_mask])
-    absolute_relative_error = np.mean(rel_error[nonzero_mask]) if np.any(nonzero_mask) else 0.0
-
-    # R² score
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    r2 = 1 - (ss_res / (ss_tot + 1e-10))
-
-    # Split by zero/non-zero
-    zero_mask = y_true == 0
-    nonzero_mask2 = y_true > 0
-
-    # Zero metrics
-    if zero_mask.sum() > 0:
-        rmse_zeros = np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))
-        mae_zeros = np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))
-    else:
-        rmse_zeros = 0.0
-        mae_zeros = 0.0
-
-    # Non-zero metrics
-    if nonzero_mask2.sum() > 0:
-        rmse_nonzeros = np.sqrt(np.mean((y_true[nonzero_mask2] - y_pred[nonzero_mask2]) ** 2))
-        mae_nonzeros = np.mean(np.abs(y_true[nonzero_mask2] - y_pred[nonzero_mask2]))
-    else:
-        rmse_nonzeros = 0.0
-        mae_nonzeros = 0.0
-
-    # KL Divergence (with smoothing to avoid log(0))
-    epsilon = 1e-10
-    y_true_smooth = y_true + epsilon
-    y_pred_smooth = y_pred + epsilon
-    y_true_norm = y_true_smooth / y_true_smooth.sum()
-    y_pred_norm = y_pred_smooth / y_pred_smooth.sum()
-    kl_divergence = np.sum(y_true_norm * np.log(y_true_norm / y_pred_norm))
-
-    # Correlation
-    correlation = np.corrcoef(y_true, y_pred)[0, 1]
-    if np.isnan(correlation):
-        correlation = 0.0
-
-    return {
-        'RMSE': rmse,
-        'MAE': mae,
-        'Absolute Relative Error': absolute_relative_error,
-        'R²': r2,
-        'RMSE (zeros)': rmse_zeros,
-        'MAE (zeros)': mae_zeros,
-        'RMSE (non-zeros)': rmse_nonzeros,
-        'MAE (non-zeros)': mae_nonzeros,
-        'KL Divergence': kl_divergence,
-        'Correlation': correlation,
-        'n_zeros': int(zero_mask.sum()),
-        'n_nonzeros': int(nonzero_mask2.sum()),
-    }
-
-
-# =============================================================================
-# Visualization Functions
-# =============================================================================
 
 def plot_metric_comparison(
     results_df: pd.DataFrame,
@@ -325,7 +381,7 @@ def plot_all_metrics_comparison(
 ) -> None:
     """Create bar plots for all key metrics. Best model on top."""
     if metrics is None:
-        metrics = ['RMSE', 'MAE', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
+        metrics = ['RMSE_micro', 'MAE_micro', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
 
     # Filter to available metrics
     metrics = [m for m in metrics if m in results_df.columns]
@@ -834,7 +890,7 @@ def plot_summary_table(
 ) -> None:
     """Create a clean summary table as an image with best values in bold."""
     if metrics is None:
-        metrics = ['RMSE', 'MAE', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
+        metrics = ['RMSE_micro', 'MAE_micro', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
 
     # Filter columns
     display_cols = ['Model'] + [m for m in metrics if m in results_df.columns]
@@ -973,7 +1029,7 @@ def plot_top_models_overview(
 ) -> None:
     """Create an overview radar chart for top models."""
     # Select metrics for radar - Correlation is higher-is-better, others are lower-is-better
-    metrics = ['RMSE', 'MAE', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
+    metrics = ['RMSE_micro', 'MAE_micro', 'Absolute Relative Error', 'KL Divergence', 'MAE (zeros)', 'MAE (non-zeros)', 'Correlation']
     metrics = [m for m in metrics if m in results_df.columns]
     
     # Get top models using consistent ordering, replace decision_tree with log_transform if present in top_n
@@ -1260,15 +1316,15 @@ def run_visualization(
     results_df = pd.DataFrame(all_results)
     
     # Reorder columns
-    col_order = ['Model', 'RMSE', 'MAE', 'R²', 'RMSE (zeros)', 'MAE (zeros)',
+    col_order = ['Model', 'RMSE_micro', 'MAE_micro', 'R²', 'RMSE (zeros)', 'MAE (zeros)',
                  'RMSE (non-zeros)', 'MAE (non-zeros)', 'KL Divergence',
                  'Correlation']
     col_order = [c for c in col_order if c in results_df.columns]
     results_df = results_df[col_order + [c for c in results_df.columns if c not in col_order]]
     
-    # Initialize consistent color mapping (sorted by RMSE)
-    get_model_colors(results_df['Model'].tolist(), sort_by_rmse=True, results_df=results_df)
-    print(f"\nModel order (by RMSE): {MODEL_ORDER[:5]}... ({len(MODEL_ORDER)} total)")
+    # Initialize consistent color mapping (sorted by MAE)
+    get_model_colors(results_df['Model'].tolist(), sort_by_mae=True, results_df=results_df)
+    print(f"\nModel order (by MAE): {MODEL_ORDER[:5]}... ({len(MODEL_ORDER)} total)")
     
     print("\n" + "="*60)
     print("CREATING VISUALIZATIONS")
@@ -1325,8 +1381,8 @@ def run_visualization(
     print("\n" + "="*60)
     print("SUMMARY")
     print("="*60)
-    print(f"\nTop 5 models by RMSE:")
-    top5 = results_df.nsmallest(5, 'RMSE')[['Model', 'RMSE', 'MAE', 'Correlation', 'KL Divergence']]
+    print(f"\nTop 5 models by MAE:")
+    top5 = results_df.nsmallest(5, 'MAE_micro')[['Model', 'RMSE_micro', 'MAE_micro', 'Correlation', 'KL Divergence']]
     print(top5.to_string(index=False))
     
     print(f"\n✅ All visualizations saved to: {output_dir}/")

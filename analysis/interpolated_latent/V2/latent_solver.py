@@ -17,12 +17,14 @@ class LatentSolver:
     Build sparse matrices and solve the latent vector optimization.
 
     Scalar mode (embed_dim == 1):
-        min_D (1/2) sum_{s,b} (y_{s,b} - m(s,b) - d_b)^2 + (r/2)||D||^2 + (λ/2)||(I-H_smooth)D||^2
+        min_D (1/2) sum_{s,b} (y_{s,b} - m(s,b) - (H_smooth D)_b)^2 + (r/2)||D||^2 + (λ/2)||(I-H_smooth)D||^2
+        The interpolated latent (H_smooth @ D)[bin] is used instead of the raw D[bin].
         Solution via linear system + CG (logistic) or L-BFGS (cross-entropy).
 
     Vector mode (embed_dim > 1):
         min_H BCE(y, ŷ) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
-        where ŷ = sigmoid(w^T (m(x) ⊙ g(h[bin])))
+        where ŷ = sigmoid(w^T (m(x) ⊙ g((H_smooth H)[bin])))
+        The interpolated latent (H_smooth @ H)[bin] is used instead of the raw H[bin].
         Solution via L-BFGS.
 
     Where:
@@ -52,8 +54,9 @@ class LatentSolver:
         self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None  # (I - H_smooth)
 
         # scalar-mode precomputed matrices (embed_dim == 1 only)
-        self.A: Optional[sparse.csc_matrix] = None   # precomputed LHS matrix
-        self.S: Optional[sparse.csc_matrix] = None   # (I - H_smooth)^T (I - H_smooth)
+        self.A: Optional[sparse.csc_matrix] = None    # precomputed LHS (V@H_smooth)^T(V@H_smooth) + reg
+        self.S: Optional[sparse.csc_matrix] = None    # (I - H_smooth)^T (I - H_smooth)
+        self.VH: Optional[sparse.csr_matrix] = None   # V @ H_smooth, used for RHS in CG solve
 
     def build_V_and_H(
         self, 
@@ -113,11 +116,14 @@ class LatentSolver:
         self.I_minus_H_smooth = sparse.csr_matrix(I_minus_H_smooth)
 
         if self.embed_dim == 1:
-            # Step 3 (scalar only): Precompute A = V^T V + r*I + λ*(I - H_smooth)^T (I - H_smooth)
-            VtV = (V.T @ V).tocsc()
+            # Step 3 (scalar only): Precompute A = (VH)^T(VH) + r*I + λ*(I-H_smooth)^T(I-H_smooth)
+            # VH = V @ H_smooth so that the data-fidelity term uses the interpolated latent (H D)[b].
+            VH = (V @ H_smooth).tocsr()
+            self.VH = VH
+            VHtVH = (VH.T @ VH).tocsc()
             smoothness_term = (I_minus_H_smooth.T @ I_minus_H_smooth).tocsc()
             l2_term = I.tocsc()
-            self.A = VtV + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
+            self.A = VHtVH + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
             self.S = smoothness_term
         
         log.info(f"Latent solver: V={V.shape}, H_smooth={H_smooth.shape}, embed_dim={self.embed_dim}, "
@@ -196,8 +202,11 @@ class LatentSolver:
 
     def _solve_logistic(self, y: np.ndarray, intrinsic_vec: np.ndarray, x0: Optional[np.ndarray] = None, prox_weight: float = 0.0, x_anchor: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Scalar logistic/sigmoid latent solve via linear system + CG:
-            (V^T V + rI + λ(I-H_smooth)^T(I-H_smooth)) D = V^T (logit(y) - m)
+        Scalar logistic/sigmoid latent solve via linear system + CG.
+        Uses interpolated latent (H_smooth @ D)[bin] matching the forward pass.
+
+        System: ((VH)^T(VH) + rI + λ(I-H_smooth)^T(I-H_smooth)) D = (VH)^T (logit(y) - m)
+        where VH = V @ H_smooth.
 
         With proximal regularization (ρ > 0):
             System becomes (A + ρI) D = b + ρ * (anchor / latent_lr),
@@ -220,21 +229,23 @@ class LatentSolver:
             log.debug(f"Present-only: {present_mask.sum()}/{len(y)} obs ({100*present_mask.mean():.1f}%)")
             
             # Recompute A matrix with filtered V
-            VtV = (V_filtered.T @ V_filtered).tocsc()
+            # Recompute A matrix with filtered VH = V_filtered @ H_smooth
+            VH_filtered = (V_filtered @ self.H_smooth).tocsr()
+            VHtVH = (VH_filtered.T @ VH_filtered).tocsc()
             I = sparse.identity(self.n_bins, format="csr")
             I_minus_H_smooth = self.I_minus_H_smooth
             smoothness_term = (I_minus_H_smooth.T @ I_minus_H_smooth).tocsc()
             l2_term = I.tocsc()
-            A_filtered = VtV + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
-            
+            A_filtered = VHtVH + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
+
             y_use = y_filtered
             intrinsic_use = intrinsic_filtered
-            V_use = V_filtered
+            VH_use = VH_filtered
             A_use = A_filtered
         else:
             y_use = y
             intrinsic_use = intrinsic_vec
-            V_use = self.V
+            VH_use = self.VH
             A_use = self.A
 
         # Clip y to avoid log(0) and convert to logits
@@ -246,7 +257,8 @@ class LatentSolver:
         residual = y_logit - intrinsic_use
         
         # Compute b = V^T residual
-        b = V_use.T.dot(residual)
+        # Compute b = (VH)^T residual  (interpolated RHS matching the new LHS)
+        b = VH_use.T.dot(residual)
 
         # Solve A D = b using conjugate gradient
         if x0 is None:
@@ -297,11 +309,12 @@ class LatentSolver:
     ) -> np.ndarray:
         """
         Cross-entropy latent solve (softmax over bins within each sample) with L-BFGS.
+        Uses interpolated latent (H_smooth @ D)[bin] matching the forward pass.
 
         We minimize:
-            sum_s CE(y_s, softmax(m_s + D_bins)) + (r/2)||D||^2 + (λ/2)|| (I-H)D ||^2
+            sum_s CE(y_s, softmax(m_s + (H_smooth D)_bins)) + (r/2)||D||^2 + (λ/2)||(I-H)D||^2
 
-        This matches the model's cross-entropy training mode.
+        Gradient chain rule: dL_data/dD = H_smooth^T @ (dL_data / d(H_smooth D))
         """
         if self.I_minus_H_smooth is None or self.H_smooth is None:
             raise RuntimeError("Matrices not built; call build_V_and_H first")
@@ -344,14 +357,19 @@ class LatentSolver:
         # Proximal anchor in parameter space (no latent_lr scaling for L-BFGS solvers)
         x_anchor_flat = np.asarray(x_anchor, dtype=np.float64).reshape(-1) if (prox_weight > 0 and x_anchor is not None) else None
 
+        H_smooth = self.H_smooth  # captured for closure
+
         def fun_and_jac(D_flat: np.ndarray) -> tuple[float, np.ndarray]:
             D_flat = D_flat.astype(np.float64, copy=False)
 
-            # z_i = m_i + d_{bin(i)} in the sorted-by-sample order
-            z = m_s + D_flat[b_s]
+            # Interpolate: D_interp = H_smooth @ D  (matches forward pass)
+            D_interp = H_smooth.dot(D_flat)
 
-            # Gradient accumulator in observation space, then scatter-add into bins
-            grad_bins = np.zeros(self.n_bins, dtype=np.float64)
+            # z_i = m_i + (H_smooth D)_{bin(i)}
+            z = m_s + D_interp[b_s]
+
+            # Accumulate dL_data/d(D_interp) per bin; chain-ruled to D below
+            grad_D_interp = np.zeros(self.n_bins, dtype=np.float64)
             loss = 0.0
 
             for st, en in zip(starts, ends):
@@ -371,9 +389,12 @@ class LatentSolver:
 
                 # grad wrt z is (p - y)
                 g_z = (p - y_seg)
-                np.add.at(grad_bins, b_s[st:en], g_z)
+                np.add.at(grad_D_interp, b_s[st:en], g_z)
 
-            # Regularization
+            # Chain rule: dL_data/dD = H_smooth^T @ (dL_data/d(H_smooth D))
+            grad_bins = H_smooth.T.dot(grad_D_interp)
+
+            # Regularization (on D directly, not on the interpolated latent)
             if r > 0:
                 loss += 0.5 * r * float(D_flat @ D_flat)
                 grad_bins += r * D_flat
@@ -438,9 +459,11 @@ class LatentSolver:
     ) -> np.ndarray:
         """
         Vector logistic/sigmoid latent solve via L-BFGS with multiplicative gating.
+        Uses interpolated latent (H_smooth @ H)[bin] matching the forward pass.
 
-        Model: ŷ_i = sigmoid(w^T (m_i ⊙ g(h[bin_i])))
+        Model: ŷ_i = sigmoid(w^T (m_i ⊙ g((H_smooth H)[bin_i])))
         Objective: BCE(y, ŷ) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
+        Gradient chain rule: dL_data/dH = H_smooth^T @ (dL_data / d(H_smooth H))
         """
         if self.V is None or self.H_smooth is None or self.I_minus_H_smooth is None:
             raise RuntimeError("Matrices not built; call build_V_and_H first")
@@ -478,15 +501,18 @@ class LatentSolver:
                 raise ValueError(f"x0 has shape {x0_use.shape}, expected ({self.n_bins}, {self.embed_dim})")
 
         I_minus_H_smooth = self.I_minus_H_smooth  # local var for closure type safety
+        H_smooth = self.H_smooth  # captured for closure
         x_anchor_mat = np.asarray(x_anchor, dtype=np.float64).reshape(self.n_bins, self.embed_dim) if (prox_weight > 0 and x_anchor is not None) else None
 
         def fun_and_jac(H_flat):
             H_flat = H_flat.astype(np.float64, copy=False)
             H = H_flat.reshape(self.n_bins, self.embed_dim)
 
-            h_obs = H[bin_ids_use]  # (N_obs, d)
-            m_tilde = intrinsic_use * self.gating.gate_np(h_obs)   # (N_obs, d)
-            logits = m_tilde @ final_weights                        # (N_obs,)
+            # Interpolate: H_interp = H_smooth @ H  (matches forward pass)
+            H_interp = H_smooth.dot(H)                                        # (n_bins, d)
+            h_obs = H_interp[bin_ids_use]                                     # (N_obs, d)
+            m_tilde = intrinsic_use * self.gating.gate_np(h_obs)              # (N_obs, d)
+            logits = m_tilde @ final_weights                                   # (N_obs,)
 
             logits_stable = np.clip(logits, -20, 20)
             p = 1.0 / (1.0 + np.exp(-logits_stable))
@@ -497,8 +523,11 @@ class LatentSolver:
             grad_m_tilde = np.outer(grad_logits, final_weights)               # (N_obs, d)
             grad_h_obs = intrinsic_use * grad_m_tilde * self.gating.gate_grad_np(h_obs)  # (N_obs, d)
 
-            grad_H = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
-            np.add.at(grad_H, bin_ids_use, grad_h_obs)
+            # Accumulate dL_data/d(H_interp) then chain-rule back to H
+            grad_H_interp = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
+            np.add.at(grad_H_interp, bin_ids_use, grad_h_obs)
+            # Chain rule: dL_data/dH = H_smooth^T @ (dL_data/d(H_interp))
+            grad_H = H_smooth.T.dot(grad_H_interp)
 
             if r > 0:
                 loss += 0.5 * r * float(np.sum(H ** 2))
@@ -548,9 +577,11 @@ class LatentSolver:
     ) -> np.ndarray:
         """
         Vector cross-entropy latent solve (softmax over bins within each sample) via L-BFGS.
+        Uses interpolated latent (H_smooth @ H)[bin] matching the forward pass.
 
-        Model: p_i = softmax(w^T (m_i ⊙ g(h[bin_i])))_within_sample
+        Model: p_i = softmax(w^T (m_i ⊙ g((H_smooth H)[bin_i])))_within_sample
         Objective: CE(y, p) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
+        Gradient chain rule: dL_data/dH = H_smooth^T @ (dL_data / d(H_smooth H))
         """
         if self.I_minus_H_smooth is None or self.H_smooth is None:
             raise RuntimeError("Matrices not built; call build_V_and_H first")
@@ -591,17 +622,20 @@ class LatentSolver:
                 raise ValueError(f"x0 has shape {x0_use.shape}, expected ({self.n_bins}, {self.embed_dim})")
 
         I_minus_H_smooth = self.I_minus_H_smooth  # local var for closure type safety
+        H_smooth = self.H_smooth  # captured for closure
         x_anchor_mat = np.asarray(x_anchor, dtype=np.float64).reshape(self.n_bins, self.embed_dim) if (prox_weight > 0 and x_anchor is not None) else None
 
         def fun_and_jac(H_flat):
             H_flat = H_flat.astype(np.float64, copy=False)
             H = H_flat.reshape(self.n_bins, self.embed_dim)
 
-            h_obs = H[b_s]  # (N_obs, d)
-            m_tilde = m_s * self.gating.gate_np(h_obs)  # (N_obs, d)
-            logits = m_tilde @ final_weights             # (N_obs,)
+            # Interpolate: H_interp = H_smooth @ H  (matches forward pass)
+            H_interp = H_smooth.dot(H)                            # (n_bins, d)
+            h_obs = H_interp[b_s]                                 # (N_obs, d)
+            m_tilde = m_s * self.gating.gate_np(h_obs)            # (N_obs, d)
+            logits = m_tilde @ final_weights                       # (N_obs,)
 
-            grad_H = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
+            grad_H_interp = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
             loss = 0.0
 
             for st, en in zip(starts, ends):
@@ -622,7 +656,10 @@ class LatentSolver:
                 grad_logits_seg = p - y_seg
                 grad_m_tilde_seg = np.outer(grad_logits_seg, final_weights)             # (seg, d)
                 grad_h_obs_seg = m_seg * grad_m_tilde_seg * self.gating.gate_grad_np(h_obs_seg)  # (seg, d)
-                np.add.at(grad_H, b_seg, grad_h_obs_seg)
+                np.add.at(grad_H_interp, b_seg, grad_h_obs_seg)
+
+            # Chain rule: dL_data/dH = H_smooth^T @ (dL_data/d(H_interp))
+            grad_H = H_smooth.T.dot(grad_H_interp)
 
             if r > 0:
                 loss += 0.5 * r * float(np.sum(H ** 2))

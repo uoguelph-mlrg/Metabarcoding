@@ -48,7 +48,9 @@ import os
 import pickle
 import logging as log
 from typing import Dict, Any, List, Optional, Tuple
+from unittest import result
 
+from httpx import get
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -56,29 +58,29 @@ import matplotlib.colors as mc
 import seaborn as sns
 from scipy.stats import gaussian_kde
 from matplotlib.colors import Normalize
-from matplotlib.patches import Patch
-
+from matplotlib.patches import Patch, Rectangle
+from matplotlib.lines import Line2D
 
 # ============================================================================
 # Default color palette (used as fallback for unknown keys)
 # ============================================================================
 
-_DEFAULT_PALETTE = [
-    "#2ecc71", "#e74c3c", "#3498db", "#e67e22", "#9b59b6",
-    "#1abc9c", "#f39c12", "#95a5a6", "#34495e", "#16a085",
-    "#27ae60", "#d35400", "#c0392b", "#8e44ad", "#2980b9",
-]
-
+def _default_colors(labels: Dict[str, str]) -> Dict[str, str]:
+    """Generate a default color mapping for *n* models, using *labels* if available."""
+    palette = np.concatenate([["#95a5a6"], sns.color_palette("tab10").as_hex(), np.column_stack([
+        sns.color_palette("pastel").as_hex(), sns.color_palette("dark").as_hex()
+    ]).flatten()])
+    keys = list(labels.keys())
+    return {k: palette[i % len(palette)] for i, k in enumerate(keys)}
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
-def get_color(key: str, colors: Optional[Dict[str, str]] = None) -> str:
+def get_color(key: str, colors: Optional[Dict[str, str]]) -> str:
     """Return a hex color for *key*, falling back to the default palette."""
     if colors and key in colors:
         return colors[key]
-    return _DEFAULT_PALETTE[hash(key) % len(_DEFAULT_PALETTE)]
 
 
 def get_label(key: str, labels: Optional[Dict[str, str]] = None) -> str:
@@ -91,7 +93,7 @@ def get_label(key: str, labels: Optional[Dict[str, str]] = None) -> str:
 def _contrasting_text_color(hex_color: str) -> str:
     """Return 'white' or 'black' for a hex background color."""
     r, g, b = mc.to_rgb(hex_color)
-    return "white" if (0.2126 * r + 0.7152 * g + 0.0722 * b) < 0.45 else "black"
+    return "white" if (0.2126 * r + 0.7152 * g + 0.0722 * b) < 0.85 else "black"
 
 
 def _ci_tuple_to_errorbar(mean_val: float, ci_tuple) -> List[float]:
@@ -112,11 +114,11 @@ def _scatter_grid(n: int) -> Tuple[int, int]:
     return n_rows, n_cols
 
 
-def _colorbar_axes(fig: plt.Figure, n_rows: int) -> List[float]:
+def _colorbar_axes(n_rows: int) -> tuple[float, float, float, float]:
     """Return [left, bottom, width, height] for a right-side colorbar."""
     if n_rows == 1:
-        return [0.94, 0.15, 0.02, 0.70]
-    return [0.95, 0.10, 0.015, 0.80]
+        return (0.94, 0.15, 0.02, 0.70)
+    return (0.95, 0.10, 0.015, 0.80)
 
 
 # ============================================================================
@@ -179,100 +181,93 @@ def compute_extended_metrics(
     pickles that still carry 2-D NaN-padded arrays, the 2-D path is preserved.
 
     Args:
-        y_true:        Ground-truth relative abundances — shape (N,) or
-                       (n_samples, max_bins) for old-style pickles.
-        y_pred:        Predicted values — same shape as y_true.
-        sample_labels: (N,) string array identifying which sample each entry
-                       belongs to.  When provided, per-sample macro metrics
-                       (RMSE_macro, MAE_macro, KL Divergence) are computed
-                       via groupby then averaged — the only rigorous way to
-                       measure distributional error.
-        bin_labels:    (N,) string array of BIN URIs.  Not used in scalar
-                       summary metrics but passed through for callers that
-                       want per-BIN breakdown via ``groupby(bin_labels)``.
+        y_true:         Ground-truth relative abundances — shape (N,) or
+                        (n_samples, max_bins) for old-style pickles.
+        y_pred:         Predicted values — same shape as y_true.
+        sample_labels:  (N,) string array identifying which sample each entry
+                        belongs to.  When provided, per-sample macro metrics
+                        (RMSE_macro, MAE_macro, KL Divergence) are computed
+                        via groupby then averaged — the only rigorous way to
+                        measure distributional error.
+        bin_labels:     (N,) string array of BIN URIs.  Not used in scalar
+                        summary metrics but passed through for callers that
+                        want per-BIN breakdown via ``groupby(bin_labels)``.
     """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
+    valid = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[valid]
+    y_pred = np.clip(y_pred[valid], 0, 1)
 
-    rmse_macro: Optional[float] = None
-    mae_macro: Optional[float] = None
-    kl_divergence_macro: Optional[float] = None
+    rmse_macro: Optional[float] = np.nan
+    mae_macro: Optional[float] = np.nan
+    kl_divergence: Optional[float] = np.nan
     eps = 1e-10
 
     # ------------------------------------------------------------------
-    # Path A: flat 1-D arrays with sample_labels (rigorous per-sample metrics)
+    # Per sample metrics (macro-averaged)
     # ------------------------------------------------------------------
-    if y_true.ndim == 1 and sample_labels is not None:
-        sl = np.asarray(sample_labels)
-        valid = np.isfinite(y_true) & np.isfinite(y_pred)
-        yt_v = y_true[valid]
-        yp_v = np.clip(y_pred[valid], 0, 1)
-        sl_v = sl[valid]
+    if sample_labels is not None:
+        sample_labels = np.asarray(sample_labels)
+        sample_labels_v = sample_labels[valid]
 
         rmse_per, mae_per, kl_per = [], [], []
-        for s in np.unique(sl_v):
-            mask = sl_v == s
-            rt = yt_v[mask]
-            rp = yp_v[mask]
-            if len(rt) == 0:
+        for s in np.unique(sample_labels_v):
+            mask = sample_labels_v == s
+            true_s = y_true[mask]
+            pred_s = y_pred[mask]
+            if len(true_s) == 0:
                 continue
-            rmse_per.append(float(np.sqrt(np.mean((rt - rp) ** 2))))
-            mae_per.append(float(np.mean(np.abs(rt - rp))))
+            rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
+            mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
             # KL per sample: each sample's values form a probability distribution
-            rt_norm = (rt + eps) / (rt + eps).sum()
-            rp_norm = (rp + eps) / (rp + eps).sum()
-            kl_per.append(float(np.sum(rt_norm * np.log(rt_norm / rp_norm))))
+            true_s_norm = (true_s + eps) / (true_s + eps).sum()
+            pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
+            kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
 
         if rmse_per:
             rmse_macro = float(np.mean(rmse_per))
             mae_macro = float(np.mean(mae_per))
-            kl_divergence_macro = float(np.mean(kl_per))
-
-    # ------------------------------------------------------------------
-    # Path B: 2-D NaN-padded arrays (backward compat with old result files)
-    # ------------------------------------------------------------------
+            kl_divergence = float(np.mean(kl_per))
+    
     elif y_true.ndim == 2:
         rmse_per, mae_per, kl_per = [], [], []
         for i in range(y_true.shape[0]):
-            row_t = y_true[i]
-            row_p = y_pred[i]
-            valid_i = np.isfinite(row_t) & np.isfinite(row_p)
+            row_true = y_true[i]
+            row_pred = y_pred[i]
+            valid_i = np.isfinite(row_true) & np.isfinite(row_pred)
             if valid_i.sum() == 0:
                 continue
-            rt = row_t[valid_i]
-            rp = np.clip(row_p[valid_i], 0, 1)
-            rmse_per.append(float(np.sqrt(np.mean((rt - rp) ** 2))))
-            mae_per.append(float(np.mean(np.abs(rt - rp))))
-            rt_norm = (rt + eps) / (rt + eps).sum()
-            rp_norm = (rp + eps) / (rp + eps).sum()
-            kl_per.append(float(np.sum(rt_norm * np.log(rt_norm / rp_norm))))
+            row_true = row_true[valid_i]
+            row_pred = np.clip(row_pred[valid_i], 0, 1)
+            rmse_per.append(float(np.sqrt(np.mean((row_true - row_pred) ** 2))))
+            mae_per.append(float(np.mean(np.abs(row_true - row_pred))))
+            row_true_norm = (row_true + eps) / (row_true + eps).sum()
+            row_pred_norm = (row_pred + eps) / (row_pred + eps).sum()
+            kl_per.append(float(np.sum(row_true_norm * np.log(row_true_norm / row_pred_norm))))
         if rmse_per:
             rmse_macro = float(np.mean(rmse_per))
             mae_macro = float(np.mean(mae_per))
-            kl_divergence_macro = float(np.mean(kl_per))
-
+            kl_divergence = float(np.mean(kl_per))
+    
     # ------------------------------------------------------------------
-    # Flatten for micro (global) metrics
+    # Overall micro-averaged metrics (treating all entries as a single vector)
     # ------------------------------------------------------------------
-    y_true_flat = y_true.flatten()
-    y_pred_flat = y_pred.flatten()
-    valid = np.isfinite(y_true_flat) & np.isfinite(y_pred_flat)
-    y_true = y_true_flat[valid]
-    y_pred = np.clip(y_pred_flat[valid], 0, 1)
 
     mse = np.mean((y_true - y_pred) ** 2)
     rmse_micro = float(np.sqrt(mse))
     mae_micro = float(np.mean(np.abs(y_true - y_pred)))
 
-    # Fall back to micro when no grouping info was available
-    if rmse_macro is None:
-        rmse_macro = rmse_micro
-        mae_macro = mae_micro
-
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
     r2 = float(1 - ss_res / (ss_tot + 1e-10))
+    
+    # Log-transform metrics to better capture performance on low-abundance bins
+    y_true_log = np.log(y_true + 1)
+    y_pred_log = np.log(y_pred + 1)
+    r2_log = float(1 - np.sum((y_true_log - y_pred_log) ** 2) / (np.sum((y_true_log - np.mean(y_true_log)) ** 2) + 1e-10))
 
+    # Compute metrics for zero and non-zero abundance bins
     zero_mask = y_true == 0
     nonzero_mask = y_true > 0
 
@@ -280,37 +275,31 @@ def compute_extended_metrics(
         rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2)))
         mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask])))
     else:
-        rmse_zeros = mae_zeros = 0.0
+        rmse_zeros = mae_zeros = np.nan
 
     if nonzero_mask.sum() > 0:
         rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2)))
         mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask])))
     else:
-        rmse_nonzeros = mae_nonzeros = 0.0
-
-    # Micro KL — fallback when no sample grouping is available
-    y_tn = (y_true + eps) / (y_true + eps).sum()
-    y_pn = (y_pred + eps) / (y_pred + eps).sum()
-    kl_divergence_micro = float(np.sum(y_tn * np.log(y_tn / y_pn)))
-
-    # Prefer per-sample (macro) KL when available
-    kl_divergence = kl_divergence_macro if kl_divergence_macro is not None else kl_divergence_micro
-
+        rmse_nonzeros = mae_nonzeros = np.nan
+        
+    # Pearson correlation between true and predicted values
     corr = np.corrcoef(y_true, y_pred)[0, 1]
     correlation = 0.0 if np.isnan(corr) else float(corr)
 
     nz = y_true != 0
     rel_error = np.zeros_like(y_true, dtype=float)
     rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
-    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else 0.0
+    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else np.nan
 
     return {
-        "RMSE_micro": rmse_micro,
-        "RMSE_macro": rmse_macro,
-        "MAE_micro": mae_micro,
-        "MAE_macro": mae_macro,
+        "RMSE (micro)": rmse_micro,
+        "RMSE (macro)": rmse_macro,
+        "MAE (micro)": mae_micro,
+        "MAE (macro)": mae_macro,
         "Absolute Relative Error": absolute_relative_error,
         "R²": r2,
+        "R² (log + 1)": r2_log,
         "RMSE (zeros)": rmse_zeros,
         "MAE (zeros)": mae_zeros,
         "RMSE (non-zeros)": rmse_nonzeros,
@@ -335,69 +324,81 @@ def plot_metrics_comparison(
 ) -> None:
     """Bar plots of key metrics, one bar per model, with 95 % bootstrap CIs."""
     set_style()
-    keys = list(results.keys())
+    models = list(results.keys())
 
-    ext = {k: compute_extended_metrics(
-               results[k]["targets"], results[k]["predictions"],
-               sample_labels=results[k].get("sample_labels"),
-               bin_labels=results[k].get("bin_labels"),
-           )
-           for k in keys}
+    ext = {
+        model: compute_extended_metrics(
+            results[model]["targets"], 
+            results[model]["predictions"],
+            sample_labels=results[model].get("sample_labels"), 
+            bin_labels=results[model].get("bin_labels"),
+        ) for model in models
+    }
 
     metrics_to_plot = [
-        "RMSE_micro", "MAE_micro", "Absolute Relative Error",
-        "KL Divergence", "MAE (zeros)", "MAE (non-zeros)", "Correlation",
+        "MAE (macro)", "MAE (micro)", "Absolute Relative Error", "KL Divergence", 
+        "MAE (zeros)", "MAE (non-zeros)", "R²", "R² (log + 1)"
     ]
     n_metrics = len(metrics_to_plot)
 
     # Compute bootstrap CIs
     cis: Dict[str, Dict[str, Any]] = {}
-    for k in keys:
-        y_true = results[k]["targets"].flatten()
-        y_pred = results[k]["predictions"].flatten()
-        vm = np.isfinite(y_true) & np.isfinite(y_pred)
-        y_true, y_pred = y_true[vm], np.clip(y_pred[vm], 0, 1)
+    for model in models:
+        y_true = results[model]["targets"]
+        y_pred = results[model]["predictions"]
+        sample_labels = results[model].get("sample_labels")
+        valid = np.isfinite(y_true) & np.isfinite(y_pred)
+        y_true, y_pred = y_true[valid], np.clip(y_pred[valid], 0, 1)
         if len(y_true) < 2:
-            cis[k] = {m: None for m in metrics_to_plot}
+            cis[model] = {m: None for m in metrics_to_plot}
             continue
-        abs_err = np.abs(y_true - y_pred)
+        
+        # Get macro metrics for CI computation
+        mae_per_s, kl_div_per_s = [], []
+        for s in np.unique(sample_labels[valid]) if sample_labels is not None else [0]:
+            mask = sample_labels[valid] == s if sample_labels is not None else np.arange(len(y_true))
+            true_s = y_true[mask]
+            pred_s = y_pred[mask]
+            if len(true_s) == 0:
+                continue
+            mae_per_s.append(float(np.mean(np.abs(true_s - pred_s))))
+            kl_div_per_s.append(float(np.sum((true_s + 1e-10) * np.log((true_s + 1e-10) / (pred_s + 1e-10)))))
+        mae_per_s, kl_div_per_s = np.array(mae_per_s), np.array(kl_div_per_s)
+        
+        # Get masks for zero vs non-zero true values (used for subgroup CI computation)
         nz = y_true != 0
         zero_m = y_true == 0
         nonzero_m = y_true > 0
-        rel_err = np.zeros_like(y_true)
-        rel_err[nz] = abs_err[nz] / np.abs(y_true[nz])
-
-        sq_err = (y_true - y_pred) ** 2
-        rmse_ci = tuple(np.sqrt(v) for v in compute_95ci_bootstrap(sq_err))
-        cis[k] = {
-            "RMSE_micro": rmse_ci,
-            "MAE_micro": compute_95ci_bootstrap(abs_err),
-            "Absolute Relative Error": (
-                compute_95ci_bootstrap(rel_err[nz]) if nz.sum() > 1 else (0.0, 0.0)
-            ),
-            "KL Divergence": None,
-            "MAE (zeros)": (
-                compute_95ci_bootstrap(abs_err[zero_m]) if zero_m.sum() > 1 else (0.0, 0.0)
-            ),
-            "MAE (non-zeros)": (
-                compute_95ci_bootstrap(abs_err[nonzero_m]) if nonzero_m.sum() > 1 else (0.0, 0.0)
-            ),
-            "Correlation": None,
+        
+        # Get micro metrics for CI computation
+        abs_err = np.abs(y_true - y_pred)
+        
+        cis[model] = {
+            'MAE (macro)': compute_95ci_bootstrap(mae_per_s),
+            "MAE (micro)": compute_95ci_bootstrap(abs_err),
+            "Absolute Relative Error": compute_95ci_bootstrap(abs_err[nz] / np.abs(y_true[nz])),
+            "KL Divergence": compute_95ci_bootstrap(kl_div_per_s),
+            "MAE (zeros)": compute_95ci_bootstrap(abs_err[zero_m]),
+            "MAE (non-zeros)": compute_95ci_bootstrap(abs_err[nonzero_m]),
+            "R²": None,
+            "R² (log + 1)": None,
         }
+        
+    n_cols_max = np.clip(np.floor(50 / (len(models) + 2)), 1, None)  # avoid division by zero
+    n_rows = np.ceil(n_metrics / n_cols_max).astype(int)
+    n_cols = np.ceil(n_metrics / n_rows).astype(int)
 
-    n_cols = min(4, n_metrics)
-    n_rows = math.ceil(n_metrics / n_cols)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows))
     axes = np.array(axes).flatten() if n_metrics > 1 else [axes]
 
     for idx, metric in enumerate(metrics_to_plot):
         ax = axes[idx]
-        values = [ext[k][metric] for k in keys]
-        ci_info = [cis[k].get(metric) for k in keys]
-        bar_colors = [get_color(k, colors) for k in keys]
-        x_pos = np.arange(len(keys))
+        values = [ext[model][metric] for model in models]
+        ci_info = [cis[model].get(metric) for model in models]
+        bar_colors = [get_color(model, colors) for model in models]
+        x_pos = np.arange(len(models))
 
-        if metric in ("KL Divergence", "Correlation") or all(c is None for c in ci_info):
+        if all(c is None for c in ci_info):
             yerr = None
         else:
             ci_lower = [c[0] if isinstance(c, tuple) else 0.0 for c in ci_info]
@@ -416,7 +417,7 @@ def plot_metrics_comparison(
         ax.set_ylim(0, max(values) * 1.25 if max(values) > 0 else 1)
         ax.set_xticks(x_pos)
         ax.set_xticklabels(
-            [get_label(k, labels) for k in keys], rotation=45, ha="right", fontsize=9
+            [get_label(model, labels) for model in models], rotation=45, ha="right", fontsize=9
         )
         sns.despine(ax=ax)
 
@@ -437,13 +438,12 @@ def plot_metrics_comparison(
 def plot_scatter_actual_vs_predicted(
     results: Dict[str, Any],
     output_dir: str,
-    colors: Optional[Dict[str, str]] = None,
     labels: Optional[Dict[str, str]] = None,
 ) -> None:
     """Scatter plots (actual vs predicted) with density colouring, one panel per model."""
     set_style()
-    keys = list(results.keys())
-    n = len(keys)
+    models = list(results.keys())
+    n = len(models)
     n_rows, n_cols = _scatter_grid(n)
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
@@ -453,9 +453,9 @@ def plot_scatter_actual_vs_predicted(
     scatter_data = []
     global_max_target = global_max_pred = 0.0
 
-    for k in keys:
-        preds = results[k]["predictions"].flatten()
-        targets = results[k]["targets"].flatten()
+    for model in models:
+        preds = results[model]["predictions"].flatten()
+        targets = results[model]["targets"].flatten()
         vm = np.isfinite(preds) & np.isfinite(targets)
         preds, targets = preds[vm], targets[vm]
         global_max_target = max(global_max_target, float(targets.max()))
@@ -464,16 +464,16 @@ def plot_scatter_actual_vs_predicted(
             xy = np.vstack([preds, targets]) + np.random.normal(0, 1e-8, (2, len(preds)))
             density = gaussian_kde(xy)(xy)
         except Exception as e:
-            log.warning(f"Could not compute density for {k}: {e}")
+            log.warning(f"Could not compute density for {model}: {e}")
             density = np.ones(len(preds))
         all_densities.extend(density)
-        scatter_data.append((k, preds, targets, density))
+        scatter_data.append((model, preds, targets, density))
 
     norm = Normalize(vmin=min(all_densities), vmax=max(all_densities))
     sc = None
     axis_max = max(global_max_target, global_max_pred)
 
-    for idx, (k, preds, targets, density) in enumerate(scatter_data):
+    for idx, (model, preds, targets, density) in enumerate(scatter_data):
         ax = axes[idx]
         order = density.argsort()
         sc = ax.scatter(
@@ -484,7 +484,7 @@ def plot_scatter_actual_vs_predicted(
         corr = float(np.corrcoef(targets, preds)[0, 1])
         ax.set_xlabel("Actual", fontsize=11)
         ax.set_ylabel("Predicted", fontsize=11)
-        ax.set_title(f"{get_label(k, labels)}\n(Pearson r = {corr:.3f})", fontsize=12, fontweight="bold")
+        ax.set_title(f"{get_label(model, labels)}\n(Pearson r = {corr:.3f})", fontsize=12, fontweight="bold")
         ax.set_xlim(0, global_max_target)
         ax.set_ylim(0, global_max_pred)
         sns.despine(ax=ax)
@@ -496,7 +496,7 @@ def plot_scatter_actual_vs_predicted(
     right_margin = 0.92 if n_rows == 1 else 0.93
     fig.subplots_adjust(right=right_margin)
     if sc is not None:
-        cbar_ax = fig.add_axes(_colorbar_axes(fig, n_rows))
+        cbar_ax = fig.add_axes(_colorbar_axes(n_rows))
         fig.colorbar(sc, cax=cbar_ax).set_label("Point Density", fontsize=10)
     plt.savefig(os.path.join(output_dir, "scatter_predicted_vs_actual.png"), dpi=150, bbox_inches="tight")
     plt.close()
@@ -510,14 +510,13 @@ def plot_scatter_actual_vs_predicted(
 def plot_scatter_zoomed(
     results: Dict[str, Any],
     output_dir: str,
-    colors: Optional[Dict[str, str]] = None,
     labels: Optional[Dict[str, str]] = None,
     max_actual: float = 0.01,
 ) -> None:
     """Scatter plots zoomed on ground-truth values below *max_actual*."""
     set_style()
-    keys = list(results.keys())
-    n = len(keys)
+    models = list(results.keys())
+    n = len(models)
     n_rows, n_cols = _scatter_grid(n)
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
@@ -527,9 +526,9 @@ def plot_scatter_zoomed(
     scatter_data = []
     global_max_target = global_max_pred = 0.0
 
-    for k in keys:
-        targets = results[k]["targets"].flatten()
-        preds = results[k]["predictions"].flatten()
+    for model in models:
+        targets = results[model]["targets"].flatten()
+        preds = results[model]["predictions"].flatten()
         vm = np.isfinite(targets) & np.isfinite(preds)
         targets, preds = targets[vm], preds[vm]
         zm = targets < max_actual
@@ -541,10 +540,10 @@ def plot_scatter_zoomed(
             xy = np.vstack([prd_z, tgt_z]) + np.random.normal(0, 1e-8, (2, len(prd_z)))
             density = gaussian_kde(xy)(xy)
         except Exception as e:
-            log.warning(f"Could not compute density for {k}: {e}")
+            log.warning(f"Could not compute density for {model}: {e}")
             density = np.ones(len(prd_z)) if len(prd_z) > 0 else np.array([])
         all_densities.extend(density)
-        scatter_data.append((k, prd_z, tgt_z, density))
+        scatter_data.append((model, prd_z, tgt_z, density))
 
     vmin = min(all_densities) if all_densities else 0
     vmax = max(all_densities) if all_densities else 1
@@ -552,11 +551,11 @@ def plot_scatter_zoomed(
     axis_max = max(global_max_target, global_max_pred)
     sc = None
 
-    for idx, (k, prd_z, tgt_z, density) in enumerate(scatter_data):
+    for idx, (model, prd_z, tgt_z, density) in enumerate(scatter_data):
         ax = axes[idx]
         if len(prd_z) == 0:
             ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
-            ax.set_title(get_label(k, labels), fontsize=12, fontweight="bold")
+            ax.set_title(get_label(model, labels), fontsize=12, fontweight="bold")
             sns.despine(ax=ax)
             continue
         order = density.argsort()
@@ -568,7 +567,7 @@ def plot_scatter_zoomed(
         corr = float(np.corrcoef(tgt_z, prd_z)[0, 1]) if len(tgt_z) > 1 else 0.0
         ax.set_xlabel("Actual", fontsize=11)
         ax.set_ylabel("Predicted", fontsize=11)
-        ax.set_title(f"{get_label(k, labels)}\n(Pearson r = {corr:.3f})", fontsize=12, fontweight="bold")
+        ax.set_title(f"{get_label(model, labels)}\n(Pearson r = {corr:.3f})", fontsize=12, fontweight="bold")
         ax.set_xlim(0, global_max_target)
         ax.set_ylim(0, global_max_pred)
         sns.despine(ax=ax)
@@ -581,7 +580,7 @@ def plot_scatter_zoomed(
     right_margin = 0.92 if n_rows == 1 else 0.93
     fig.subplots_adjust(right=right_margin)
     if sc is not None:
-        cbar_ax = fig.add_axes(_colorbar_axes(fig, n_rows))
+        cbar_ax = fig.add_axes(_colorbar_axes(n_rows))
         fig.colorbar(sc, cax=cbar_ax).set_label("Point Density", fontsize=10)
     plt.savefig(os.path.join(output_dir, "scatter_zoomed.png"), dpi=150, bbox_inches="tight")
     plt.close()
@@ -595,7 +594,6 @@ def plot_scatter_zoomed(
 def plot_loglog_scatter_actual_vs_predicted(
     results: Dict[str, Any],
     output_dir: str,
-    colors: Optional[Dict[str, str]] = None,
     labels: Optional[Dict[str, str]] = None,
 ) -> None:
     """Log-log scatter plots of actual vs predicted."""
@@ -612,9 +610,9 @@ def plot_loglog_scatter_actual_vs_predicted(
     scatter_data = []
     global_min, global_max_val = float("inf"), float("-inf")
 
-    for k in keys:
-        preds = results[k]["predictions"].flatten()
-        targets = results[k]["targets"].flatten()
+    for model in keys:
+        preds = results[model]["predictions"].flatten()
+        targets = results[model]["targets"].flatten()
         vm = np.isfinite(preds) & np.isfinite(targets)
         preds, targets = preds[vm], targets[vm]
         preds_log = np.log10(preds + eps)
@@ -623,17 +621,17 @@ def plot_loglog_scatter_actual_vs_predicted(
             xy = np.vstack([targets_log, preds_log]) + np.random.normal(0, 1e-8, (2, len(preds_log)))
             density = gaussian_kde(xy)(xy)
         except Exception as e:
-            log.warning(f"Could not compute density for {k}: {e}")
+            log.warning(f"Could not compute density for {model}: {e}")
             density = np.ones(len(preds_log))
         all_densities.extend(density)
-        scatter_data.append((k, preds_log, targets_log, density))
+        scatter_data.append((model, preds_log, targets_log, density))
         global_min = min(global_min, float(targets_log.min()), float(preds_log.min()))
         global_max_val = max(global_max_val, float(targets_log.max()), float(preds_log.max()))
 
     norm = Normalize(vmin=min(all_densities), vmax=max(all_densities))
     sc = None
 
-    for idx, (k, preds_log, targets_log, density) in enumerate(scatter_data):
+    for idx, (model, preds_log, targets_log, density) in enumerate(scatter_data):
         ax = axes[idx]
         order = density.argsort()
         sc = ax.scatter(
@@ -644,7 +642,7 @@ def plot_loglog_scatter_actual_vs_predicted(
         corr = float(np.corrcoef(targets_log, preds_log)[0, 1])
         ax.set_xlabel("Log₁₀ Actual", fontsize=12)
         ax.set_ylabel("Log₁₀ Predicted", fontsize=12)
-        ax.set_title(f"{get_label(k, labels)}\n(Log-Log r = {corr:.3f})", fontsize=12, fontweight="bold")
+        ax.set_title(f"{get_label(model, labels)}\n(Log-Log Pearson r = {corr:.3f})", fontsize=12, fontweight="bold")
         sns.despine(ax=ax)
 
     for idx in range(n, len(axes)):
@@ -654,7 +652,7 @@ def plot_loglog_scatter_actual_vs_predicted(
     right_margin = 0.92 if n_rows == 1 else 0.92
     fig.subplots_adjust(right=right_margin)
     if sc is not None:
-        cbar_ax = fig.add_axes(_colorbar_axes(fig, n_rows))
+        cbar_ax = fig.add_axes(_colorbar_axes(n_rows))
         fig.colorbar(sc, cax=cbar_ax).set_label("Point Density", fontsize=10)
     plt.savefig(os.path.join(output_dir, "scatter_loglog_predicted_vs_actual.png"), dpi=150, bbox_inches="tight")
     plt.close()
@@ -673,7 +671,7 @@ def _grouped_range_bar(
     model_col: str,
     range_order: List[str],
     count_df: pd.DataFrame,
-    keys: List[str],
+    models: List[str],
     colors: Optional[Dict[str, str]],
     labels: Optional[Dict[str, str]],
     xlabel: str,
@@ -684,14 +682,14 @@ def _grouped_range_bar(
     output_dir: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(12, 6))
-    label_to_key = {get_label(k, labels): k for k in keys}
+    label_to_model = {get_label(model, labels): model for model in models}
 
     pivot = error_df.pivot(index="Range", columns=model_col, values=value_col)
     pivot_lo = error_df.pivot(index="Range", columns=model_col, values=ci_lower_col)
     pivot_hi = error_df.pivot(index="Range", columns=model_col, values=ci_upper_col)
 
     range_order = [r for r in range_order if r in pivot.index]
-    ordered_labels = [get_label(k, labels) for k in keys]
+    ordered_labels = [get_label(model, labels) for model in models]
     for piv in (pivot, pivot_lo, pivot_hi):
         piv = piv.reindex(range_order)
 
@@ -708,7 +706,7 @@ def _grouped_range_bar(
 
     x = np.arange(len(range_order))
     width = 0.7 / len(pivot.columns)
-    bar_colors = [get_color(label_to_key.get(col, col), colors) for col in pivot.columns]
+    bar_colors = [get_color(label_to_model.get(col, col), colors) for col in pivot.columns]
 
     for i, col in enumerate(pivot.columns):
         offset = (i - len(pivot.columns) / 2 + 0.5) * width
@@ -748,7 +746,7 @@ def plot_mae_per_range(
 ) -> None:
     """Grouped bar chart of MAE per abundance range with 95 % CIs."""
     set_style()
-    keys = list(results.keys())
+    models = list(results.keys())
     bins = [
         ("zero", "Zero"),
         (0, 0.001, ">0% to 0.1%"),
@@ -757,9 +755,9 @@ def plot_mae_per_range(
         (0.1, 1.0, ">10%"),
     ]
     rows = []
-    for k in keys:
-        y_pred = results[k]["predictions"].flatten()
-        y_true = results[k]["targets"].flatten()
+    for model in models:
+        y_pred = results[model]["predictions"].flatten()
+        y_true = results[model]["targets"].flatten()
         vm = np.isfinite(y_pred) & np.isfinite(y_true)
         y_pred, y_true = y_pred[vm], y_true[vm]
         for b in bins:
@@ -772,7 +770,7 @@ def plot_mae_per_range(
                 errs = np.abs(y_true[mask] - y_pred[mask])
                 mae = float(np.mean(errs))
                 ci = compute_95ci_bootstrap(errs) if mask.sum() > 1 else (mae, mae)
-                rows.append({"Model": get_label(k, labels), "Range": rlabel,
+                rows.append({"Model": get_label(model, labels), "Range": rlabel,
                              "MAE": mae, "MAE_CI_Lower": ci[0], "MAE_CI_Upper": ci[1],
                              "Count": int(mask.sum())})
 
@@ -780,11 +778,11 @@ def plot_mae_per_range(
     if df.empty:
         log.warning("No data for MAE per range plot")
         return
-    count_df = df[df["Model"] == get_label(keys[0], labels)][["Range", "Count"]].set_index("Range")
+    count_df = df[df["Model"] == get_label(models[0], labels)][["Range", "Count"]].set_index("Range")
     _grouped_range_bar(
         df, "MAE", "MAE_CI_Lower", "MAE_CI_Upper", "Model",
         ["Zero", ">0% to 0.1%", "0.1-1%", "1-10%", ">10%"],
-        count_df, keys, colors, labels,
+        count_df, models, colors, labels,
         xlabel="Abundance Range", ylabel="Mean Absolute Error",
         title="Prediction Error by Abundance Range",
         legend_title="Model", filename="error_by_range.png", output_dir=output_dir,
@@ -803,7 +801,7 @@ def plot_mae_per_range_zoomed(
 ) -> None:
     """Grouped bar chart of MAE over fine-grained bins in the <1 % range."""
     set_style()
-    keys = list(results.keys())
+    models = list(results.keys())
     bins = [
         ("zero", "Zero"),
         (0, 0.0011, "0-0.11%"),
@@ -812,9 +810,9 @@ def plot_mae_per_range_zoomed(
         (0.0022, 0.01, "0.22-1%"),
     ]
     rows = []
-    for k in keys:
-        y_pred = results[k]["predictions"].flatten()
-        y_true = results[k]["targets"].flatten()
+    for model in models:
+        y_pred = results[model]["predictions"].flatten()
+        y_true = results[model]["targets"].flatten()
         vm = np.isfinite(y_pred) & np.isfinite(y_true)
         y_pred, y_true = y_pred[vm], y_true[vm]
         for b in bins:
@@ -827,7 +825,7 @@ def plot_mae_per_range_zoomed(
                 errs = np.abs(y_true[mask] - y_pred[mask])
                 mae = float(np.mean(errs))
                 ci = compute_95ci_bootstrap(errs) if mask.sum() > 1 else (mae, mae)
-                rows.append({"Model": get_label(k, labels), "Range": rlabel,
+                rows.append({"Model": get_label(model, labels), "Range": rlabel,
                              "MAE": mae, "MAE_CI_Lower": ci[0], "MAE_CI_Upper": ci[1],
                              "Count": int(mask.sum())})
 
@@ -835,11 +833,11 @@ def plot_mae_per_range_zoomed(
     if df.empty:
         log.warning("No data for zoomed MAE per range plot")
         return
-    count_df = df[df["Model"] == get_label(keys[0], labels)][["Range", "Count"]].set_index("Range")
+    count_df = df[df["Model"] == get_label(models[0], labels)][["Range", "Count"]].set_index("Range")
     _grouped_range_bar(
         df, "MAE", "MAE_CI_Lower", "MAE_CI_Upper", "Model",
         ["Zero", "0-0.11%", "0.11-0.15%", "0.15-0.22%", "0.22-1%"],
-        count_df, keys, colors, labels,
+        count_df, models, colors, labels,
         xlabel="Abundance Range", ylabel="Mean Absolute Error",
         title="Prediction Error by Abundance Range (Zoomed: <1%)",
         legend_title="Model", filename="error_by_range_zoomed.png", output_dir=output_dir,
@@ -858,7 +856,7 @@ def plot_RAE_per_range(
 ) -> None:
     """Grouped bar chart of Relative Absolute Error per abundance range (non-zero only)."""
     set_style()
-    keys = list(results.keys())
+    models = list(results.keys())
     bins = [
         (0, 0.001, ">0% to 0.1%"),
         (0.001, 0.01, "0.1-1%"),
@@ -866,9 +864,9 @@ def plot_RAE_per_range(
         (0.1, 1.0, ">10%"),
     ]
     rows = []
-    for k in keys:
-        y_pred = results[k]["predictions"].flatten()
-        y_true = results[k]["targets"].flatten()
+    for model in models:
+        y_pred = results[model]["predictions"].flatten()
+        y_true = results[model]["targets"].flatten()
         vm = np.isfinite(y_pred) & np.isfinite(y_true)
         y_pred, y_true = y_pred[vm], y_true[vm]
         for lo, hi, rlabel in bins:
@@ -877,7 +875,7 @@ def plot_RAE_per_range(
                 rae_arr = np.abs(y_true[mask] - y_pred[mask]) / np.abs(y_true[mask])
                 rae = float(np.mean(rae_arr))
                 ci = compute_95ci_bootstrap(rae_arr) if mask.sum() > 1 else (rae, rae)
-                rows.append({"Model": get_label(k, labels), "Range": rlabel,
+                rows.append({"Model": get_label(model, labels), "Range": rlabel,
                              "RAE": rae, "RAE_CI_Lower": ci[0], "RAE_CI_Upper": ci[1],
                              "Count": int(mask.sum())})
 
@@ -885,11 +883,11 @@ def plot_RAE_per_range(
     if df.empty:
         log.warning("No data for RAE per range plot")
         return
-    count_df = df[df["Model"] == get_label(keys[0], labels)][["Range", "Count"]].set_index("Range")
+    count_df = df[df["Model"] == get_label(models[0], labels)][["Range", "Count"]].set_index("Range")
     _grouped_range_bar(
         df, "RAE", "RAE_CI_Lower", "RAE_CI_Upper", "Model",
         [">0% to 0.1%", "0.1-1%", "1-10%", ">10%"],
-        count_df, keys, colors, labels,
+        count_df, models, colors, labels,
         xlabel="Abundance Range", ylabel="Relative Absolute Error",
         title="Relative Absolute Error by Abundance Range",
         legend_title="Model", filename="relative_err_by_range.png", output_dir=output_dir,
@@ -908,17 +906,17 @@ def plot_residual_distribution(
 ) -> None:
     """Overlapping residual histograms + KDE, one series per model."""
     set_style()
-    keys = list(results.keys())
+    models = list(results.keys())
     fig, ax = plt.subplots(figsize=(9, 5))
 
     all_res: List[float] = []
-    per_key = {}
-    for k in keys:
-        t = results[k]["targets"].flatten()
-        p = results[k]["predictions"].flatten()
+    per_model = {}
+    for model in models:
+        t = results[model]["targets"].flatten()
+        p = results[model]["predictions"].flatten()
         vm = np.isfinite(t) & np.isfinite(p)
         res = (t - p)[vm]
-        per_key[k] = res
+        per_model[model] = res
         all_res.extend(res.tolist())
 
     if not all_res:
@@ -929,15 +927,15 @@ def plot_residual_distribution(
     legend_handles = []
     max_count = 0
 
-    for k, res in per_key.items():
-        color = get_color(k, colors)
-        lbl = get_label(k, labels)
+    for model, res in per_model.items():
+        color = get_color(model, colors)
+        lbl = get_label(model, labels)
         counts, _, _ = ax.hist(res, bins=60, color=color, alpha=0.3, edgecolor="none")
         max_count = max(max_count, counts.max())
         if len(res) > 1:
             kde_vals = gaussian_kde(res)(x_kde)
             ax.plot(x_kde, kde_vals, color=color, linewidth=2)
-        legend_handles.append(plt.Line2D(
+        legend_handles.append(Line2D(
             [0], [0], color=color, linewidth=2,
             label=f"{lbl} (μ={np.mean(res):.4f}, σ={np.std(res):.4f})",
         ))
@@ -968,38 +966,42 @@ def plot_zero_vs_nonzero_comparison(
 ) -> None:
     """Paired bars showing MAE on zero vs non-zero ground-truth values."""
     set_style()
-    keys = list(results.keys())
-    fig, ax = plt.subplots(figsize=(max(8, 2 * len(keys) + 2), 5))
-    x = np.arange(len(keys))
+    models = list(results.keys())
+    fig, ax = plt.subplots(figsize=(max(8, 2 * len(models) + 2), 5))
+    x = np.arange(len(models))
     width = 0.35
 
     def _blend_white(color: str, alpha: float = 0.6) -> Tuple[float, float, float]:
         r, g, b = mc.to_rgb(color)
         return (r * (1 - alpha) + alpha, g * (1 - alpha) + alpha, b * (1 - alpha) + alpha)
 
-    for i, k in enumerate(keys):
-        t = results[k]["targets"].flatten()
-        p = results[k]["predictions"].flatten()
+    for i, model in enumerate(models):
+        t = results[model]["targets"].flatten()
+        p = results[model]["predictions"].flatten()
         vm = np.isfinite(t) & np.isfinite(p)
         t, p = t[vm], p[vm]
         zm, nzm = t == 0, t != 0
         e_z = np.abs(t[zm] - p[zm]) if zm.sum() > 0 else np.array([0.0])
         e_nz = np.abs(t[nzm] - p[nzm]) if nzm.sum() > 0 else np.array([0.0])
         mae_z, mae_nz = float(np.mean(e_z)), float(np.mean(e_nz))
-        base = get_color(k, colors)
+        base = get_color(model, colors)
         ci_z = _ci_tuple_to_errorbar(mae_z, compute_95ci_bootstrap(e_z))
         ci_nz = _ci_tuple_to_errorbar(mae_nz, compute_95ci_bootstrap(e_nz))
-        ax.bar(x[i] - width / 2, mae_z, width, color=_blend_white(base), edgecolor="white",
-               yerr=[[ci_z[0]], [ci_z[1]]], capsize=4, error_kw={"elinewidth": 1.5})
-        ax.bar(x[i] + width / 2, mae_nz, width, color=base, edgecolor="white",
-               yerr=[[ci_nz[0]], [ci_nz[1]]], capsize=4, error_kw={"elinewidth": 1.5})
+        ax.bar(
+            x[i] - width / 2, mae_z, width, color=_blend_white(base), edgecolor="white",
+            yerr=[[ci_z[0]], [ci_z[1]]], capsize=4, error_kw={"elinewidth": 1.5}
+        )
+        ax.bar(
+            x[i] + width / 2, mae_nz, width, color=base, edgecolor="white",
+            yerr=[[ci_nz[0]], [ci_nz[1]]], capsize=4, error_kw={"elinewidth": 1.5}
+        )
 
     ax.legend(handles=[
         Patch(facecolor="#cccccc", edgecolor="white", label="Zero GT (lighter)"),
         Patch(facecolor="#666666", edgecolor="white", label="Non-zero GT (darker)"),
     ], frameon=False, loc="upper right")
     ax.set_xticks(x)
-    ax.set_xticklabels([get_label(k, labels) for k in keys], rotation=45, ha="right", fontsize=9)
+    ax.set_xticklabels([get_label(model, labels) for model in models], rotation=45, ha="right", fontsize=9)
     ax.set_ylabel("MAE", fontsize=12)
     ax.set_title("MAE: Zero vs Non-Zero Values", fontsize=14, fontweight="bold")
     sns.despine(ax=ax)
@@ -1039,31 +1041,32 @@ def plot_training_progress_comparison(
             [l for *_, l in model_results.get("val_losses", [])],
         )
 
-    keys = [k for k in results if _has_training_data(results[k])]
-    if not keys:
+    models = [model for model in results if _has_training_data(results[model])]
+    if not models:
         log.info("  (Skipping training progress plot — no training data found.)")
         return
 
     set_style()
-    n = len(keys)
+    n = len(models)
     fig, axes = plt.subplots(2, n, figsize=(8 * n, 10), sharey="row")
     if n == 1:
-        axes = np.array([[axes[0, 0] if axes.ndim == 2 else axes[0]],
-                         [axes[1, 0] if axes.ndim == 2 else axes[1]]])
+        axes = np.array([
+            [axes[0, 0] if axes.ndim == 2 else axes[0]], [axes[1, 0] if axes.ndim == 2 else axes[1]]
+        ])
 
-    for idx, k in enumerate(keys):
-        lbl = get_label(k, labels)
-        color = get_color(k, colors)
-        train_vals, val_vals = _extract(results[k])
-        cycle_train = results[k].get("cycle_train_losses", [])
-        cycle_val = results[k].get("cycle_val_losses", [])
+    for idx, model in enumerate(models):
+        lbl = get_label(model, labels)
+        color = get_color(model, colors)
+        train_vals, val_vals = _extract(results[model])
+        cycle_train = results[model].get("cycle_train_losses", [])
+        cycle_val = results[model].get("cycle_val_losses", [])
 
         ax1 = axes[0, idx]
         ax1.plot(train_vals, color=color, lw=1.6, label="Train", alpha=0.85)
         ax1.plot(val_vals, color=color, lw=1.6, ls="--", label="Val", alpha=0.85)
         # Vertical lines at EM cycle boundaries
-        if results[k].get("timeline_train_losses"):
-            for i, (phase, *_) in enumerate(results[k]["timeline_train_losses"]):
+        if results[model].get("timeline_train_losses"):
+            for i, (phase, *_) in enumerate(results[model]["timeline_train_losses"]):
                 if phase == "latent" and i > 0:
                     ax1.axvline(x=i, color="gray", ls=":", alpha=0.5, lw=1)
         ax1.set_xlabel("Training Step")
@@ -1075,12 +1078,16 @@ def plot_training_progress_comparison(
         ax2 = axes[1, idx]
         if cycle_train:
             cyc = [c + 1 for c, _ in cycle_train]
-            ax2.plot(cyc, [l for _, l in cycle_train], color=color, ls="-",
-                     marker="o", lw=1.8, ms=6, label="Train", alpha=0.9)
+            ax2.plot(
+                cyc, [l for _, l in cycle_train], color=color, ls="-", 
+                marker="o", lw=1.8, ms=6, label="Train", alpha=0.9
+            )
         if cycle_val:
             cyc = [c + 1 for c, _ in cycle_val]
-            ax2.plot(cyc, [l for _, l in cycle_val], color=color, ls="--",
-                     marker="o", lw=1.8, ms=6, label="Val", alpha=0.9)
+            ax2.plot(
+                cyc, [l for _, l in cycle_val], color=color, ls="--",
+                marker="o", lw=1.8, ms=6, label="Val", alpha=0.9
+            )
         ax2.set_xlabel("EM Cycle")
         ax2.set_ylabel("Loss")
         ax2.set_title(f"{lbl}: End-of-Cycle Losses")
@@ -1167,8 +1174,8 @@ def plot_latent_importance_diagnostics(
         ax.set_title("Latent Ablation Delta\n(> 0 → latent reduces loss; ≈ 0 → MLP ignores it)")
         ax.grid(True, alpha=0.3)
         ax.legend(handles=[
-            plt.Rectangle((0, 0), 1, 1, color="#2ca02c", alpha=0.75, label="latent helps (Δ > 0)"),
-            plt.Rectangle((0, 0), 1, 1, color="#d62728", alpha=0.75, label="latent hurts (Δ < 0)"),
+            Rectangle((0, 0), 1, 1, color="#2ca02c", alpha=0.75, label="latent helps (Δ > 0)"),
+            Rectangle((0, 0), 1, 1, color="#d62728", alpha=0.75, label="latent hurts (Δ < 0)"),
         ], fontsize=9)
 
     plt.tight_layout()
@@ -1191,26 +1198,31 @@ def plot_summary_table(
 ) -> pd.DataFrame:
     """Render a summary metrics table as a PNG (with best values highlighted) and a CSV."""
     set_style()
-    keys = list(results.keys())
-    ext = {k: compute_extended_metrics(
-               results[k]["targets"], results[k]["predictions"],
-               sample_labels=results[k].get("sample_labels"),
-               bin_labels=results[k].get("bin_labels"),
-           )
-           for k in keys}
+    models = list(results.keys())
+    ext = {
+        model: compute_extended_metrics(
+                results[model]["targets"], results[model]["predictions"],
+                sample_labels=results[model].get("sample_labels"),
+                bin_labels=results[model].get("bin_labels"),
+            ) for model in models
+    }
 
     metrics = [
-        "RMSE_micro", "MAE_micro", "Absolute Relative Error",
-        "KL Divergence", "MAE (zeros)", "MAE (non-zeros)", "Correlation",
+        "MAE (macro)", "MAE (micro)", "Absolute Relative Error", "KL Divergence", 
+        "MAE (zeros)", "MAE (non-zeros)", "R²", "R² (log + 1)"
     ]
+    best_is_high = {
+        "MAE (macro)": False, "MAE (micro)": False, "Absolute Relative Error": False, "KL Divergence": False,
+        "MAE (zeros)": False, "MAE (non-zeros)": False, "R²": True, "R² (log + 1)": True,
+    }
 
-    data = [{"Model": get_label(k, labels), **{m: ext[k][m] for m in metrics}} for k in keys]
+    data = [{"Model": get_label(model, labels), **{m: ext[model][m] for m in metrics}} for model in models]
     df = pd.DataFrame(data)
 
     # Best value per metric
     best_rows: Dict[str, List[int]] = {}
     for col in metrics:
-        best_val = df[col].max() if col == "Correlation" else df[col].min()
+        best_val = df[col].max() if best_is_high[col] else df[col].min()
         best_rows[col] = df[df[col] == best_val].index.tolist()
 
     display_df = df.copy()
@@ -1219,7 +1231,7 @@ def plot_summary_table(
 
     n_cols_table = len(display_df.columns)
     fig_w = max(14, n_cols_table * 2.0)
-    fig_h = max(1.5, len(keys) * 0.6 + 1.0)
+    fig_h = max(1.5, (len(models) + 1) * 0.4)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.axis("off")
 
@@ -1239,12 +1251,12 @@ def plot_summary_table(
         table[(0, i)].set_facecolor("#d0d0d0")
 
     model_col_idx = list(display_df.columns).index("Model")
-    for row_idx, k in enumerate(keys):
+    for row_idx, model in enumerate(models):
         cell = table[(row_idx + 1, model_col_idx)]
-        hex_color = get_color(k, colors)
+        hex_color = get_color(model, colors)
         cell.set_facecolor(hex_color)
         cell.set_text_props(fontweight="bold", color=_contrasting_text_color(hex_color))
-        cell.set_height(0.15)
+        #cell.set_height(0.15)
 
     for col_idx, col in enumerate(display_df.columns):
         if col == "Model":
@@ -1253,7 +1265,7 @@ def plot_summary_table(
             table[(row_idx + 1, col_idx)].set_facecolor("#d5f5e3")
             table[(row_idx + 1, col_idx)].set_text_props(fontweight="bold", color="#1a7a40")
 
-    plt.title(title, fontweight="bold", fontsize=14, y=1.02)
+    plt.title(title, fontweight="bold", fontsize=14, y=1.10)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "summary_table.png"), dpi=150, bbox_inches="tight")
     plt.close()
@@ -1288,13 +1300,13 @@ def create_all_visualizations(
     plot_metrics_comparison(results, output_dir, colors, labels, title=title)
 
     log.info(" 2. Scatter plots (full range)...")
-    plot_scatter_actual_vs_predicted(results, output_dir, colors, labels)
+    plot_scatter_actual_vs_predicted(results, output_dir, labels)
 
     log.info(" 3. Scatter plots (ground truth <1%)...")
-    plot_scatter_zoomed(results, output_dir, colors, labels)
+    plot_scatter_zoomed(results, output_dir, labels)
 
     log.info(" 4. Log-log scatter plots...")
-    plot_loglog_scatter_actual_vs_predicted(results, output_dir, colors, labels)
+    plot_loglog_scatter_actual_vs_predicted(results, output_dir, labels)
 
     log.info(" 5. MAE by abundance range...")
     plot_mae_per_range(results, output_dir, colors, labels)
@@ -1333,59 +1345,65 @@ def print_comparison(
     title: str = "MODEL COMPARISON RESULTS",
 ) -> None:
     """Print a comparison table and win summary to the console."""
-    keys = list(results.keys())
-    ext = {k: compute_extended_metrics(
-               results[k]["targets"], results[k]["predictions"],
-               sample_labels=results[k].get("sample_labels"),
-               bin_labels=results[k].get("bin_labels"),
-           )
-           for k in keys}
+    models = list(results.keys())
+    ext = {
+        model: compute_extended_metrics(
+            results[model]["targets"], results[model]["predictions"],
+            sample_labels=results[model].get("sample_labels"),
+            bin_labels=results[model].get("bin_labels"),
+        ) for model in models
+    }
 
     metrics_cfg = [
-        ("RMSE_micro", False),
-        ("MAE_micro", False),
-        ("MAE_macro", False),
+        ("RMSE (micro)", False),
+        ("RMSE (macro)", False),
+        ("MAE (micro)", False),
+        ("MAE (macro)", False),
         ("Absolute Relative Error", False),
+        ("R²", True),
+        ("R² (log + 1)", True),
         ("KL Divergence", False),
+        ("RMSE (zeros)", False),
         ("MAE (zeros)", False),
+        ("RMSE (non-zeros)", False),
         ("MAE (non-zeros)", False),
         ("Correlation", True),
     ]
 
     col_w = 22
-    log.info("\n" + "=" * (col_w * (len(keys) + 2)))
+    log.info("\n" + "=" * (col_w * (len(models) + 2)))
     log.info(title)
-    log.info("=" * (col_w * (len(keys) + 2)))
+    log.info("=" * (col_w * (len(models) + 2)))
 
-    header = f"{'Metric':<{col_w}}" + "".join(f"{get_label(k, labels):<{col_w}}" for k in keys) + f"{'Best':<{col_w}}"
+    header = f"{'Metric':<{col_w}}" + "".join(f"{get_label(model, labels):<{col_w}}" for model in models) + f"{'Best':<{col_w}}"
     log.info(header)
     log.info("-" * len(header))
 
-    wins = {k: 0 for k in keys}
+    wins = {model: 0 for model in models}
     for metric, higher_better in metrics_cfg:
-        vals = [ext[k][metric] for k in keys]
+        vals = [ext[model][metric] for model in models]
         best_idx = vals.index(max(vals) if higher_better else min(vals))
-        wins[keys[best_idx]] += 1
+        wins[models[best_idx]] += 1
         row = f"{metric:<{col_w}}"
         row += "".join(f"{v:<{col_w}.6f}" for v in vals)
-        row += f"{get_label(keys[best_idx], labels):<{col_w}}"
+        row += f"{get_label(models[best_idx], labels):<{col_w}}"
         log.info(row)
 
     log.info("-" * len(header))
     log.info("\nWin summary:")
-    for k in keys:
-        log.info(f"  {get_label(k, labels)}: {wins[k]} wins")
+    for model in models:
+        log.info(f"  {get_label(model, labels)}: {wins[model]} wins")
     overall = max(wins, key=wins.get)
     log.info(f"\n✓ Best overall: {get_label(overall, labels)} ({wins[overall]}/{len(metrics_cfg)} metrics)")
 
     # Improvement over first model (treated as baseline)
-    baseline = keys[0]
-    if len(keys) > 1:
+    baseline = models[0]
+    if len(models) > 1:
         log.info(f"\nImprovement over {get_label(baseline, labels)}:")
-        for k in keys[1:]:
-            log.info(f"\n  {get_label(k, labels)}:")
+        for model in models[1:]:
+            log.info(f"\n  {get_label(model, labels)}:")
             for metric, higher_better in metrics_cfg:
-                bv, kv = ext[baseline][metric], ext[k][metric]
+                bv, kv = ext[baseline][metric], ext[model][metric]
                 if higher_better:
                     pct = ((kv - bv) / abs(bv)) * 100 if bv != 0 else 0.0
                     sym = "↑" if pct > 0 else "↓"
@@ -1436,10 +1454,7 @@ if __name__ == "__main__":
         level=log.DEBUG if args.verbose else log.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
-
-    colors = json.loads(args.colors) if args.colors else None
-    labels = json.loads(args.labels) if args.labels else None
-
+    
     # Resolve paths relative to cwd
     results_path = os.path.abspath(args.results_path)
     output_dir = os.path.abspath(args.output_dir)
@@ -1447,6 +1462,9 @@ if __name__ == "__main__":
     log.info(f"Loading results from {results_path} ...")
     results = load_results(results_path)
     log.info(f"Found {len(results)} model(s): {list(results.keys())}")
+
+    labels = json.loads(args.labels) if args.labels else {k: get_label(k) for k in results.keys()}
+    colors = json.loads(args.colors) if args.colors else _default_colors(labels)
 
     print_comparison(results, labels=labels, title=args.title.upper())
     create_all_visualizations(

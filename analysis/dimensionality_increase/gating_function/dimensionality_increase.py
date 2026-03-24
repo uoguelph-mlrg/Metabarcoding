@@ -10,7 +10,7 @@ This script trains multiple model architectures:
     - softplus: m̃ = m ⊙ (1 + softplus(h) - ε)
     - tanh: m̃ = m ⊙ (1 + tanh(h)·κ)
     - sigmoid: m̃ = m ⊙ (2·σ(h))
-8. Dot Product: z = m(x) · h (direct inner product, bypasses final linear layer)
+8. Dot Product: z = w^T (m(x) ⊙ h)  (gate_torch returns h, goes through final linear)
 
 Results are saved to pickle for visualization by dimensionality_increase_visualize.py
 
@@ -24,7 +24,7 @@ import argparse
 import os
 import pickle
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 import logging as log
 
 import sys
@@ -34,35 +34,12 @@ from pathlib import Path
 # Setup paths
 root_dir = Path(__file__).parent
 src_path = str(root_dir.parent.parent.parent / "src")  # Metabarcoding/src
-local_scripts_path = str(root_dir.parent)  # dimensionality_increase/ (shared config, train, etc.)
 
-# IMPORTANT: Clear any cached modules to avoid Python returning cached imports
-for mod in list(sys.modules.keys()):
-    if mod in ['train', 'config', 'model', 'mlp', 'latent_solver']:
-        del sys.modules[mod]
-
-# Import baseline from src
+# Import from src (which now contains both baseline and gating variants)
 sys.path.insert(0, src_path)
-import train as baseline_train_module
-import config as baseline_config_module
+import train as train_module
+import config as config_module
 sys.path.pop(0)
-
-# Clear module cache again before loading local modules
-for mod in list(sys.modules.keys()):
-    if mod in ['train', 'config', 'model', 'mlp', 'latent_solver']:
-        del sys.modules[mod]
-
-# Now add and import from local directory (dimensionality_increase/ root)
-sys.path.insert(0, local_scripts_path)
-import train as local_train_module  
-import config as local_config_module
-sys.path.pop(0)
-
-# Create convenient aliases
-baseline_train = baseline_train_module
-baseline_config = baseline_config_module
-local_train = local_train_module
-local_config = local_config_module
 
 # Try to import wandb, but make it optional
 try:
@@ -72,7 +49,7 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 
-def run_comparison(data_path: str, use_wandb: bool = True, gating_functions: list = None) -> Dict[str, Any]:
+def run_comparison(data_path: str, use_wandb: bool = True, gating_functions: Optional[list] = None) -> Dict[str, Any]:
     """
     Run the architecture comparison by training baseline and all gating functions.
     
@@ -93,20 +70,14 @@ def run_comparison(data_path: str, use_wandb: bool = True, gating_functions: lis
     log.info("\n" + "="*70)
     log.info("TRAINING BASELINE (ADDITIVE) ARCHITECTURE")
     log.info("="*70)
-    log.info(f"baseline_train module: {baseline_train.__file__}")
-    log.info(f"baseline_config module: {baseline_config.__file__}")
+    log.info(f"train module: {train_module.__file__}")
+    log.info(f"config module: {config_module.__file__}")
     
-    baseline_config.set_seed(14)
-    baseline_cfg = baseline_config.Config()
-    log.info(f"Baseline config has embed_dim: {hasattr(baseline_cfg, 'embed_dim')}")
+    config_module.set_seed(14)
+    baseline_cfg = config_module.Config(embed_dim=1)  # scalar additive mode (original baseline)
     
-    # Model save directory for this subfolder
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    model_save_dir = os.path.join(script_dir, "models")
-    
-    baseline_trainer = baseline_train.Trainer(baseline_cfg, data_path, loss_type="cross_entropy", model_save_dir=model_save_dir)
+    baseline_trainer = train_module.Trainer(baseline_cfg, data_path, loss_type="cross_entropy")
     log.info(f"Baseline model type: {type(baseline_trainer.model).__name__}")
-    log.info(f"Baseline model file: {baseline_trainer.model.__class__.__module__}")
     
     baseline_results = baseline_trainer.run(use_wandb=use_wandb)
     results["baseline"] = baseline_results
@@ -117,21 +88,18 @@ def run_comparison(data_path: str, use_wandb: bool = True, gating_functions: lis
         log.info(f"TRAINING MULTIPLICATIVE GATING: {gating_fn.upper()}")
         log.info("="*70)
         
-        local_config.set_seed(14)  # Reset seed for fair comparison
-        local_cfg = local_config.Config(
-            embed_dim=8,
+        config_module.set_seed(14)  # Reset seed for fair comparison
+        cfg = config_module.Config(
+            embed_dim=10,
             gating_fn=gating_fn,
         )
-        log.info(f"Config: embed_dim={local_cfg.embed_dim}, gating_fn={local_cfg.gating_fn}")
+        log.info(f"Config: embed_dim={cfg.embed_dim}, gating_fn={cfg.gating_fn}")
         
-        # Create trainer (reuse same model_save_dir from baseline)
-        local_trainer = local_train.Trainer(local_cfg, data_path, loss_type="cross_entropy", model_save_dir=model_save_dir)
-        log.info(f"Model type: {type(local_trainer.model).__name__}")
-        log.info(f"Gating function: {local_trainer.model.gating_fn}")
+        trainer = train_module.Trainer(cfg, data_path, loss_type="cross_entropy")
+        log.info(f"Model type: {type(trainer.model).__name__}")
+        log.info(f"Gating function: {trainer.model.gating_fn}")
         
-        # Train
-        local_results = local_trainer.run(use_wandb=use_wandb)
-        results[gating_fn] = local_results
+        results[gating_fn] = trainer.run(use_wandb=use_wandb)
         
         log.info(f"Completed training for {gating_fn}")
     

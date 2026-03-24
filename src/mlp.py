@@ -10,7 +10,7 @@ class MLPModel(nn.Module):
     """
 
     def __init__(
-        self, input_dim: int, hidden_dims: List[int] = [128, 64], 
+        self, input_dim: int, hidden_dims: List[int] = [64, 128, 64, 32],
         output_dim: int = 1, dropout: float = 0.1):
         super().__init__()
         
@@ -27,4 +27,8 @@ class MLPModel(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)
+        out = self.net(x)
+        # Only squeeze if output is scalar (output_dim=1)
+        if out.shape[-1] == 1:
+            return out.squeeze(-1)
+        return out

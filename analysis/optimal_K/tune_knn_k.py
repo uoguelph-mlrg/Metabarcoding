@@ -41,7 +41,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("\n[1/5] Loading data...")
 # Load processed data (splits, features, etc.)
-splits, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir, config)
+splits, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir)
 
 # Extract intrinsic features (used by MLP)
 intrinsic_features = [col for col in splits['train']['X'].columns]

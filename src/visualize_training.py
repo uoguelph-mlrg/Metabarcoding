@@ -66,58 +66,112 @@ COLORS = {
 # Metrics Computation
 # =============================================================================
 
-def compute_extended_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """Compute comprehensive regression metrics."""
-    y_true = np.asarray(y_true).flatten()
-    y_pred = np.clip(np.asarray(y_pred).flatten(), 0, 1)
-    
-    # Overall metrics
+def compute_extended_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sample_labels: Optional[np.ndarray] = None,
+    bin_labels: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Compute comprehensive metrics with proper per-sample handling."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    rmse_macro: Optional[float] = None
+    mae_macro: Optional[float] = None
+    kl_divergence_macro: Optional[float] = None
+    eps = 1e-10
+    if y_true.ndim == 1 and sample_labels is not None:
+        sl = np.asarray(sample_labels)
+        valid = np.isfinite(y_true) & np.isfinite(y_pred)
+        yt_v = y_true[valid]
+        yp_v = np.clip(y_pred[valid], 0, 1)
+        sl_v = sl[valid]
+        rmse_per, mae_per, kl_per = [], [], []
+        for s in np.unique(sl_v):
+            mask = sl_v == s
+            rt = yt_v[mask]
+            rp = yp_v[mask]
+            if len(rt) == 0:
+                continue
+            rmse_per.append(float(np.sqrt(np.mean((rt - rp) ** 2))))
+            mae_per.append(float(np.mean(np.abs(rt - rp))))
+            rt_norm = (rt + eps) / (rt + eps).sum()
+            rp_norm = (rp + eps) / (rp + eps).sum()
+            kl_per.append(float(np.sum(rt_norm * np.log(rt_norm / rp_norm))))
+        if rmse_per:
+            rmse_macro = float(np.mean(rmse_per))
+            mae_macro = float(np.mean(mae_per))
+            kl_divergence_macro = float(np.mean(kl_per))
+    elif y_true.ndim == 2:
+        rmse_per, mae_per, kl_per = [], [], []
+        for i in range(y_true.shape[0]):
+            row_t = y_true[i]
+            row_p = y_pred[i]
+            valid_i = np.isfinite(row_t) & np.isfinite(row_p)
+            if valid_i.sum() == 0:
+                continue
+            rt = row_t[valid_i]
+            rp = np.clip(row_p[valid_i], 0, 1)
+            rmse_per.append(float(np.sqrt(np.mean((rt - rp) ** 2))))
+            mae_per.append(float(np.mean(np.abs(rt - rp))))
+            rt_norm = (rt + eps) / (rt + eps).sum()
+            rp_norm = (rp + eps) / (rp + eps).sum()
+            kl_per.append(float(np.sum(rt_norm * np.log(rt_norm / rp_norm))))
+        if rmse_per:
+            rmse_macro = float(np.mean(rmse_per))
+            mae_macro = float(np.mean(mae_per))
+            kl_divergence_macro = float(np.mean(kl_per))
+    y_true_flat = y_true.flatten()
+    y_pred_flat = y_pred.flatten()
+    valid = np.isfinite(y_true_flat) & np.isfinite(y_pred_flat)
+    y_true = y_true_flat[valid]
+    y_pred = np.clip(y_pred_flat[valid], 0, 1)
     mse = np.mean((y_true - y_pred) ** 2)
-    rmse = np.sqrt(mse)
-    mae = np.mean(np.abs(y_true - y_pred))
-    
-    # R² score
+    rmse_micro = float(np.sqrt(mse))
+    mae_micro = float(np.mean(np.abs(y_true - y_pred)))
+    if rmse_macro is None:
+        rmse_macro = rmse_micro
+        mae_macro = mae_micro
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    r2 = 1 - (ss_res / (ss_tot + 1e-10))
-    
-    # Split by zero/non-zero
+    r2 = float(1 - ss_res / (ss_tot + 1e-10))
     zero_mask = y_true == 0
     nonzero_mask = y_true > 0
-    
-    metrics = {
-        'RMSE': rmse,
-        'MAE': mae,
+    if zero_mask.sum() > 0:
+        rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2)))
+        mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask])))
+    else:
+        rmse_zeros = mae_zeros = 0.0
+    if nonzero_mask.sum() > 0:
+        rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2)))
+        mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask])))
+    else:
+        rmse_nonzeros = mae_nonzeros = 0.0
+    y_tn = (y_true + eps) / (y_true + eps).sum()
+    y_pn = (y_pred + eps) / (y_pred + eps).sum()
+    kl_divergence_micro = float(np.sum(y_tn * np.log(y_tn / y_pn)))
+    kl_divergence = kl_divergence_macro if kl_divergence_macro is not None else kl_divergence_micro
+    corr = np.corrcoef(y_true, y_pred)[0, 1]
+    correlation = 0.0 if np.isnan(corr) else float(corr)
+    nz = y_true != 0
+    rel_error = np.zeros_like(y_true, dtype=float)
+    rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
+    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else 0.0
+    return {
+        'RMSE_micro': rmse_micro,
+        'RMSE_macro': rmse_macro,
+        'MAE_micro': mae_micro,
+        'MAE_macro': mae_macro,
+        'Absolute Relative Error': absolute_relative_error,
         'R²': r2,
-        'RMSE (zeros)': np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2)) if zero_mask.sum() > 0 else 0,
-        'RMSE (non-zeros)': np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2)) if nonzero_mask.sum() > 0 else 0,
-        'MAE (zeros)': np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask])) if zero_mask.sum() > 0 else 0,
-        'MAE (non-zeros)': np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask])) if nonzero_mask.sum() > 0 else 0,
+        'RMSE (zeros)': rmse_zeros,
+        'MAE (zeros)': mae_zeros,
+        'RMSE (non-zeros)': rmse_nonzeros,
+        'MAE (non-zeros)': mae_nonzeros,
+        'KL Divergence': kl_divergence,
+        'Correlation': correlation,
         'n_zeros': int(zero_mask.sum()),
         'n_nonzeros': int(nonzero_mask.sum()),
     }
-    
-    # Correlation
-    corr = np.corrcoef(y_true, y_pred)[0, 1]
-    metrics['Correlation'] = corr if not np.isnan(corr) else 0.0
-    
-    # KL Divergence (with smoothing)
-    epsilon = 1e-10
-    y_true_smooth = y_true + epsilon
-    y_pred_smooth = y_pred + epsilon
-    y_true_norm = y_true_smooth / y_true_smooth.sum()
-    y_pred_norm = y_pred_smooth / y_pred_smooth.sum()
-    metrics['KL Divergence'] = np.sum(y_true_norm * np.log(y_true_norm / y_pred_norm))
-    
-    # Bray-Curtis dissimilarity
-    metrics['Bray-Curtis'] = np.sum(np.abs(y_true - y_pred)) / (np.sum(y_true + y_pred) + epsilon)
-    
-    return metrics
-
-
-# =============================================================================
-# Visualization Functions
-# =============================================================================
 
 def plot_training_curves(
     train_losses: List[float],
@@ -806,7 +860,7 @@ if __name__ == "__main__":
     print("         MLP + LATENT MODEL TRAINING")
     print("="*60)
     print(f"\n  Configuration:")
-    print(f"    - Initial epochs: {cfg.epochs_init}")
+    print(f"    - Latent warmup fraction: {cfg.latent_warmup_frac}")
     print(f"    - Epochs per cycle: {cfg.epochs}")
     print(f"    - Max cycles: {cfg.max_cycles}")
     print(f"    - Learning rate: {cfg.lr}")
@@ -822,44 +876,24 @@ if __name__ == "__main__":
     val_losses = []
     phase_info = []  # Track which phase each epoch is (MLP or latent)
     
-    # Track best validation loss
-    best_val_loss = float('inf')
-    no_improve = 0
-    
-    # Initial training (MLP only)
-    print(f"\n  Phase 1: Initial MLP Training ({cfg.epochs_init} epochs)")
-    print("  " + "-"*50)
-    
-    for epoch in range(cfg.epochs_init):
-        train_loss = trainer.train_epoch()
-        val_loss = trainer.validate("val")
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        phase_info.append('mlp')  # Initial phase is MLP training
-        
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"    Epoch {epoch+1:3d}/{cfg.epochs_init}: train={train_loss:.4f}, val={val_loss:.4f}")
-        
-        # Early stopping check
-        if val_loss < best_val_loss - 1e-4:
-            best_val_loss = val_loss
-            no_improve = 0
-        else:
-            no_improve += 1
-            if no_improve >= cfg.patience * 3:  # More patience for initial phase
-                print(f"    Early stopping at epoch {epoch+1}")
-                break
-    
-    # Alternating training
-    print(f"\n  Phase 2: Alternating Training ({cfg.max_cycles} max cycles)")
+    # Alternating training with latent warmup
+    warmup_cycles = max(1, int(cfg.latent_warmup_frac * cfg.max_cycles))
+    print(f"\n  Alternating Training ({cfg.max_cycles} max cycles, latent warmup over first {warmup_cycles} cycles)")
     print("  " + "-"*50)
     
     best_val_loss = float('inf')
     no_improve = 0
     
     for cycle in range(cfg.max_cycles):
-        # Solve latent
-        trainer.solve_latent()
+        # Compute latent update weight: linearly ramp from 0 → 1 over warmup_cycles
+        alpha = min(1.0, cycle / warmup_cycles)
+
+        # Solve latent, then blend if still in warmup
+        old_latent = trainer.model.latent_vec.detach().cpu().numpy().copy()
+        solved_latent = trainer.solve_latent()
+        if alpha < 1.0:
+            blended = (1.0 - alpha) * old_latent + alpha * solved_latent
+            trainer.model.set_latent(blended)
         
         # Train MLP
         cycle_train_loss = 0
@@ -871,7 +905,7 @@ if __name__ == "__main__":
             phase_info.append('mlp')  # In alternating phase, still training MLP
             cycle_train_loss = train_loss
         
-        print(f"    Cycle {cycle+1:2d}/{cfg.max_cycles}: train={cycle_train_loss:.4f}, val={val_loss:.4f}")
+        print(f"    Cycle {cycle+1:2d}/{cfg.max_cycles} (α={alpha:.2f}): train={cycle_train_loss:.4f}, val={val_loss:.4f}")
         
         # Early stopping
         if val_loss < best_val_loss - 1e-4:

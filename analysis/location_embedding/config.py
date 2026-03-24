@@ -28,46 +28,55 @@ class Config:
     barcode_data_path: Optional[str] = None    # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"        # distance metric: "cosine" or "euclidean"
 
-
-    # Latent configuration - for latent-as-input-V2 variant
-    # V2 is the blend of baseline (src) and latent_as_input (V1):
-    #   - Z (input embedding) is co-trained with MLP via joint gradient descent (Phase B, like V1)
-    #   - D (output scalar) is solved analytically via CG/L-BFGS (Phase A, like baseline src)
-    latent_dim: int = 4                 # Dimension of latent embedding per BIN
-    latent_init_std: float = 0.0        # Initialize Z with zeros
-    latent_lr: float = 2e-2             # Learning rate for Z embedding (input side, Phase B)
-    latent_norm_reg: float = 1e-6       # L2 norm regularization on Z (Phase B)
-    latent_smooth_reg: float = 1e-4     # Smoothness regularization on Z (Phase B)
-    latent_present_only: bool = False   # If True, only fit latent on observations where y > 0
-
-    # Latent D solver parameters (Phase A - analytic solve, same as baseline src)
-    latent_l2_reg: float = 1e-3         # L2 regularization on D in CG solve
+    # Latent solver - regularization settings
+    latent_smooth_reg: float = 1e-3     # Smoothness regularization (parameter λ_smooth)
+    latent_present_only: bool = False   # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
+    latent_l2_reg: float = 1e-3         # L2 norm regularization on D (parameter r)
+    
     cg_tol: float = 1e-6                # conjugate gradient tolerance (i.e., stopping criterion)
     cg_maxiter: int = 2000              # conjugate gradient max iterations
     
     # Architecture - New parameters for multiplicative gating
-    embed_dim: int = 4                 # Embedding dimension d for vector latent
+    embed_dim: int = 10                 # Embedding dimension d for vector latent
     gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid"  # Gating function type (sigmoid is primary)
     gating_alpha: float = 0.5           # Scaling factor for scaled_exp gating (in (0,1])
     gating_kappa: float = 0.5           # Scaling factor for tanh gating
     gating_epsilon: float = 0.693       # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_wd: float = 1e-3       # Weight decay specifically for final linear layer w
 
-
-    # Training - per-batch alternation: for each batch, solve D analytically then take one MLP+Z gradient step
-    device: str = "cpu"  # Force CPU to avoid MPS issues with nn.Embedding
+    # Training - Adjusted for better convergence
+    device: str = (
+        "mps" if torch.backends.mps.is_available() else 
+        "cuda" if torch.cuda.is_available() else 
+        "cpu"
+    )
     batch_size_bin: int = 1024          # Batch size (in number of observations not samples)
-    batch_size_sample: int = 8         # Batch size in number of samples
+    batch_size_sample: int = 8          # Batch size in number of samples
     lr: float = 5e-4                    # Learning rate for MLP parameters
+    latent_lr: float = 1e-2             # Latent learning rate (rescaled, new parameter)
     weight_decay: float = 1e-5          # Weight decay for MLP parameters
-    max_cycles: int = 500               # Max alternation cycles
     latent_warmup_frac: float = 0.2     # Fraction of max_cycles over which the proximal weight decays from ρ₀ → 0
     latent_prox_scale: float = 50.0     # ρ₀ = latent_prox_scale × latent_l2_reg at cycle 0 (proximal damping strength)
+    epochs: int = 100                   # Epochs per training phase
+    max_cycles: int = 100               # Max training cycles
     dropout: float = 0.15               # Dropout rate in MLP
     grad_clip: Optional[float] = 1.0    # Gradient clipping value (None to disable)
+    patience: Optional[int] = 25        # Patience for early stopping in number of cycles 
 
-    # Diagnostics: track Z latent importance during training (Phase B)
-    diag_ablation_interval: int = 20    # Compute Z ablation delta every N epochs (0 = disabled)
+    # Location embedding settings
+    use_location_embedding: bool = False
+    location_embedder_model: str = "satclip"
+    keep_raw_gps_features: bool = False
+    location_embedding_prefix: str = "loc_emb"
+    location_embedder_device: str = "cpu"
+    location_embedder_batch_size: int = 2048
+    satclip_ckpt_path: Optional[str] = None
+    range_db_path: Optional[str] = 'third_party/RANGE/pretrained/range_db_med.npz'
+    range_model_name: str = "RANGE+"
+    range_beta: float = 0.5
+    alphaearth_year: int = 2024
+    alphaearth_scale_meters: int = 10
+    alphaearth_project: Optional[str] = None
 
 
 def set_seed(seed: int = 42) -> None:

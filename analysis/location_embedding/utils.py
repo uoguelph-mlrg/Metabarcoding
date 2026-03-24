@@ -7,6 +7,8 @@ import numpy as np
 from config import Config
 import logging as log
 
+from embed_location import add_location_embeddings, build_location_embedder, EmbedderSpec
+
 OBSERVATION_FEATURES = [
     # Observed features (already in dataset) 
     "total_reads_per_sample",
@@ -27,6 +29,8 @@ OBSERVATION_FEATURES = [
     "min_reads_norm",   # min_reads normalized by sample total
 ]
 
+LOCATION_RAW_FEATURES = ["latitude", "longitude"]
+
 TAXONOMY_FEATURES = [
     "kingdom",
     "phylum",
@@ -36,15 +40,13 @@ TAXONOMY_FEATURES = [
     "subfamily",
     "genus",
     "species"
-    #+ ["length_min_mm", "length_max_mm"]
 ]
 
 def load(
     data_path: str, 
     config: Config, 
     save_data: bool = True,
-    fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
-    read_count_preprocessing: str = "original"
+    fixed_split_indices: Optional[Dict[str, np.ndarray]] = None
 ) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
     """
     Load and preprocess the CSV data.
@@ -55,8 +57,6 @@ def load(
         save_data: Whether to save split CSVs to disk
         fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing
                             sample indices for reproducible splits across different calls
-        read_count_preprocessing: One of "original" (no preprocessing), "normalized" (normalize per
-                                sample), or "logarithm" (only apply log transform)
 
     Returns:
     Tuple containing:
@@ -92,37 +92,74 @@ def load(
     # Also store actual proportions for cross-entropy loss
     df["rel_abundance"] = df["occurrences"] / (sample_totals + 1e-10)
 
-    # Apply read count preprocessing based on the specified method
-    if read_count_preprocessing == "original":
-        # Normalize by sample + log transform (original method)
-        df["total_reads_norm"] = df["total_reads"]
-        df["avg_reads_norm"] = df["avg_reads"]
-        df["max_reads_norm"] = df["max_reads"]
-        df["min_reads_norm"] = df["min_reads"]
-    elif read_count_preprocessing == "normalized":
-        # Only normalize by sample (no log)
-        df["total_reads_norm"] = df["total_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
-        df["avg_reads_norm"] = df["avg_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
-        df["max_reads_norm"] = df["max_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
-        df["min_reads_norm"] = df["min_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
-    elif read_count_preprocessing == "logarithm":
-        # Only log transform (no sample normalization)
-        df["total_reads_per_sample"] = np.log1p(df["total_reads_per_sample"])
-        df["total_reads_norm"] = np.log1p(df["total_reads"])
-        df["avg_reads_norm"] = np.log1p(df["avg_reads"])
-        df["max_reads_norm"] = np.log1p(df["max_reads"])
-        df["min_reads_norm"] = np.log1p(df["min_reads"])
-    else:
-        raise ValueError(f"Unknown read_count_preprocessing: {read_count_preprocessing}. "
-                        f"Must be one of: 'original', 'normalized', 'logarithm'")
+    # Apply logarithmic preprocessing (only log transform, no sample normalization)
+    df["total_reads_per_sample"] = np.log1p(df["total_reads_per_sample"])
+    df["total_reads_norm"] = np.log1p(df["total_reads"])
+    df["avg_reads_norm"] = np.log1p(df["avg_reads"])
+    df["max_reads_norm"] = np.log1p(df["max_reads"])
+    df["min_reads_norm"] = np.log1p(df["min_reads"])
+
+    # Resolve location embedding params: explicit kwargs take priority, then config attributes, then defaults
+    def _cfg(attr, default):
+        return getattr(config, attr, default)
+
+    _use_loc_emb     = _cfg('use_location_embedding',    False)
+    _emb_model       = _cfg('location_embedder_model',   'satclip')
+    _keep_raw_gps    = _cfg('keep_raw_gps_features',     False)
+    _emb_prefix      = _cfg('location_embedding_prefix', 'loc_emb')
+    _emb_device      = _cfg('location_embedder_device',  'cpu')
+    _emb_batch       = _cfg('location_embedder_batch_size', 2048)
+    _satclip_ckpt    = _cfg('satclip_ckpt_path',         None)
+    _range_db        = _cfg('range_db_path',             None)
+    _range_model     = _cfg('range_model_name',          'RANGE+')
+    _range_beta      = _cfg('range_beta',                0.5)
+    _ae_year         = _cfg('alphaearth_year',           2024)
+    _ae_scale        = _cfg('alphaearth_scale_meters',   10)
+    _ae_project      = _cfg('alphaearth_project',        None)
+
+    feature_list = list(OBSERVATION_FEATURES)
+    location_embedding_cols = []
+    if _use_loc_emb:
+        spec = EmbedderSpec(
+            model_name=_emb_model,
+            device=_emb_device,
+            batch_size=_emb_batch,
+            satclip_ckpt_path=_satclip_ckpt,
+            range_db_path=_range_db,
+            range_model_name=_range_model,
+            range_beta=_range_beta,
+            alphaearth_year=_ae_year,
+            alphaearth_scale_meters=_ae_scale,
+            alphaearth_project=_ae_project,
+        )
+        embedder = build_location_embedder(spec)
+        df, location_embedding_cols = add_location_embeddings(
+            df,
+            embedder,
+            lat_col="latitude",
+            lon_col="longitude",
+            prefix=_emb_prefix,
+        )
+
+        feature_list = [f for f in feature_list if f not in LOCATION_RAW_FEATURES]
+        feature_list.extend(location_embedding_cols)
+        if _keep_raw_gps:
+            feature_list.extend(LOCATION_RAW_FEATURES)
+
+        log.info(
+            "Using location embeddings via %s (%d dims)",
+            _emb_model,
+            len(location_embedding_cols),
+        )
+    
     # Log a warning if any expected features are missing
-    missing_features = [c for c in OBSERVATION_FEATURES + TAXONOMY_FEATURES if c not in df.columns]
+    missing_features = [c for c in feature_list + TAXONOMY_FEATURES if c not in df.columns]
     if missing_features:
         log.warning(f"Missing features in dataset: {', '.join(missing_features)}.")
 
     # Build df_long with required columns + features
     base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
-    feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
+    feature_cols_present = [c for c in feature_list if c in df.columns]
     df_long = df[base_cols + feature_cols_present].copy()
 
     # Build taxonomic_data with taxonomy and features
@@ -156,20 +193,22 @@ def load(
         "test": test_sample_idx,
     }
 
-    # Fill missing numeric features with their median values given the BIN in the training set
+    # Fill missing numeric features with bin-level medians from the training split.
+    # Use vectorized operations to avoid extremely slow row-wise apply on wide feature sets
+    # (e.g., RANGE embeddings add 1280 columns).
     X = df_long.loc[
         df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), feature_cols_present + ["bin_uri"]
     ]
     bin_medians = X.groupby("bin_uri").median()
     for col in feature_cols_present:
+        # Skip columns that are already complete to avoid unnecessary work.
+        if not df_long[col].isna().any():
+            continue
         if col not in bin_medians.columns:
             continue
-        median_map = bin_medians[col].to_dict()
-        df_long[col] = df_long.apply(
-            lambda row: median_map.get(row["bin_uri"], np.nan) if pd.isna(row[col]) else row[col],
-            axis=1
-        )
-        # Now fill any remaining missing values with overall median
+
+        # Fill NaNs from bin-specific medians, then fall back to global median.
+        df_long[col] = df_long[col].fillna(df_long["bin_uri"].map(bin_medians[col]))
         df_long[col] = df_long[col].fillna(df_long[col].median())
     
     # Normalize based on training set statistics
@@ -198,15 +237,12 @@ def load(
     
     # Save the data splits in the `data` folder
     if save_data:
-        data_dir = os.path.dirname(data_path)
-        # Create subdirectory for this preprocessing method
-        save_dir = os.path.join(data_dir, read_count_preprocessing)
-        os.makedirs(save_dir, exist_ok=True)
+        data_path = os.path.dirname(data_path)
 
         for X, y, split in [(X_train,y_train,"train"), (X_val,y_val,"val"), (X_test,y_test,"test")]:
-            X.to_csv(f"{save_dir}/X_{split}.csv")
-            pd.Series(y).to_csv(f"{save_dir}/y_{split}.csv", index=False)
-        taxonomic_data.to_csv(f"{save_dir}/taxonomic_data.csv", index=False)
+            X.to_csv(f"{data_path}/X_{split}.csv")
+            pd.Series(y).to_csv(f"{data_path}/y_{split}.csv", index=False)
+        taxonomic_data.to_csv(f"{data_path}/taxonomic_data.csv", index=False)
 
     return {
         "train": {"X": X_train, "y": y_train, "y_prob": y_train},
@@ -293,62 +329,3 @@ def load_processed(
         "val": {"X": X_val, "y": y_val, "y_prob": y_val},
         "test": {"X": X_test, "y": y_test, "y_prob": y_test},
     }, bins_df, bin_index, sample_index, split_indices
-
-
-if __name__ == "__main__":
-    """Generate datasets with different read count preprocessing methods."""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Generate datasets with different read count preprocessing")
-    parser.add_argument("--data_path", type=str, default="data/ecuador_training_data.csv",
-                       help="Path to raw data CSV")
-    parser.add_argument("--seed", type=int, default=14, help="Random seed")
-    args = parser.parse_args()
-    
-    # Setup logging
-    log.basicConfig(level=log.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    
-    # Set seed for reproducibility
-    np.random.seed(args.seed)
-    
-    # Create config
-    cfg = Config()
-    
-    # Generate datasets with all three preprocessing methods
-    preprocessing_methods = ["original", "normalized", "logarithm"]
-    
-    log.info("="*70)
-    log.info("GENERATING DATASETS WITH DIFFERENT PREPROCESSING METHODS")
-    log.info("="*70)
-    
-    # First pass: generate the split indices
-    log.info("\nGenerating split indices...")
-    _, _, _, _, split_indices = load(
-        args.data_path, 
-        cfg, 
-        save_data=False,
-        read_count_preprocessing="original"
-    )
-    
-    # Second pass: generate datasets using the same split indices
-    for method in preprocessing_methods:
-        log.info(f"\n{'='*70}")
-        log.info(f"Preprocessing method: {method.upper()}")
-        log.info(f"{'='*70}")
-        
-        _ = load(
-            args.data_path,
-            cfg,
-            save_data=True,
-            fixed_split_indices=split_indices,
-            read_count_preprocessing=method
-        )
-        
-        log.info(f"✓ Saved {method} dataset to data/{method}/")
-    
-    log.info("\n" + "="*70)
-    log.info("DATASET GENERATION COMPLETE")
-    log.info("="*70)
-    log.info("\nGenerated datasets:")
-    for method in preprocessing_methods:
-        log.info(f"  - data/{method}/")
