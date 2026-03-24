@@ -2,7 +2,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --time=12:00:00
+#SBATCH --time=8:00:00
 #SBATCH --job-name=metabarcoding_analysis
 #SBATCH --output=slogs/%x_%A-%a_%n-%t.out
                             # %x=job-name, %A=job ID, %a=array value, %n=node rank, %t=task rank, %N=hostname
@@ -17,7 +17,7 @@ source ~/.bashrc
 source ~/barcode/bin/activate
 
 # Interpolated latent
-cd interpolated_latent/V3
+cd interpolated_latent/V4
 python interpolated_latent.py
 
 # Location embeddings
@@ -25,5 +25,5 @@ cd ../../location_embedding
 python location_embedding.py
 
 cd ..
-python visualize_results.py --results_dir interpolated_latent/V3/results/model_comparison_results.pkl --output_dir figures/interpolated_latent
+python visualize_results.py --results_dir interpolated_latent/V4/results/model_comparison_results.pkl --output_dir figures/interpolated_latent
 python visualize_results.py --results_dir location_embedding/results/location_embeddings_comparison.pkl --output_dir figures/location_embeddings
