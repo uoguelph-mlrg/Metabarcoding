@@ -98,7 +98,6 @@ def run_comparison(
     range_beta: float = 0.5,
     alphaearth_year: int = 2024,
     alphaearth_scale_meters: int = 10,
-    alphaearth_project: Optional[str] = 'metabarcoding-vector',
     keep_raw_gps: bool = False,
     location_embedder_device: str = "cpu",
     location_embedder_batch_size: int = 2048,
@@ -116,7 +115,6 @@ def run_comparison(
         range_beta: Interpolation parameter for RANGE+ (0.0-1.0)
         alphaearth_year: Year for AlphaEarth satellite data
         alphaearth_scale_meters: Scale for AlphaEarth sampling
-        alphaearth_project: Optional GCP project for AlphaEarth
         keep_raw_gps: Whether to keep raw GPS features alongside embeddings
         location_embedder_device: Device for embedding inference ('cpu', 'cuda', 'mps')
         location_embedder_batch_size: Batch size for embedder inference
@@ -180,7 +178,7 @@ def run_comparison(
         elif embedder_name == "alphaearth":
             model_kwargs["alphaearth_year"] = alphaearth_year
             model_kwargs["alphaearth_scale_meters"] = alphaearth_scale_meters
-            model_kwargs["alphaearth_project"] = alphaearth_project
+            model_kwargs["alphaearth_project"] = "metabarcoding-491221"
 
         cfg = _make_cfg(
             use_location_embedding=True,
@@ -277,12 +275,6 @@ if __name__ == "__main__":
         help="Scale in meters for AlphaEarth sampling",
     )
     parser.add_argument(
-        "--alphaearth_project",
-        type=str,
-        default='metabarcoding-vector',
-        help="GCP project ID for Earth Engine (optional)",
-    )
-    parser.add_argument(
         "--keep_raw_gps",
         action="store_true",
         help="Keep raw latitude/longitude features alongside location embeddings",
@@ -347,7 +339,6 @@ if __name__ == "__main__":
         range_beta=args.range_beta,
         alphaearth_year=args.alphaearth_year,
         alphaearth_scale_meters=args.alphaearth_scale_meters,
-        alphaearth_project=args.alphaearth_project,
         keep_raw_gps=args.keep_raw_gps,
         location_embedder_device=args.location_embedder_device,
         location_embedder_batch_size=args.location_embedder_batch_size,
