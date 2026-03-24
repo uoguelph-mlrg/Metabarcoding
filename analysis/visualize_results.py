@@ -48,9 +48,7 @@ import os
 import pickle
 import logging as log
 from typing import Dict, Any, List, Optional, Tuple
-from unittest import result
 
-from httpx import get
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
