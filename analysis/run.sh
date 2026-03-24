@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --gres=gpu:h100:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --time=8:00:00
-#SBATCH --job-name=train_yolo
+#SBATCH --time=0:05:00
+#SBATCH --job-name=metabarcoding_analysis
 #SBATCH --output=slogs/%x_%A-%a_%n-%t.out
                             # %x=job-name, %A=job ID, %a=array value, %n=node rank, %t=task rank, %N=hostname
 #SBATCH --qos=normal
