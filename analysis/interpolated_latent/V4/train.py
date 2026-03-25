@@ -125,12 +125,12 @@ class Trainer:
         # For sample mode, use custom collate function to handle variable-length samples
         batch_size = cfg.batch_size_sample if self.loss_mode == "sample" else cfg.batch_size_bin
         collate_fn = collate_samples if self.loss_mode == "sample" else None
-        self.train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-        self.val_loader = DataLoader(val, batch_size=1, shuffle=False, collate_fn=collate_fn)
-        self.test_loader = DataLoader(test, batch_size=1, shuffle=False, collate_fn=collate_fn)
+        self.train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True, num_workers=8, pin_memory=True)
+        self.val_loader = DataLoader(val, batch_size=1, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True)
+        self.test_loader = DataLoader(test, batch_size=1, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True)
         
         # Non-shuffled loader for stable evaluation/tracking (sample-mode ordering may not match row ordering)
-        self.train_loader_ordered = DataLoader(train, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+        self.train_loader_ordered = DataLoader(train, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True)
 
         # Canonical ordered loader for latent solving (row-aligned with its own targets)
         self.train_loader_bin_ordered = DataLoader(

@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --gres=gpu:h100:1
-#SBATCH --cpus-per-task=1
+#SBATCH --gres=gpu:l40s:1
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=8:00:00
 #SBATCH --job-name=metabarcoding_analysis
@@ -16,14 +16,9 @@ module load python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0
 source ~/.bashrc
 source ~/barcode/bin/activate
 
-# Interpolated latent
+# Run comparison
 cd interpolated_latent/V4
 python interpolated_latent.py
 
-# Location embeddings
-cd ../../location_embedding
-python location_embedding.py
-
-cd ..
+cd ../..
 python visualize_results.py --results_dir interpolated_latent/V4/results/model_comparison_results.pkl --output_dir figures/interpolated_latent
-python visualize_results.py --results_dir location_embedding/results/location_embeddings_comparison.pkl --output_dir figures/location_embeddings
