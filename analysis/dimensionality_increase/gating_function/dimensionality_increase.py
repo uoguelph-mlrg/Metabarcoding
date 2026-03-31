@@ -1,9 +1,8 @@
 """
-Gating Function Comparison: Baseline vs Multiple Gating Architectures
+Gating Function Variant Runner
 
-This script trains multiple model architectures:
-1. Baseline - Original additive architecture: ŷ = sigmoid(m(x) + d_bin)
-2-7. Multiplicative Gating with different gating functions:
+This script trains only gating-function variants (no baseline retraining):
+1-7. Multiplicative Gating with different gating functions:
    - exp: m̃ = m ⊙ exp(h)
    - scaled_exp: m̃ = m ⊙ exp(α·h)
    - additive: m̃ = m ⊙ (1 + h)
@@ -12,7 +11,7 @@ This script trains multiple model architectures:
     - sigmoid: m̃ = m ⊙ (2·σ(h))
 8. Dot Product: z = w^T (m(x) ⊙ h)  (gate_torch returns h, goes through final linear)
 
-Results are saved to pickle for visualization by dimensionality_increase_visualize.py
+Each variant is saved to its own pickle file for later comparison.
 
 Usage:
     python dimensionality_increase.py --data_path ../../data/ecuador_training_data.csv
@@ -41,17 +40,33 @@ import train as train_module
 import config as config_module
 sys.path.pop(0)
 
+analysis_root = str(root_dir.parent.parent)
+if analysis_root not in sys.path:
+    sys.path.insert(0, analysis_root)
+from variant_helpers import (
+    make_output_dir,
+    make_run_group,
+    save_variant_result,
+    variant_wandb_run,
+)
+
 # Try to import wandb, but make it optional
 try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
+    wandb = None
     WANDB_AVAILABLE = False
 
 
-def run_comparison(data_path: str, use_wandb: bool = True, gating_functions: Optional[list] = None) -> Dict[str, Any]:
+def run_comparison(
+    data_path: str,
+    use_wandb: bool = True,
+    gating_functions: Optional[List[str]] = None,
+    run_group: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Run the architecture comparison by training baseline and all gating functions.
+    Train selected gating-function variants.
     
     Args:
         data_path: Path to the training data CSV
@@ -59,28 +74,14 @@ def run_comparison(data_path: str, use_wandb: bool = True, gating_functions: Opt
         gating_functions: List of gating functions to test. If None, tests all.
     
     Returns:
-        Dictionary with results for baseline and all gating architectures
+        Dictionary with results for selected gating variants
     """
     if gating_functions is None:
         gating_functions = ["dot_product", "exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid"]
     
     results = {}
-    
-    # Train with Baseline (Additive) Architecture
-    log.info("\n" + "="*70)
-    log.info("TRAINING BASELINE (ADDITIVE) ARCHITECTURE")
-    log.info("="*70)
     log.info(f"train module: {train_module.__file__}")
     log.info(f"config module: {config_module.__file__}")
-    
-    config_module.set_seed(14)
-    baseline_cfg = config_module.Config(embed_dim=1)  # scalar additive mode (original baseline)
-    
-    baseline_trainer = train_module.Trainer(baseline_cfg, data_path, loss_type="cross_entropy")
-    log.info(f"Baseline model type: {type(baseline_trainer.model).__name__}")
-    
-    baseline_results = baseline_trainer.run(use_wandb=use_wandb)
-    results["baseline"] = baseline_results
     
     # Train with each Multiplicative Gating Architecture
     for gating_fn in gating_functions:
@@ -94,12 +95,22 @@ def run_comparison(data_path: str, use_wandb: bool = True, gating_functions: Opt
             gating_fn=gating_fn,
         )
         log.info(f"Config: embed_dim={cfg.embed_dim}, gating_fn={cfg.gating_fn}")
-        
-        trainer = train_module.Trainer(cfg, data_path, loss_type="cross_entropy")
-        log.info(f"Model type: {type(trainer.model).__name__}")
-        log.info(f"Gating function: {trainer.model.gating_fn}")
-        
-        results[gating_fn] = trainer.run(use_wandb=use_wandb)
+
+        with variant_wandb_run(
+            use_wandb=use_wandb,
+            wandb_module=wandb,
+            project="metabarcoding-gating-comparison",
+            analysis_name="gating_comparison",
+            variant_name=gating_fn,
+            run_group=run_group,
+            tags=["gating_comparison", gating_fn, "variant_only"],
+            config={"embed_dim": cfg.embed_dim, "gating_fn": cfg.gating_fn},
+        ):
+            trainer = train_module.Trainer(cfg, data_path, loss_type="cross_entropy")
+            log.info(f"Model type: {type(trainer.model).__name__}")
+            log.info(f"Gating function: {trainer.model.gating_fn}")
+            
+            results[gating_fn] = trainer.run(use_wandb=use_wandb)
         
         log.info(f"Completed training for {gating_fn}")
     
@@ -116,7 +127,7 @@ def save_results(results: Dict[str, Any], output_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Gating Function Comparison: Baseline vs Multiple Gating Architectures"
+        description="Train gating-function variants without retraining baseline"
     )
     parser.add_argument("--data_path", type=str, required=True, 
                         help="Path to data CSV file")
@@ -135,28 +146,23 @@ if __name__ == "__main__":
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
     
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
-    
-    if use_wandb:
-        wandb.init(
-            project="metabarcoding-gating-comparison",
-            name=f"gating_comparison_{time.strftime('%Y-%m-%d_%H-%M')}",
-            reinit=True,
-        )
+    run_group = make_run_group("gating_comparison")
     
     # Run comparison
-    results = run_comparison(args.data_path, use_wandb=use_wandb, gating_functions=args.gating_functions)
+    results = run_comparison(
+        args.data_path,
+        use_wandb=use_wandb,
+        gating_functions=args.gating_functions,
+        run_group=run_group,
+    )
     
     # Save results
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, args.output_dir)
-    results_path = os.path.join(output_dir, "gating_comparison_results.pkl")
-    save_results(results, results_path)
+    output_dir = make_output_dir(__file__, args.output_dir)
+    for variant, variant_results in results.items():
+        save_variant_result(output_dir, "gating_comparison", variant, variant_results)
     
     log.info(f"\n{'='*70}")
-    log.info("COMPARISON COMPLETE")
+    log.info("VARIANT TRAINING COMPLETE")
     log.info(f"{'='*70}")
-    log.info(f"Results saved to: {results_path}")
-    log.info(f"Run visualization: python dimensionality_increase_visualize.py --results_path {results_path}")
-    
-    if use_wandb:
-        wandb.finish()
+    log.info(f"Results saved to: {output_dir}")
+    log.info(f"Run visualization with one or more files from: {output_dir}")

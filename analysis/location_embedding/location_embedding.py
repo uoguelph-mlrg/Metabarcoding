@@ -31,16 +31,24 @@ from typing import Any, Dict, Optional
 # Local directory first so local config.py and utils.py shadow src versions
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '../../src'))
+sys.path.insert(2, os.path.join(os.path.dirname(__file__), '..'))
 
 from config import Config, set_seed          # local config.py (has location-embedding fields)
 from train import Trainer as BaseTrainer     # src/train.py
 from utils import load, load_processed       # local utils.py (has location-embedding support)
+from variant_helpers import (
+    make_output_dir,
+    make_run_group,
+    save_variant_result,
+    variant_wandb_run,
+)
 
 # Try to import wandb, but make it optional
 try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
+    wandb = None
     WANDB_AVAILABLE = False
 
 import numpy as np
@@ -58,7 +66,7 @@ def _make_cfg(
     range_beta: float = 0.5,
     alphaearth_year: int = 2024,
     alphaearth_scale_meters: int = 10,
-    alphaearth_project: Optional[str] = 'metabarcoding-vector',
+    alphaearth_project: Optional[str] = 'metabarcoding-491221',
 ) -> Config:
     """Build a Config with taxonomy enabled and optional location embedding fields."""
     cfg = Config()
@@ -98,12 +106,15 @@ def run_comparison(
     range_beta: float = 0.5,
     alphaearth_year: int = 2024,
     alphaearth_scale_meters: int = 10,
+    alphaearth_project: Optional[str] = 'metabarcoding-491221',
     keep_raw_gps: bool = False,
     location_embedder_device: str = "cpu",
     location_embedder_batch_size: int = 2048,
+    embedders: Optional[list[str]] = None,
+    run_group: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Run baseline vs location embedding variants comparison and return results.
+    Train location-embedding variants (no baseline retraining) and return results.
     
     Args:
         data_path: Path to CSV data file
@@ -115,6 +126,7 @@ def run_comparison(
         range_beta: Interpolation parameter for RANGE+ (0.0-1.0)
         alphaearth_year: Year for AlphaEarth satellite data
         alphaearth_scale_meters: Scale for AlphaEarth sampling
+        alphaearth_project: GCP project ID for Earth Engine initialization
         keep_raw_gps: Whether to keep raw GPS features alongside embeddings
         location_embedder_device: Device for embedding inference ('cpu', 'cuda', 'mps')
         location_embedder_batch_size: Batch size for embedder inference
@@ -133,32 +145,10 @@ def run_comparison(
         log.info(f"No data path provided. Using default: {data_path}")
 
     # =========================================================================
-    # BASELINE MODEL (No Location Embedding)
-    # =========================================================================
-    log.info("\n" + "=" * 78)
-    log.info("TRAINING BASELINE MODEL (NO LOCATION EMBEDDING)")
-    log.info("=" * 78)
-
-    set_seed(14)
-
-    baseline_cfg = _make_cfg(use_location_embedding=False)
-
-    baseline_trainer = BaseTrainer(
-        baseline_cfg,
-        data_path=data_path,
-        data_dir=data_dir,
-        loss_type="cross_entropy",
-    )
-    baseline_results = baseline_trainer.run(use_wandb=use_wandb)
-    results["baseline"] = baseline_results
-    
-    # Save split indices for reproducibility across all models
-    split_indices = baseline_trainer.split_indices
-
-    # =========================================================================
     # LOCATION EMBEDDING VARIANTS
     # =========================================================================
-    embedders = ["satclip", "range", "geoclip", "alphaearth"]
+    if embedders is None:
+        embedders = ["alphaearth"]
     
     for embedder_name in embedders:
         log.info("\n" + "=" * 78)
@@ -178,7 +168,7 @@ def run_comparison(
         elif embedder_name == "alphaearth":
             model_kwargs["alphaearth_year"] = alphaearth_year
             model_kwargs["alphaearth_scale_meters"] = alphaearth_scale_meters
-            model_kwargs["alphaearth_project"] = "metabarcoding-491221"
+            model_kwargs["alphaearth_project"] = alphaearth_project
 
         cfg = _make_cfg(
             use_location_embedding=True,
@@ -188,18 +178,29 @@ def run_comparison(
             location_embedder_batch_size=location_embedder_batch_size,
             **model_kwargs,
         )
+        if data_path is not None:
+            cfg.data_path = data_path
 
         try:
-            trainer = BaseTrainer(
-                cfg,
-                data_path=data_path,
-                data_dir=data_dir,
-                loss_type="cross_entropy",
-                fixed_split_indices=split_indices,  # Use same split as baseline
-            )
-            embedder_results = trainer.run(use_wandb=use_wandb)
-            results[embedder_name] = embedder_results
-            log.info(f"✓ {embedder_name.upper()} training completed successfully")
+            with variant_wandb_run(
+                use_wandb=use_wandb,
+                wandb_module=wandb,
+                project="metabarcoding-location-embeddings",
+                analysis_name="location_embedding",
+                variant_name=embedder_name,
+                run_group=run_group,
+                tags=["location_embedding", embedder_name, "variant_only"],
+                config={"embedder": embedder_name, **cfg.__dict__},
+            ):
+                trainer = BaseTrainer(
+                    cfg,
+                    data_path=data_path,
+                    data_dir=data_dir,
+                    loss_type="cross_entropy",
+                )
+                embedder_results = trainer.run(use_wandb=use_wandb)
+                results[embedder_name] = embedder_results
+                log.info(f"✓ {embedder_name.upper()} training completed successfully")
         except Exception as e:
             log.error(f"✗ {embedder_name.upper()} training failed: {e}")
             import traceback
@@ -275,6 +276,12 @@ if __name__ == "__main__":
         help="Scale in meters for AlphaEarth sampling",
     )
     parser.add_argument(
+        "--alphaearth_project",
+        type=str,
+        default='metabarcoding-491221',
+        help="GCP project ID for Earth Engine (required for AlphaEarth)",
+    )
+    parser.add_argument(
         "--keep_raw_gps",
         action="store_true",
         help="Keep raw latitude/longitude features alongside location embeddings",
@@ -291,6 +298,13 @@ if __name__ == "__main__":
         type=int,
         default=2048,
         help="Batch size for location embedding inference",
+    )
+    parser.add_argument(
+        "--embedders",
+        nargs="+",
+        default=["alphaearth"],
+        choices=["satclip", "range", "geoclip", "alphaearth"],
+        help="Location embedding variants to train (default: alphaearth)",
     )
     
     # General parameters
@@ -318,14 +332,8 @@ if __name__ == "__main__":
         log.info(f"No --data_path or --data_dir provided. Using default: {data_path}")
 
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
-    if use_wandb:
-        wandb.init(
-            project="metabarcoding-location-embeddings",
-            name=f"location_embeddings_comparison_{time.strftime('%Y-%m-%d_%H-%M')}",
-            tags=["location-embeddings", "satclip", "range", "geoclip", "alphaearth"],
-            reinit=True,
-        )
-    elif not WANDB_AVAILABLE:
+    run_group = make_run_group("location_embedding")
+    if not use_wandb and not WANDB_AVAILABLE:
         log.warning("wandb is not installed; continuing without wandb logging")
 
     # Run comparison
@@ -339,27 +347,25 @@ if __name__ == "__main__":
         range_beta=args.range_beta,
         alphaearth_year=args.alphaearth_year,
         alphaearth_scale_meters=args.alphaearth_scale_meters,
+        alphaearth_project=args.alphaearth_project,
         keep_raw_gps=args.keep_raw_gps,
         location_embedder_device=args.location_embedder_device,
         location_embedder_batch_size=args.location_embedder_batch_size,
+        embedders=args.embedders,
+        run_group=run_group,
     )
 
     # Save results
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, args.output_dir)
-    results_path = os.path.join(output_dir, "location_embeddings_comparison.pkl")
-    
-    save_results(results, results_path)
+    output_dir = make_output_dir(__file__, args.output_dir)
+    for variant, variant_results in results.items():
+        save_variant_result(output_dir, "location_embedding", variant, variant_results)
 
     log.info("\n" + "=" * 78)
-    log.info("COMPARISON COMPLETE")
+    log.info("VARIANT TRAINING COMPLETE")
     log.info("=" * 78)
-    log.info(f"Results saved to: {os.path.abspath(results_path)}")
-    log.info(f"Models compared: baseline + 4 location embedding variants")
+    log.info(f"Results saved to: {os.path.abspath(output_dir)}")
+    log.info(f"Models trained: {', '.join(args.embedders)}")
     log.info(
-        "Results contain training metrics for each model variant "
-        "(can be analyzed programmatically or with visualization tools)"
+        "Results contain training metrics for each variant and can be compared "
+        "with visualize_results.py using --results_paths or a folder path"
     )
-
-    if use_wandb:
-        wandb.finish()

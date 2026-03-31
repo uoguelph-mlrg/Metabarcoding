@@ -635,16 +635,16 @@ def run_ablation_study(
     data_path: str, 
     cfg: Config, 
     use_wandb: bool = True,
-    max_epochs: int = 100
+    max_epochs: int = 100,
+    run_group: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Run the ablation study comparing three model variants.
-    
-    1. MLP + Latent: Original model from train.py
-    2. MLP without taxonomy: MLP-only with same features as MLP + Latent
-    3. MLP with taxonomy: MLP-only with additional taxonomy features
-    
-    All models use cross-entropy loss and the same train/val/test splits.
+    Run ablation variants (no baseline retraining).
+
+    1. MLP without taxonomy: MLP-only with observation features
+    2. MLP with taxonomy: MLP-only with hierarchical taxonomy embeddings
+
+    All variants use the same train/val/test splits.
     """
     results = {}
     
@@ -662,45 +662,14 @@ def run_ablation_study(
     _, _, _, _, split_indices = load(data_path, cfg, save_data=False)
     
     # ========================================================================
-    # Step 2: Train MLP + Latent (original model)
+    # Step 2: Build non-taxonomy data once for all ablation variants
     # ========================================================================
-    log.info("\n" + "="*70)
-    log.info("TRAINING MLP + LATENT (Original Model)")
-    log.info("="*70)
-    
-    set_seed(14)  # Reset seed for reproducibility
-    
-    # Use existing Trainer from train.py with cross-entropy loss (latent solver is now loss-aware)
-    latent_trainer = Trainer(
+    data_no_tax, bins_df, bin_index, sample_index, _, _ = load_data_with_taxonomy(
+        data_path,
         cfg,
-        data_path=data_path,
-        loss_type="cross_entropy",
+        include_taxonomy=False,
         fixed_split_indices=split_indices,
     )
-    latent_results = latent_trainer.run(use_wandb=use_wandb)
-
-    # Reuse the exact processed splits and indices from the latent trainer
-    data_no_tax = latent_trainer.data
-    bin_index = latent_trainer.bin_index
-    sample_index = latent_trainer.sample_index
-    bins_df = latent_trainer.neighbour_graph.bins  # contains taxonomy cols aligned to bin_index
-    
-    # Compute metrics
-    latent_metrics = compute_regression_metrics(
-        latent_results["predictions"], 
-        latent_results["targets"]
-    )
-    
-    results["mlp_latent"] = {
-        "model_name": "MLP + Latent",
-        "best_val_loss": latent_results["best_val_loss"],
-        "predictions": latent_results["predictions"],
-        "targets": latent_results["targets"],
-        "metrics": latent_metrics,
-        "n_features": latent_trainer.data["train"]["X"].shape[1],
-    }
-    
-    log.info(f"MLP + Latent: MAE={latent_metrics['mae_all']:.6f}, MSE={latent_metrics['mse_all']:.6f}")
     
     # ========================================================================
     # Step 3: Train MLP without taxonomy (same features as MLP + Latent)
@@ -710,13 +679,27 @@ def run_ablation_study(
     log.info("="*70)
     
     set_seed(14)  # Reset seed
+
+    if use_wandb:
+        wandb.init(
+            project="metabarcoding-ablation",
+            name=f"ablation_study_mlp_no_taxonomy_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
+            group=run_group,
+            tags=["ablation_study", "mlp_no_taxonomy", "variant_only"],
+            config=cfg.__dict__,
+            reinit=True,
+        )
     
-    mlp_no_tax_trainer = MLPOnlyTrainer(
-        cfg, data_no_tax, bin_index, sample_index, 
-        model_name="MLP (no taxonomy)",
-        taxonomy=None,
-    )
-    mlp_no_tax_results = mlp_no_tax_trainer.run(use_wandb=use_wandb, max_epochs=max_epochs)
+    try:
+        mlp_no_tax_trainer = MLPOnlyTrainer(
+            cfg, data_no_tax, bin_index, sample_index, 
+            model_name="MLP (no taxonomy)",
+            taxonomy=None,
+        )
+        mlp_no_tax_results = mlp_no_tax_trainer.run(use_wandb=use_wandb, max_epochs=max_epochs)
+    finally:
+        if use_wandb:
+            wandb.finish()
     
     mlp_no_tax_metrics = compute_regression_metrics(
         mlp_no_tax_results["predictions"],
@@ -742,6 +725,16 @@ def run_ablation_study(
     log.info("="*70)
     
     set_seed(14)  # Reset seed
+
+    if use_wandb:
+        wandb.init(
+            project="metabarcoding-ablation",
+            name=f"ablation_study_mlp_with_taxonomy_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
+            group=run_group,
+            tags=["ablation_study", "mlp_with_taxonomy", "variant_only"],
+            config=cfg.__dict__,
+            reinit=True,
+        )
     
     # Build hierarchical taxonomy ids per BIN (0 reserved for "unknown")
     tax_ids_per_bin, card = _build_taxonomy_id_matrix(
@@ -751,12 +744,16 @@ def run_ablation_study(
     )
     taxonomy_spec = {"tax_ids_per_bin": tax_ids_per_bin, "cardinalities": card, "taxonomy_cols": TAXONOMY_COLS}
     
-    mlp_with_tax_trainer = MLPOnlyTrainer(
-        cfg, data_no_tax, bin_index, sample_index,
-        model_name="MLP (with taxonomy)",
-        taxonomy=taxonomy_spec,
-    )
-    mlp_with_tax_results = mlp_with_tax_trainer.run(use_wandb=use_wandb, max_epochs=max_epochs)
+    try:
+        mlp_with_tax_trainer = MLPOnlyTrainer(
+            cfg, data_no_tax, bin_index, sample_index,
+            model_name="MLP (with taxonomy)",
+            taxonomy=taxonomy_spec,
+        )
+        mlp_with_tax_results = mlp_with_tax_trainer.run(use_wandb=use_wandb, max_epochs=max_epochs)
+    finally:
+        if use_wandb:
+            wandb.finish()
     
     mlp_with_tax_metrics = compute_regression_metrics(
         mlp_with_tax_results["predictions"],
@@ -809,29 +806,27 @@ if __name__ == "__main__":
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
     
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
-    
-    if use_wandb:
-        wandb.init(
-            project="metabarcoding-ablation",
-            name=f"ablation_{time.strftime('%Y-%m-%d_%H-%M')}",
-            config=cfg.__dict__,
-            reinit=True,
-        )
+    run_group = f"ablation_study_{time.strftime('%Y%m%d_%H%M%S')}"
     
     # Run ablation study
     results = run_ablation_study(
-        args.data_path, cfg, use_wandb=use_wandb, max_epochs=args.max_epochs
+        args.data_path,
+        cfg,
+        use_wandb=use_wandb,
+        max_epochs=args.max_epochs,
+        run_group=run_group,
     )
     
     # Save results
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(script_dir, args.output_dir)
-    results_path = os.path.join(output_dir, "ablation_results.pkl")
-    save_results(results, results_path)
+    for variant, variant_results in results.items():
+        results_path = os.path.join(output_dir, f"ablation_study_{variant}.pkl")
+        save_results({variant: variant_results}, results_path)
     
     # Print summary
     log.info(f"\n{'='*70}")
-    log.info("ABLATION STUDY COMPLETE")
+    log.info("ABLATION VARIANT TRAINING COMPLETE")
     log.info(f"{'='*70}")
     
     log.info("\nSummary:")
@@ -844,8 +839,5 @@ if __name__ == "__main__":
         log.info(f"  MAE (zero): {metrics['mae_zero']:.6f}")
         log.info(f"  MAE (non-zero): {metrics['mae_nonzero']:.6f}")
     
-    log.info(f"\nResults saved to: {results_path}")
-    log.info(f"Run visualization: python ablation_visualize.py --results_path {results_path}")
-    
-    if use_wandb:
-        wandb.finish()
+    log.info(f"\nResults saved to: {output_dir}")
+    log.info(f"Run visualization with one or more files from: {output_dir}")

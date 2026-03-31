@@ -36,7 +36,7 @@ class Config:
     latent_dim: int = 4                 # Dimension of latent embedding per BIN
     latent_init_std: float = 0.0        # Initialize Z with zeros
     latent_lr: float = 2e-2             # Learning rate for Z embedding (input side, Phase B)
-    latent_norm_reg: float = 1e-6       # L2 norm regularization on Z (Phase B)
+    latent_norm_reg: float = 0.0        # Disabled for latent-as-input Z loss (kept for compatibility)
     latent_smooth_reg: float = 1e-4     # Smoothness regularization on Z (Phase B)
     latent_present_only: bool = False   # If True, only fit latent on observations where y > 0
 

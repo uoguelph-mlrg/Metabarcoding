@@ -1,11 +1,9 @@
 """
-Model Comparison: Baseline vs Interpolated-Latent variant.
+Interpolated-Latent Variant Runner.
 
-This script trains two models using the shared trainer implementation from src/train.py:
-1. Baseline model from src/ using the standard src/model.py and src/latent_solver.py
-2. Interpolated-latent variant using the local model.py and latent_solver.py in this folder
-
-Results are saved to pickle for visualization by interpolated_latent_visualisation.py.
+This script trains only the interpolated-latent variant
+(no baseline retraining in this analysis script).
+Results are saved as one variant pickle for later comparison.
 
 Usage:
 	python interpolated_latent.py --data_path ../../data/ecuador_training_data.csv
@@ -18,9 +16,16 @@ import importlib.util
 import os
 import pickle
 import sys
-import time
 import logging as log
 from typing import Dict, Any
+
+sys.path.insert(0, '../..')
+from variant_helpers import (
+	make_output_dir,
+	make_run_group,
+	save_variant_result,
+	variant_wandb_run,
+)
 
 
 # Try to import wandb, but make it optional
@@ -28,6 +33,7 @@ try:
 	import wandb
 	WANDB_AVAILABLE = True
 except ImportError:
+	wandb = None
 	WANDB_AVAILABLE = False
 
 
@@ -103,29 +109,13 @@ def run_comparison(
 	data_path: str | None,
 	data_dir: str | None,
 	use_wandb: bool = True,
+	run_group: str | None = None,
 ) -> Dict[str, Any]:
-	"""Run baseline vs interpolated-latent comparison and return results."""
+	"""Train interpolated-latent variant and return result dict keyed by variant name."""
 	results: Dict[str, Any] = {}
 
 	root_dir = os.path.dirname(os.path.abspath(__file__))
 	src_path = os.path.abspath(os.path.join(root_dir, "..", "..", "..", "src"))
-
-	# ------------------ Baseline (src) ------------------
-	log.info("\n" + "=" * 70)
-	log.info("TRAINING BASELINE MODEL (SRC)")
-	log.info("=" * 70)
-
-	BaselineTrainer, BaselineConfig, baseline_set_seed = load_baseline_trainer(src_path)
-	baseline_set_seed(14)
-	baseline_cfg = BaselineConfig()
-	baseline_trainer = BaselineTrainer(
-		baseline_cfg,
-		data_path=data_path,
-		data_dir=data_dir,
-		loss_type="cross_entropy",
-	)
-	baseline_results = baseline_trainer.run(use_wandb=use_wandb)
-	results["baseline"] = baseline_results
 
 	# ---------------- Interpolated latent (local overrides) ----------------
 	log.info("\n" + "=" * 70)
@@ -135,14 +125,23 @@ def run_comparison(
 	LocalTrainer, LocalConfig, local_set_seed = load_variant_trainer(root_dir, src_path)
 	local_set_seed(14)
 	local_cfg = LocalConfig()
-	local_trainer = LocalTrainer(
-		local_cfg,
-		data_path=data_path,
-		data_dir=data_dir,
-		loss_type="cross_entropy",
-	)
-	local_results = local_trainer.run(use_wandb=use_wandb)
-	results["interpolated_latent"] = local_results
+	with variant_wandb_run(
+		use_wandb=use_wandb,
+		wandb_module=wandb,
+		project="metabarcoding-model-comparison",
+		analysis_name="interpolated_latent_v4",
+		variant_name="interpolated_latent",
+		run_group=run_group,
+		tags=["interpolated_latent_v4", "variant_only"],
+	):
+		local_trainer = LocalTrainer(
+			local_cfg,
+			data_path=data_path,
+			data_dir=data_dir,
+			loss_type="cross_entropy",
+		)
+		local_results = local_trainer.run(use_wandb=use_wandb)
+		results["interpolated_latent"] = local_results
 
 	return results
 
@@ -194,29 +193,19 @@ if __name__ == "__main__":
 		log.info(f"No data_path or data_dir provided. Using default: {data_path}")
 
 	use_wandb = WANDB_AVAILABLE and not args.no_wandb
-	if use_wandb:
-		wandb.init(
-			project="metabarcoding-model-comparison",
-			name=f"interpolated_latent_comparison_{time.strftime('%Y-%m-%d_%H-%M')}",
-			reinit=True,
-		)
+	run_group = make_run_group("interpolated_latent_v4_comparison")
 
 	# Run comparison
-	results = run_comparison(data_path=data_path, data_dir=data_dir, use_wandb=use_wandb)
+	results = run_comparison(data_path=data_path, data_dir=data_dir, use_wandb=use_wandb, run_group=run_group)
 
 	# Save results
 
-	script_dir = os.path.dirname(os.path.abspath(__file__))
-	output_dir = os.path.join(script_dir, args.output_dir)
-	results_path = os.path.join(output_dir, "model_comparison_results.pkl")
+	output_dir = make_output_dir(__file__, args.output_dir)
+	results_path = save_variant_result(output_dir, "interpolated_latent_v4", "interpolated_latent", results["interpolated_latent"])
 	print(f"[INFO] Saving results to: {os.path.abspath(results_path)}")
-	save_results(results, results_path)
 
 	log.info(f"\n{'='*70}")
-	log.info("COMPARISON COMPLETE")
+	log.info("VARIANT TRAINING COMPLETE")
 	log.info(f"{'='*70}")
 	log.info(f"Results saved to: {results_path}")
-	log.info(f"Run visualization: python interpolated_latent_visualisation.py --results_path {results_path}")
-
-	if use_wandb:
-		wandb.finish()
+	log.info(f"Run visualization: python ../visualize_results.py --results_path {results_path}")

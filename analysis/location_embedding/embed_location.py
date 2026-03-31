@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import importlib
 import importlib.util
+import json
+import os
 from pathlib import Path
 import sys
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -72,7 +74,7 @@ class EmbedderSpec:
 	range_beta: float = 0.5
 	alphaearth_year: int = 2024
 	alphaearth_scale_meters: int = 10
-	alphaearth_project: Optional[str] = None
+	alphaearth_project: Optional[str] = 'metabarcoding-491221'
 
 
 class BaseLocationEmbedder:
@@ -358,12 +360,64 @@ class AlphaEarthEmbedder(BaseLocationEmbedder):
 		self.year = int(year)
 		self.scale_meters = int(scale_meters)
 
-		try:
-			ee.Initialize(project=project) if project else ee.Initialize()
-		except Exception as exc:
-			raise RuntimeError(
-				"Earth Engine is not initialized. Run `earthengine authenticate` and then retry."
-			) from exc
+		# Allow project override from env for cluster jobs.
+		project = (
+			project
+			or os.environ.get("ALPHAEARTH_EE_PROJECT")
+			or os.environ.get("EE_PROJECT")
+		)
+
+		# Optional service-account credentials path for non-interactive auth.
+		# Preferred on clusters where browser-based auth is unavailable.
+		credentials_path = (
+			os.environ.get("ALPHAEARTH_EE_CREDENTIALS_JSON")
+			or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+		)
+
+		last_exc: Optional[Exception] = None
+
+		if credentials_path:
+			if not os.path.exists(credentials_path):
+				raise RuntimeError(
+					"Earth Engine credentials file not found. "
+					"Set ALPHAEARTH_EE_CREDENTIALS_JSON (or GOOGLE_APPLICATION_CREDENTIALS) "
+					f"to a valid JSON key file path. Got: {credentials_path}"
+				)
+
+			try:
+				with open(credentials_path, "r", encoding="utf-8") as f:
+					service_account_email = json.load(f).get("client_email")
+			except Exception as exc:
+				raise RuntimeError(
+					"Could not read service-account JSON key for Earth Engine initialization. "
+					f"Path: {credentials_path}"
+				) from exc
+
+			if not service_account_email:
+				raise RuntimeError(
+					"Service-account JSON is missing 'client_email'. "
+					f"Path: {credentials_path}"
+				)
+
+			try:
+				credentials = ee.ServiceAccountCredentials(service_account_email, credentials_path)
+				ee.Initialize(credentials=credentials, project=project) if project else ee.Initialize(credentials=credentials)
+				last_exc = None
+			except Exception as exc:
+				last_exc = exc
+
+		if last_exc is not None or not credentials_path:
+			try:
+				ee.Initialize(project=project) if project else ee.Initialize()
+			except Exception as exc:
+				root = last_exc if last_exc is not None else exc
+				raise RuntimeError(
+					"Earth Engine is not initialized. "
+					"For local interactive auth, run `earthengine authenticate`. "
+					"For clusters, set ALPHAEARTH_EE_CREDENTIALS_JSON (or GOOGLE_APPLICATION_CREDENTIALS) "
+					"to a service-account JSON key and set ALPHAEARTH_EE_PROJECT to your GCP project ID. "
+					f"Initialization error: {root}"
+				) from exc
 
 	@property
 	def embedding_dim(self) -> int:

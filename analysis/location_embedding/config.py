@@ -76,7 +76,7 @@ class Config:
     range_beta: float = 0.5
     alphaearth_year: int = 2024
     alphaearth_scale_meters: int = 10
-    alphaearth_project: Optional[str] = None
+    alphaearth_project: Optional[str] = 'metabarcoding-491221'
 
 
 def set_seed(seed: int = 42) -> None:

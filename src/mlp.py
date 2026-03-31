@@ -10,7 +10,7 @@ class MLPModel(nn.Module):
     """
 
     def __init__(
-        self, input_dim: int, hidden_dims: List[int] = [64, 128, 64, 32],
+        self, input_dim: int, hidden_dims: List[int] = [128, 128, 128, 128],
         output_dim: int = 1, dropout: float = 0.1):
         super().__init__()
         

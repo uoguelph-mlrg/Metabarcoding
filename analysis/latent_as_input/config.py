@@ -32,7 +32,7 @@ class Config:
     latent_dim: int = 4                 # Dimension of latent embedding per BIN
     latent_init_std: float = 0.0        # Initialize with zeros to match baseline
     latent_lr: float = 2e-2             # Learning rate for latent embedding (separate param group)
-    latent_norm_reg: float = 1e-6       # L2 norm regularization on latent
+    latent_norm_reg: float = 0.0        # Deprecated for latent-as-input training loss (kept for config/checkpoint compatibility)
     latent_smooth_reg: float = 1e-4     # Smoothness regularization (parameter λ_smooth)
     latent_present_only: bool = False   # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
 

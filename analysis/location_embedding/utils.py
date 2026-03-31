@@ -115,7 +115,7 @@ def load(
     _range_beta      = _cfg('range_beta',                0.5)
     _ae_year         = _cfg('alphaearth_year',           2024)
     _ae_scale        = _cfg('alphaearth_scale_meters',   10)
-    _ae_project      = _cfg('alphaearth_project',        None)
+    _ae_project      = _cfg('alphaearth_project',        'metabarcoding-491221')
 
     feature_list = list(OBSERVATION_FEATURES)
     location_embedding_cols = []

@@ -5,7 +5,6 @@ import os
 #os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import argparse
-import re
 import time
 from typing import Literal, Optional, List, Tuple, Dict, Any
 import logging as log
@@ -25,6 +24,15 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+import sys
+
+_HERE = os.path.dirname(__file__)
+_SRC = os.path.join(_HERE, '..', '..', '..', 'src')
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+if _SRC not in sys.path:
+    sys.path.insert(1, _SRC)
+
 from neighbor_graph import NeighbourGraph
 from latent_solver import LatentSolver
 from dataset import MBDataset, collate_samples
@@ -33,6 +41,89 @@ from mlp import MLPModel
 from model import Model
 from config import Config, set_seed
 from utils import load, load_processed
+
+
+def compute_extended_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sample_labels: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Compute regression metrics aligned with the baseline trainer outputs."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    valid = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[valid]
+    y_pred = np.clip(y_pred[valid], 0, 1)
+    eps = 1e-10
+
+    rmse_macro = np.nan
+    mae_macro = np.nan
+    kl_divergence = np.nan
+
+    if sample_labels is not None:
+        sample_labels = np.asarray(sample_labels)
+        sample_labels_v = sample_labels[valid]
+        rmse_per, mae_per, kl_per = [], [], []
+        for sample in np.unique(sample_labels_v):
+            mask = sample_labels_v == sample
+            true_s = y_true[mask]
+            pred_s = y_pred[mask]
+            if len(true_s) == 0:
+                continue
+            rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
+            mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
+            true_s_norm = (true_s + eps) / (true_s + eps).sum()
+            pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
+            kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
+        if rmse_per:
+            rmse_macro = float(np.mean(rmse_per))
+            mae_macro = float(np.mean(mae_per))
+            kl_divergence = float(np.mean(kl_per))
+
+    rmse_micro = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    mae_micro = float(np.mean(np.abs(y_true - y_pred)))
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    r2 = float(1 - ss_res / (ss_tot + eps))
+
+    y_true_log = np.log(y_true + 1)
+    y_pred_log = np.log(y_pred + 1)
+    ss_res_log = np.sum((y_true_log - y_pred_log) ** 2)
+    ss_tot_log = np.sum((y_true_log - np.mean(y_true_log)) ** 2)
+    r2_log = float(1 - ss_res_log / (ss_tot_log + eps))
+
+    zero_mask = y_true == 0
+    nonzero_mask = y_true > 0
+    rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))) if zero_mask.sum() > 0 else np.nan
+    mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))) if zero_mask.sum() > 0 else np.nan
+    rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2))) if nonzero_mask.sum() > 0 else np.nan
+    mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask]))) if nonzero_mask.sum() > 0 else np.nan
+
+    corr = np.corrcoef(y_true, y_pred)[0, 1] if len(y_true) > 1 else 0.0
+    correlation = 0.0 if np.isnan(corr) else float(corr)
+
+    nz = y_true != 0
+    rel_error = np.zeros_like(y_true, dtype=float)
+    rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
+    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else np.nan
+
+    return {
+        "RMSE (micro)": rmse_micro,
+        "RMSE (macro)": rmse_macro,
+        "MAE (micro)": mae_micro,
+        "MAE (macro)": mae_macro,
+        "Absolute Relative Error": absolute_relative_error,
+        "R²": r2,
+        "R² (log + 1)": r2_log,
+        "RMSE (zeros)": rmse_zeros,
+        "MAE (zeros)": mae_zeros,
+        "RMSE (non-zeros)": rmse_nonzeros,
+        "MAE (non-zeros)": mae_nonzeros,
+        "KL Divergence": kl_divergence,
+        "Correlation": correlation,
+        "n_zeros": float(zero_mask.sum()),
+        "n_nonzeros": float(nonzero_mask.sum()),
+    }
 
 class Trainer:
     """
@@ -43,10 +134,25 @@ class Trainer:
         cfg: Config,
         data_path: Optional[str] = None,
         data_dir: Optional[str] = None,
-        loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy",
+        loss_type: Optional[Literal["cross_entropy", "logistic"]] = None,
+        model_name: str = "interpolated_latent_v3",
+        run_id: Optional[str] = None,
+        resume: bool = False,
         fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
     ) -> None:
         self.cfg = cfg
+        self.model_name = model_name
+        self.run_id = run_id or time.strftime("%Y-%m-%d_%H-%M-%S")
+        self.resume = resume
+        self.start_epoch = 0
+        self.current_epoch = -1
+        self.global_step = 0
+        self.best_val_loss = float("inf")
+        self.last_val_metrics: Dict[str, float] = {}
+
+        self.base_artifact_dir = os.path.abspath(os.path.join(self.cfg.results_dir, self.model_name))
+        self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
         
         # Load data
         if data_dir is not None:
@@ -77,7 +183,7 @@ class Trainer:
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
         mlp_model = MLPModel(
-            input_dim, hidden_dims=[64, 128, 64, 32],
+            input_dim, hidden_dims=[128, 128, 128, 128],
             output_dim=self.cfg.embed_dim,
             dropout=self.cfg.dropout,
         ).to(self.device)
@@ -107,9 +213,9 @@ class Trainer:
             lr=self.cfg.lr,
         )
         # Loss configuration
-        self.loss_type = loss_type
-        self.loss_mode = "sample" if loss_type == "cross_entropy" else "bin"
-        self.criterion = Loss(task=loss_type)
+        self.loss_type = loss_type or "cross_entropy"
+        self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
+        self.criterion = Loss(task=self.loss_type)
         
         # Build datasets
         log.debug(f"\n   Building datasets...")
@@ -160,9 +266,6 @@ class Trainer:
             self.optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps]
         )
         
-        # Track best validation loss for checkpointing
-        self.best_val_loss = float('inf')
-
         # Loss tracking for visualization
         self.train_losses = []  # List of (epoch, step, loss) tuples
         self.val_losses = []    # List of (epoch, step, loss) tuples
@@ -171,10 +274,102 @@ class Trainer:
         self.timeline_train_losses = []  # List of (phase, epoch, step, loss) tuples
         self.timeline_val_losses = []    # List of (phase, epoch, step, loss) tuples
         
-        # Prepare save path
-        root = os.path.dirname(os.path.abspath(__file__))
-        self.save_path = os.path.join(root, "models", f"{time.strftime('%Y-%m-%d_%H:%M:%S')}.pt")
-        os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
+        if self.resume:
+            self._resume_from_latest()
+
+    def _checkpoint_path(self, name: str) -> str:
+        return os.path.join(self.checkpoint_dir, name)
+
+    def _build_checkpoint_payload(self, epoch: int, val_loss: float, val_metrics: Dict[str, float]) -> Dict[str, Any]:
+        return {
+            "model_name": self.model_name,
+            "run_id": self.run_id,
+            "epoch": epoch,
+            "global_step": self.global_step,
+            "best_val_loss": self.best_val_loss,
+            "val_loss": val_loss,
+            "val_metrics": val_metrics,
+            "config": asdict(self.cfg),
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "train_losses": self.train_losses,
+            "val_losses": self.val_losses,
+            "cycle_train_losses": self.cycle_train_losses,
+            "cycle_val_losses": self.cycle_val_losses,
+            "timeline_train_losses": self.timeline_train_losses,
+            "timeline_val_losses": self.timeline_val_losses,
+            "rng_numpy": np.random.get_state(),
+            "rng_torch": torch.get_rng_state(),
+            "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "saved_at": time.strftime("%Y-%m-%d_%H-%M-%S"),
+        }
+
+    def _save_checkpoint(self, epoch: int, val_loss: float, val_metrics: Dict[str, float], best: bool = False) -> None:
+        payload = self._build_checkpoint_payload(epoch=epoch, val_loss=val_loss, val_metrics=val_metrics)
+        torch.save(payload, self._checkpoint_path("latest.pt"))
+
+        checkpoint_every = int(getattr(self.cfg, "checkpoint_every", 5))
+        if (epoch + 1) % checkpoint_every == 0:
+            torch.save(payload, self._checkpoint_path(f"epoch_{epoch + 1:04d}.pt"))
+
+        if best:
+            torch.save(payload, self._checkpoint_path("best.pt"))
+
+    def _find_latest_checkpoint_path(self) -> Optional[str]:
+        latest = self._checkpoint_path("latest.pt")
+        if os.path.exists(latest):
+            return latest
+        if not os.path.exists(self.checkpoint_dir):
+            return None
+        ckpts = [
+            os.path.join(self.checkpoint_dir, p)
+            for p in os.listdir(self.checkpoint_dir)
+            if p.endswith(".pt")
+        ]
+        if not ckpts:
+            return None
+        ckpts.sort(key=os.path.getmtime, reverse=True)
+        return ckpts[0]
+
+    def _resume_from_latest(self) -> None:
+        ckpt_path = self._find_latest_checkpoint_path()
+        if ckpt_path is None:
+            log.warning("Resume requested but no checkpoint was found. Starting from epoch 0.")
+            return
+
+        checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+        self.current_epoch = int(checkpoint.get("epoch", -1))
+        self.start_epoch = self.current_epoch + 1
+        self.global_step = int(checkpoint.get("global_step", 0))
+        self.best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+        self.train_losses = list(checkpoint.get("train_losses", []))
+        self.val_losses = list(checkpoint.get("val_losses", []))
+        self.cycle_train_losses = list(checkpoint.get("cycle_train_losses", []))
+        self.cycle_val_losses = list(checkpoint.get("cycle_val_losses", []))
+        self.timeline_train_losses = list(checkpoint.get("timeline_train_losses", []))
+        self.timeline_val_losses = list(checkpoint.get("timeline_val_losses", []))
+        self.last_val_metrics = dict(checkpoint.get("val_metrics", {}))
+
+        rng_numpy = checkpoint.get("rng_numpy")
+        rng_torch = checkpoint.get("rng_torch")
+        rng_cuda = checkpoint.get("rng_cuda")
+        if rng_numpy is not None:
+            np.random.set_state(rng_numpy)
+        if rng_torch is not None:
+            torch.set_rng_state(rng_torch)
+        if rng_cuda is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng_cuda)
+
+        log.info(f"Resumed from checkpoint: {ckpt_path} (epoch {self.current_epoch})")
+
+    def _configure_latent_usage(self, mode: str = "normal", interpolated_bin_mask: Optional[np.ndarray] = None) -> None:
+        if hasattr(self.model, "configure_latent_usage"):
+            self.model.configure_latent_usage(mode=mode, interpolated_bin_mask=interpolated_bin_mask)
 
 
     def train_epoch(self) -> float:
@@ -271,7 +466,7 @@ class Trainer:
     @torch.no_grad()
     def validate(self, split: Literal["train", "val", "test"]) -> float:
         # Always evaluate with normal latent usage.
-        self.model.configure_latent_usage(mode="normal", interpolated_bin_mask=None)
+        self._configure_latent_usage(mode="normal", interpolated_bin_mask=None)
         data_loader = (
             self.val_loader if split == "val" else 
             self.test_loader if split == "test" else 
@@ -310,89 +505,9 @@ class Trainer:
 
     @torch.no_grad()
     def compute_metrics(self, split: str) -> Dict[str, float]:
-        """Compute interpretable metrics for a given split."""
-        # Keep metrics consistent with inference behavior.
-        self.model.configure_latent_usage(mode="normal", interpolated_bin_mask=None)
-        data_loader = (
-            self.train_loader if split == "train" else
-            self.val_loader if split == "val" else
-            self.test_loader if split == "test" else
-            None
-        )
-        if data_loader is None:
-            return {}
-        self.model.eval()
-        
-        # Metrics to compute
-        classification_accuracy = []
-        classification_precision = []
-        classification_recall = []
-        classification_specificity = []
-        classification_f1 = []
-        mae_when_present = []
-        mae_when_absent = []
-        
-        for batch in data_loader:
-            inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
-            
-            if self.loss_mode == "sample":
-                # Sample mode: inputs [B, max_bins, features]
-                if mask is None:
-                    raise ValueError("Mask is required in sample mode")
-                B, max_bins, n_feat = inputs.shape
-                inputs_flat = inputs.view(B * max_bins, n_feat)
-                bin_idx_flat = bin_idx.view(B * max_bins)
-                
-                outputs_flat = self.model(inputs_flat, bin_idx_flat)
-                outputs = outputs_flat.view(B, max_bins)
-                outputs = outputs.masked_fill(mask == 0, float('-inf'))
-                
-                # Apply softmax to get probabilities
-                probs = F.softmax(outputs, dim=-1)
-                
-                # Flatten but only keep valid (non-padded) entries
-                mask_flat = mask.view(-1).bool()
-                probs_np = probs.view(-1)[mask_flat].cpu().numpy()
-                targets_np = targets.view(-1)[mask_flat].cpu().numpy()
-            else:
-                outputs = self.model(inputs, bin_idx)
-                probs = torch.sigmoid(outputs)
-                probs_np = probs.cpu().numpy().flatten()
-                targets_np = targets.cpu().numpy().flatten()
-            
-            # Classification metrics (predicted absent when prob < epsilon)
-            epsilon = 1e-2
-            tp = sum((p >= epsilon) and (t > 0) for p, t in zip(probs_np, targets_np))
-            tn = sum((p < epsilon) and (t == 0) for p, t in zip(probs_np, targets_np))
-            fp = sum((p >= epsilon) and (t == 0) for p, t in zip(probs_np, targets_np))
-            fn = sum((p < epsilon) and (t > 0) for p, t in zip(probs_np, targets_np))
-            accuracy = (tp + tn) / max(1, (tp + tn + fp + fn))
-            precision = tp / max(1, (tp + fp))
-            recall = tp / max(1, (tp + fn))
-            specificity = tn / max(1, (tn + fp))
-            f1 = 2 * (precision * recall) / max(1e-12, (precision + recall))
-            classification_accuracy.append(accuracy)
-            classification_precision.append(precision)
-            classification_recall.append(recall)
-            classification_specificity.append(specificity)
-            classification_f1.append(f1)
-            
-            # MAE when present / absent
-            for p, t in zip(probs_np, targets_np):
-                if t > 0:
-                    mae_when_present.append(abs(p - t))
-                else:
-                    mae_when_absent.append(abs(p - t))
-        
-        return {
-            "classification_accuracy": float(np.mean(classification_accuracy)),
-            "classification_precision": float(np.mean(classification_precision)),
-            "classification_recall": float(np.mean(classification_recall)),
-            "classification_specificity": float(np.mean(classification_specificity)),
-            "classification_f1": float(np.mean(classification_f1)),
-            "mae_when_present": float(np.mean(mae_when_present)) if mae_when_present else 0.0,
-            "mae_when_absent": float(np.mean(mae_when_absent)) if mae_when_absent else 0.0,
-        }
+        self._configure_latent_usage(mode="normal", interpolated_bin_mask=None)
+        preds, targets, sample_labels, _ = self.get_predictions(split=split)  # type: ignore[arg-type]
+        return compute_extended_metrics(y_true=targets, y_pred=preds, sample_labels=sample_labels)
 
     def solve_latent(
         self,
@@ -490,7 +605,7 @@ class Trainer:
             self.test_loader
         )
         # Always infer with normal latent usage.
-        self.model.configure_latent_usage(mode="normal", interpolated_bin_mask=None)
+        self._configure_latent_usage(mode="normal", interpolated_bin_mask=None)
         self.model.eval()
         # Accumulate per-sample lists
         sample_pred: Dict[int, list] = {}
@@ -568,7 +683,8 @@ class Trainer:
         """Run full alternation training with per-batch latent/MLP alternation."""
         warmup_epochs = max(1, int(self.cfg.latent_warmup_frac * self.cfg.epochs))
         log.debug(f"Starting per-batch alternation training (latent warms up over first {warmup_epochs} epochs)...")
-        for epoch in tqdm(range(self.cfg.epochs), desc="Epochs", leave=False):
+        for epoch in tqdm(range(self.start_epoch, self.cfg.epochs), desc="Epochs", leave=False):
+            self.current_epoch = epoch
             # Proximal weight ρ: decays linearly from ρ₀ → 0 over warmup_epochs (proximal/damped EM).
             # At epoch 0: ρ = latent_prox_scale * latent_l2_reg (large anchor near D=0).
             # At epoch = warmup_epochs: ρ = 0 (standard unconstrained solve).
@@ -576,7 +692,7 @@ class Trainer:
             phase_tag = "latent_warmup" if alpha < 1.0 else "latent"
             prox_weight = self.cfg.latent_prox_scale * self.cfg.latent_l2_reg * (1.0 - alpha)
             epoch_interp_samples = self._sample_interpolated_sample_ids(self.interpolated_sample_fraction)
-            self.model.configure_latent_usage(mode="normal", interpolated_bin_mask=None)
+            self._configure_latent_usage(mode="normal", interpolated_bin_mask=None)
 
             # Alternate: for each batch, solve latent then take one MLP gradient step
             latent_vec = self.model.latent_vec.detach().cpu().numpy()  # fallback if loader is empty
@@ -589,9 +705,10 @@ class Trainer:
                 # Phase B: one MLP gradient step on this batch
                 self._train_batch(batch, selected_sample_ids=epoch_interp_samples)
                 self.scheduler.step()
+                self.global_step += 1
 
             # End-of-epoch evaluation
-            self.model.configure_latent_usage(mode="normal", interpolated_bin_mask=None)
+            self._configure_latent_usage(mode="normal", interpolated_bin_mask=None)
             train_loss = self.validate(split="train")
             val_loss = self.validate(split="val")
 
@@ -601,6 +718,8 @@ class Trainer:
             self.val_losses.append((epoch, 0, val_loss))
             self.cycle_train_losses.append((epoch, train_loss))
             self.cycle_val_losses.append((epoch, val_loss))
+            val_metrics = self.compute_metrics(split="val")
+            self.last_val_metrics = val_metrics
 
             if use_wandb and WANDB_AVAILABLE:
                 metrics = self.compute_metrics(split="val")
@@ -614,30 +733,41 @@ class Trainer:
                     "latent_std": float(latent_vec.std()),
                     "latent_min": float(latent_vec.min()),
                     "latent_max": float(latent_vec.max()),
+                    "train/global_step": self.global_step,
+                    **{f"val/metrics/{k}": v for k, v in val_metrics.items()},
                     "interpolated_sample_fraction": float(len(epoch_interp_samples) / max(1, len(self.train_sample_ids))),
                     "interpolated_sample_count": int(len(epoch_interp_samples)),
                 })
 
-            if val_loss < self.best_val_loss - 1e-4:
+            improved = val_loss < self.best_val_loss - 1e-4
+            if improved:
                 self.best_val_loss = val_loss
-                self.model.save_model(self.save_path)
+
+            self._save_checkpoint(epoch=epoch, val_loss=val_loss, val_metrics=val_metrics, best=improved)
 
             log.info(f"Epoch {epoch} (ρ={prox_weight:.4f}): val_loss={val_loss:.6f}, train_loss={train_loss:.6f}")
         
         # Load best saved model before final evaluation (end-of-training weights may be worse)
-        if os.path.exists(self.save_path):
-            self.model.load_model(self.save_path)
-            log.debug(f"Loaded best checkpoint from {self.save_path} for final evaluation")
+        best_ckpt = self._checkpoint_path("best.pt")
+        if os.path.exists(best_ckpt):
+            checkpoint = torch.load(best_ckpt, map_location=self.device, weights_only=False)
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            log.debug(f"Loaded best checkpoint from {best_ckpt} for final evaluation")
 
         # Plot training progress
         self._plot_training_progress()
 
         # Return results for external use
+        test_loss = self.validate(split="test")
+        test_metrics = self.compute_metrics(split="test")
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
         # Save the final latent vector for downstream analysis
         latent_vector = self.model.latent_vec.detach().cpu().numpy()
         return {
+            "model": self.model_name,
+            "run_id": self.run_id,
             "best_val_loss": self.best_val_loss,
+            "test_loss": test_loss,
             "predictions": predictions,
             "targets": targets,
             "sample_labels": sample_labels,
@@ -649,6 +779,8 @@ class Trainer:
             "cycle_val_losses": self.cycle_val_losses,
             "timeline_train_losses": self.timeline_train_losses,
             "timeline_val_losses": self.timeline_val_losses,
+            "val_metrics": self.last_val_metrics,
+            "test_metrics": test_metrics,
         }
 
     def _plot_training_progress(self) -> None:
@@ -734,6 +866,9 @@ if __name__ == "__main__":
                             help="Path to directory containing processed CSV files (X_*.csv, y_*.csv, taxonomic_data.csv)")
     parser.add_argument("--loss_type", type=str, choices=["cross_entropy", "logistic"],
                         default="cross_entropy", help="Type of loss function to use")
+    parser.add_argument("--model", type=str, default="interpolated_latent_v3",
+                        help="Model variant name stored in output results")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
     
@@ -749,10 +884,11 @@ if __name__ == "__main__":
     if not WANDB_AVAILABLE:
         log.warning("wandb is not installed; continuing without wandb logging")
     else:
+        run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
         wandb.init(
             project="metabarcoding",
-            name=time.strftime("%Y-%m-%d_%H-%M"),
-            config=asdict(cfg),
+            name=f"{args.model}_{run_id}",
+            config={"model": args.model, **asdict(cfg)},
             dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wandb")
         )
 
@@ -763,14 +899,26 @@ if __name__ == "__main__":
     if data_path is None and data_dir is None:
         data_path = cfg.data_path
 
-    trainer = Trainer(cfg, data_path=data_path, data_dir=data_dir, loss_type=args.loss_type)
+    run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = os.path.abspath(os.path.join(cfg.results_dir, args.model))
+    os.makedirs(run_dir, exist_ok=True)
+
+    trainer = Trainer(
+        cfg,
+        data_path=data_path,
+        data_dir=data_dir,
+        loss_type=args.loss_type,
+        model_name=args.model,
+        run_id=run_id,
+        resume=args.resume,
+    )
 
     log.debug(f"\n   Starting training...")
     results = trainer.run(use_wandb=use_wandb)
+    results["model"] = args.model
 
     # Save results to pickle for downstream visualization
-    os.makedirs(cfg.results_dir, exist_ok=True)
-    pkl_path = os.path.join(cfg.results_dir, f"results_{time.strftime('%Y-%m-%d_%H-%M')}.pkl")
+    pkl_path = os.path.join(run_dir, f"results_{args.model}_{run_id}.pkl")
     with open(pkl_path, "wb") as fh:
         pickle.dump(results, fh)
     log.info(f"Results saved to: {pkl_path}")

@@ -1,0 +1,137 @@
+{
+  "default_profile": "moderate",
+  "profiles": {
+    "conservative": {
+      "description": "Maximize retention and mostly flag uncertain quality issues.",
+      "dynamic_quantiles": {
+        "min_total_reads_q": 0.01,
+        "min_bins_per_sample_q": 0.01,
+        "shannon_low_q": 0.01,
+        "shannon_high_q": 0.99
+      },
+      "hard_floors": {
+        "min_total_reads_fail": 500.0,
+        "min_bins_per_sample_fail": 5.0
+      },
+      "absolute_thresholds": {
+        "min_replicate_fraction_flag": 0.67,
+        "min_replicate_fraction_fail": 0.34,
+        "max_taxonomy_missing_fraction_flag": 0.60,
+        "max_taxonomy_missing_fraction_fail": 0.90,
+        "max_metadata_missing_fraction_flag": 0.50,
+        "max_metadata_missing_fraction_fail": 0.80,
+        "max_invalid_coord_fraction_flag": 0.20,
+        "max_invalid_coord_fraction_fail": 0.50,
+        "max_duplicate_bin_rows_flag": 1,
+        "max_duplicate_bin_rows_fail": 5,
+        "max_contamination_burden_flag": 0.20,
+        "max_contamination_burden_fail": 0.40,
+        "outlier_robust_z_flag": 4.0,
+        "outlier_robust_z_fail": 6.0
+      }
+    },
+    "moderate": {
+      "description": "Balanced default profile for ecological fidelity with objective safeguards.",
+      "dynamic_quantiles": {
+        "min_total_reads_q": 0.05,
+        "min_bins_per_sample_q": 0.05,
+        "shannon_low_q": 0.05,
+        "shannon_high_q": 0.95
+      },
+      "hard_floors": {
+        "min_total_reads_fail": 1000.0,
+        "min_bins_per_sample_fail": 10.0
+      },
+      "absolute_thresholds": {
+        "min_replicate_fraction_flag": 0.67,
+        "min_replicate_fraction_fail": 0.34,
+        "max_taxonomy_missing_fraction_flag": 0.40,
+        "max_taxonomy_missing_fraction_fail": 0.70,
+        "max_metadata_missing_fraction_flag": 0.30,
+        "max_metadata_missing_fraction_fail": 0.60,
+        "max_invalid_coord_fraction_flag": 0.10,
+        "max_invalid_coord_fraction_fail": 0.30,
+        "max_duplicate_bin_rows_flag": 0,
+        "max_duplicate_bin_rows_fail": 3,
+        "max_contamination_burden_flag": 0.10,
+        "max_contamination_burden_fail": 0.25,
+        "outlier_robust_z_flag": 3.5,
+        "outlier_robust_z_fail": 5.0
+      }
+    },
+    "strict": {
+      "description": "Aggressive technical quality filtering with lower tolerance for anomalies.",
+      "dynamic_quantiles": {
+        "min_total_reads_q": 0.10,
+        "min_bins_per_sample_q": 0.10,
+        "shannon_low_q": 0.10,
+        "shannon_high_q": 0.90
+      },
+      "hard_floors": {
+        "min_total_reads_fail": 5000.0,
+        "min_bins_per_sample_fail": 15.0
+      },
+      "absolute_thresholds": {
+        "min_replicate_fraction_flag": 1.00,
+        "min_replicate_fraction_fail": 0.67,
+        "max_taxonomy_missing_fraction_flag": 0.25,
+        "max_taxonomy_missing_fraction_fail": 0.50,
+        "max_metadata_missing_fraction_flag": 0.20,
+        "max_metadata_missing_fraction_fail": 0.40,
+        "max_invalid_coord_fraction_flag": 0.05,
+        "max_invalid_coord_fraction_fail": 0.20,
+        "max_duplicate_bin_rows_flag": 0,
+        "max_duplicate_bin_rows_fail": 1,
+        "max_contamination_burden_flag": 0.05,
+        "max_contamination_burden_fail": 0.15,
+        "outlier_robust_z_flag": 3.0,
+        "outlier_robust_z_fail": 4.0
+      }
+    }
+  },
+  "contamination": {
+    "control_sample_regex": "(?:blank|negative|neg[_-]?ctrl|ntc|control)",
+    "control_plate_regex": "(?:blank|negative|neg[_-]?ctrl|ntc|control)",
+    "min_control_prevalence_for_flag": 0.05,
+    "min_control_prevalence_for_fail": 0.10,
+    "control_to_noncontrol_prevalence_ratio_flag": 3.0,
+    "control_to_noncontrol_prevalence_ratio_fail": 6.0
+  },
+  "required_columns": {
+    "sample": "sample-eventid",
+    "bin": "bin_uri",
+    "reads": "total_reads",
+    "occurrences": "occurrences",
+    "replicate_fraction": "repl_w_reads_fractn",
+    "replicates_with_reads": "tot_repl_w_reads",
+    "replicates_total": "tot_repl",
+    "plate": "metabarcode_plate_id",
+    "collection_start": "collection_start_date",
+    "collection_end": "collection_end_date",
+    "latitude": "latitude",
+    "longitude": "longitude"
+  },
+  "taxonomy_columns": [
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "subfamily",
+    "genus",
+    "species"
+  ],
+  "metadata_columns": [
+    "trackingsl_sheet_id",
+    "collection_start_date",
+    "collection_end_date",
+    "latitude",
+    "longitude",
+    "metabarcode_plate_id"
+  ],
+  "world_coordinate_bounds": {
+    "lat_min": -90.0,
+    "lat_max": 90.0,
+    "lon_min": -180.0,
+    "lon_max": 180.0
+  }
+}

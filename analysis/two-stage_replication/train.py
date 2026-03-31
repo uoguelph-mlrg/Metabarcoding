@@ -288,8 +288,9 @@ def save_model(model, feature_names: list, results: dict, config: RandomForestCo
     # Generate timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     
+    model_name = results.get("model", "two_stage_replication")
     # Save model
-    model_path = os.path.join(config.model_dir, f"rf_model.pkl")
+    model_path = os.path.join(config.model_dir, f"rf_model_{model_name}_{timestamp}.pkl")
     with open(model_path, 'wb') as f:
         pickle.dump({
             'model': model,
@@ -299,7 +300,7 @@ def save_model(model, feature_names: list, results: dict, config: RandomForestCo
     print(f"\nModel saved to: {model_path}")
     
     # Save results
-    results_path = os.path.join(config.results_dir, f"training_results.csv")
+    results_path = os.path.join(config.results_dir, f"training_results_{model_name}_{timestamp}.csv")
     results_df = pd.DataFrame(results).T
     results_df.to_csv(results_path)
     print(f"Results saved to: {results_path}")
@@ -316,6 +317,7 @@ def main():
     parser.add_argument("--max_features", type=str, default="sqrt", help="Max features per split")
     parser.add_argument("--data_dir", type=str, default="data", help="Path to data directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--model", type=str, default="two_stage_replication", help="Model variant name stored in output artifacts")
     parser.add_argument("--save", action="store_false", help="Save the model")
     
     args = parser.parse_args()
@@ -333,6 +335,7 @@ def main():
     
     # Train model
     model, feature_names, results = train_random_forest(config)
+    results["model"] = args.model
     
     # Save if requested
     if args.save:

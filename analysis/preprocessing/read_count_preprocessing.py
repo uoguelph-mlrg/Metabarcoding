@@ -1,57 +1,61 @@
 """
-Read Count Preprocessing Comparison
+Read Count Preprocessing Variant Runner
 
-This script trains the MLP + Latent model with three different preprocessing methods:
-1. Original: Normalize by sample + log transform (current method)
-2. Normalized: Only normalize by sample (no log)
-3. Logarithm: Only log transform (no sample normalization)
-
-Results are saved to pickle for visualization by preprocessing_visualization.py
+This script trains only preprocessing variants (no baseline retraining).
+Each variant is saved to its own pickle file for later comparison.
 
 Usage:
-    # First, generate the datasets
-    python utils_test.py --data_path data/ecuador_training_data.csv
-    
-    # Then run the comparison
     python read_count_preprocessing.py
-    python read_count_preprocessing.py --no_wandb
+    python read_count_preprocessing.py --methods normalized logarithm --no_wandb
 """
 from __future__ import annotations
 
 import argparse
 import os
 import pickle
-import time
-from typing import Dict, Any
+from typing import Dict, Any, List
 import logging as log
 
 import sys
 sys.path.insert(0, '../../src')
+sys.path.insert(0, '..')
 
 from config import Config, set_seed
 from train import Trainer
+from variant_helpers import (
+    make_output_dir,
+    make_run_group,
+    save_variant_result,
+    variant_wandb_run,
+)
 
 # Try to import wandb, but make it optional
 try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
+    wandb = None
     WANDB_AVAILABLE = False
 
 
-def run_comparison(cfg: Config, use_wandb: bool = True) -> Dict[str, Any]:
+def run_comparison(
+    cfg: Config,
+    methods: List[str],
+    use_wandb: bool = True,
+    run_group: str | None = None,
+) -> Dict[str, Any]:
     """
-    Run the preprocessing comparison by training with all three methods.
+    Train selected preprocessing variants.
     
     Args:
         cfg: Configuration object
         use_wandb: Whether to log to Weights & Biases
     
     Returns:
-        Dictionary with results for all preprocessing methods
+        Dictionary keyed by preprocessing variant
     """
     results = {}
-    preprocessing_methods = ["original", "normalized", "logarithm"]
+    preprocessing_methods = methods
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -71,11 +75,18 @@ def run_comparison(cfg: Config, use_wandb: bool = True) -> Dict[str, Any]:
         # Reset seed for fair comparison
         set_seed(14)
 
-        # Create trainer with preprocessed data
-        trainer = Trainer(cfg, data_dir=data_dir, loss_type="cross_entropy")
-
-        # Run training
-        method_results = trainer.run(use_wandb=use_wandb)
+        with variant_wandb_run(
+            use_wandb=use_wandb,
+            wandb_module=wandb,
+            project="metabarcoding-preprocessing-comparison",
+            analysis_name="preprocessing",
+            variant_name=method,
+            run_group=run_group,
+            tags=["preprocessing", method, "variant_only"],
+            config={**cfg.__dict__, "variant": method},
+        ):
+            trainer = Trainer(cfg, data_dir=data_dir, loss_type="cross_entropy")
+            method_results = trainer.run(use_wandb=use_wandb)
 
         results[method] = method_results
 
@@ -101,39 +112,48 @@ if __name__ == "__main__":
                         help="Disable Weights & Biases logging")
     parser.add_argument("--output_dir", type=str, default="results", 
                         help="Output directory for results pickle")
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Optional epoch override for quick dry-runs",
+    )
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        default=["normalized", "logarithm"],
+        choices=["original", "normalized", "logarithm"],
+        help="Preprocessing variants to train (default: normalized logarithm)",
+    )
     args = parser.parse_args()
     
     # Setup
     set_seed(14)
     cfg = Config()
+    if args.epochs is not None:
+        cfg.epochs = args.epochs
     
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
     
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
-    
-    if use_wandb:
-        wandb.init(
-            project="metabarcoding-preprocessing-comparison",
-            name=f"preprocessing_comparison_{time.strftime('%Y-%m-%d_%H-%M')}",
-            config=cfg.__dict__,
-            reinit=True,
-        )
+    run_group = make_run_group("preprocessing_comparison")
     
     # Run comparison
-    results = run_comparison(cfg, use_wandb=use_wandb)
+    results = run_comparison(
+        cfg,
+        methods=args.methods,
+        use_wandb=use_wandb,
+        run_group=run_group,
+    )
     
     # Save results
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, args.output_dir)
-    results_path = os.path.join(output_dir, "preprocessing_results.pkl")
-    save_results(results, results_path)
+    output_dir = make_output_dir(__file__, args.output_dir)
+    for variant, variant_results in results.items():
+        save_variant_result(output_dir, "preprocessing", variant, variant_results)
     
     log.info(f"\n{'='*70}")
-    log.info("COMPARISON COMPLETE")
+    log.info("VARIANT TRAINING COMPLETE")
     log.info(f"{'='*70}")
-    log.info(f"Results saved to: {results_path}")
-    log.info(f"Run visualization: python preprocessing_visualization.py --results_path {results_path}")
-    
-    if use_wandb:
-        wandb.finish()
+    log.info(f"Results saved to: {output_dir}")
+    log.info(f"Run visualization with one or more files from: {output_dir}")

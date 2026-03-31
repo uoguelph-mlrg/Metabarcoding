@@ -1,96 +1,200 @@
 from __future__ import annotations
-import os
-# Prevent BLAS/OMP threading conflict with PyTorch MPS on macOS
-#os.environ.setdefault("OMP_NUM_THREADS", "1")
-#os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import argparse
-import re
-import time
-from typing import Literal, Optional, List, Tuple, Dict, Any
-import logging as log
-from dataclasses import asdict
-
+import os
 import pickle
-import numpy as np
+import time
+from dataclasses import asdict
+from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+import logging as log
+
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+
 try:
     import wandb  # type: ignore
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
 
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-
-from neighbor_graph import NeighbourGraph
-from latent_solver import LatentSolver
+from config import Config, set_seed
 from dataset import MBDataset, collate_samples
+from latent_solver import LatentSolver
 from loss import Loss
 from mlp import MLPModel
 from model import Model
-from config import Config, set_seed
-from utils import load, load_processed
+from neighbor_graph import NeighbourGraph
+from utils import load
+
+
+def compute_extended_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sample_labels: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Compute regression metrics aligned with visualization outputs."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    valid = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[valid]
+    y_pred = np.clip(y_pred[valid], 0, 1)
+    eps = 1e-10
+
+    rmse_macro = np.nan
+    mae_macro = np.nan
+    kl_divergence = np.nan
+
+    if sample_labels is not None:
+        sample_labels = np.asarray(sample_labels)
+        sample_labels_v = sample_labels[valid]
+        rmse_per, mae_per, kl_per = [], [], []
+        for sample in np.unique(sample_labels_v):
+            mask = sample_labels_v == sample
+            true_s = y_true[mask]
+            pred_s = y_pred[mask]
+            if len(true_s) == 0:
+                continue
+            rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
+            mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
+            true_s_norm = (true_s + eps) / (true_s + eps).sum()
+            pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
+            kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
+        if rmse_per:
+            rmse_macro = float(np.mean(rmse_per))
+            mae_macro = float(np.mean(mae_per))
+            kl_divergence = float(np.mean(kl_per))
+
+    rmse_micro = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    mae_micro = float(np.mean(np.abs(y_true - y_pred)))
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    r2 = float(1 - ss_res / (ss_tot + eps))
+
+    y_true_log = np.log(y_true + 1)
+    y_pred_log = np.log(y_pred + 1)
+    ss_res_log = np.sum((y_true_log - y_pred_log) ** 2)
+    ss_tot_log = np.sum((y_true_log - np.mean(y_true_log)) ** 2)
+    r2_log = float(1 - ss_res_log / (ss_tot_log + eps))
+
+    zero_mask = y_true == 0
+    nonzero_mask = y_true > 0
+    rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))) if zero_mask.sum() > 0 else np.nan
+    mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))) if zero_mask.sum() > 0 else np.nan
+    rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2))) if nonzero_mask.sum() > 0 else np.nan
+    mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask]))) if nonzero_mask.sum() > 0 else np.nan
+
+    corr = np.corrcoef(y_true, y_pred)[0, 1] if len(y_true) > 1 else 0.0
+    correlation = 0.0 if np.isnan(corr) else float(corr)
+
+    nz = y_true != 0
+    rel_error = np.zeros_like(y_true, dtype=float)
+    rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
+    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else np.nan
+
+    return {
+        "RMSE (micro)": rmse_micro,
+        "RMSE (macro)": rmse_macro,
+        "MAE (micro)": mae_micro,
+        "MAE (macro)": mae_macro,
+        "Absolute Relative Error": absolute_relative_error,
+        "R²": r2,
+        "R² (log + 1)": r2_log,
+        "RMSE (zeros)": rmse_zeros,
+        "MAE (zeros)": mae_zeros,
+        "RMSE (non-zeros)": rmse_nonzeros,
+        "MAE (non-zeros)": mae_nonzeros,
+        "KL Divergence": kl_divergence,
+        "Correlation": correlation,
+        "n_zeros": float(zero_mask.sum()),
+        "n_nonzeros": float(nonzero_mask.sum()),
+    }
+
 
 class Trainer:
-    """
-    Orchestrates alternation between LatentSolver (Phase A) and MLP training (Phase B).
-    """
+    """Reusable trainer for model variants and cluster-based runs."""
+
     def __init__(
         self,
         cfg: Config,
         data_path: Optional[str] = None,
         data_dir: Optional[str] = None,
-        loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy",
+        loss_type: Optional[Literal["cross_entropy", "logistic"]] = None,
+        model_name: str = "default",
+        run_id: Optional[str] = None,
+        resume: bool = False,
         fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
     ) -> None:
         self.cfg = cfg
-        
-        # Load data
+        self.model_name = model_name
+        self.run_id = run_id or time.strftime("%Y-%m-%d_%H-%M-%S")
+        self.resume = resume
+
         if data_dir is not None:
-            data, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir)
-        else:
-            if data_path is None:
-                raise ValueError("Either data_path or data_dir must be provided")
-            data, bins_df, bin_index, sample_index, split_indices = load(
-                data_path, self.cfg, fixed_split_indices=fixed_split_indices
-            )
+            log.warning("`data_dir` is deprecated in Trainer and will be ignored. Raw preprocessing is always used.")
+        effective_data_path = data_path or self.cfg.data_path
+        effective_loss_type = cast(Literal["cross_entropy", "logistic"], loss_type or self.cfg.loss_type)
+
+        self.start_epoch = 0
+        self.current_epoch = -1
+        self.global_step = 0
+        self.best_val_loss = float("inf")
+        self.last_val_metrics: Dict[str, float] = {}
+
+        self.train_losses: List[Tuple[int, float]] = []
+        self.val_losses: List[Tuple[int, float]] = []
+
+        self.base_artifact_dir = os.path.abspath(os.path.join(self.cfg.results_dir, self.model_name))
+        self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        data, bins_df, bin_index, sample_index, split_indices = load(
+            effective_data_path,
+            self.cfg,
+            save_data=False,
+            fixed_split_indices=fixed_split_indices,
+        )
+
         self.data = data
         self.bin_index = bin_index
         self.sample_index = sample_index
         self.split_indices = split_indices
-        
-        # Build neighbours graph and latent solver
+
         self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
         self.neighbour_graph.build()
-        
+
         latent_solver = LatentSolver(
-            self.cfg, self.neighbour_graph,
+            self.cfg,
+            self.neighbour_graph,
             embed_dim=self.cfg.embed_dim,
             gating_fn=self.cfg.gating_fn,
         )
         latent_solver.build_V_and_H(data["train"]["X"], bin_index, method="nw")
-        
-        # Build model
+
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
         mlp_model = MLPModel(
-            input_dim, hidden_dims=[64, 128, 64, 32],
+            input_dim,
+            hidden_dims=[128, 128, 128, 128],
             output_dim=self.cfg.embed_dim,
             dropout=self.cfg.dropout,
         ).to(self.device)
+
         self.model = Model(
-            mlp_model, latent_solver, n_bins=len(bin_index), device=self.device,
+            mlp_model,
+            latent_solver,
+            n_bins=len(bin_index),
+            device=self.device,
             embed_dim=self.cfg.embed_dim,
             gating_fn=self.cfg.gating_fn,
             gating_alpha=self.cfg.gating_alpha,
             gating_kappa=self.cfg.gating_kappa,
             gating_epsilon=self.cfg.gating_epsilon,
         )
-        
-        # Initialize optimizer with explicit per-group weight decay.
+
         if self.cfg.embed_dim > 1:
             optim_params = [
                 {"params": self.model.mlp.parameters(), "weight_decay": self.cfg.weight_decay},
@@ -100,37 +204,44 @@ class Trainer:
             optim_params = [
                 {"params": self.model.mlp.parameters(), "weight_decay": self.cfg.weight_decay},
             ]
-        self.optimizer = torch.optim.AdamW(
-            optim_params,
-            lr=self.cfg.lr,
-        )
-        # Loss configuration
-        self.loss_type = loss_type
-        self.loss_mode = "sample" if loss_type == "cross_entropy" else "bin"
-        self.criterion = Loss(task=loss_type)
-        
-        # Build datasets
-        log.debug(f"\n   Building datasets...")
+        self.optimizer = torch.optim.AdamW(optim_params, lr=self.cfg.lr)
+
+        self.loss_type: Literal["cross_entropy", "logistic"] = effective_loss_type
+        self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
+        self.criterion = Loss(task=self.loss_type)
+
         train = MBDataset(data["train"], bin_index, sample_index, loss_mode=self.loss_mode)
         val = MBDataset(data["val"], bin_index, sample_index, loss_mode=self.loss_mode)
         test = MBDataset(data["test"], bin_index, sample_index, loss_mode=self.loss_mode)
-
-        # Always build an ordered bin-mode dataset for latent solving and aligned diagnostics.
-        # This guarantees that (inputs, targets, bin_idx, sample_idx) share a single, consistent row order.
         train_bin_ordered = MBDataset(data["train"], bin_index, sample_index, loss_mode="bin")
-        
-        # Initialize data loaders
-        # For sample mode, use custom collate function to handle variable-length samples
+
         batch_size = cfg.batch_size_sample if self.loss_mode == "sample" else cfg.batch_size_bin
         collate_fn = collate_samples if self.loss_mode == "sample" else None
-        self.train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True, num_workers=8, pin_memory=True)
-        self.val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True)
-        self.test_loader = DataLoader(test, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True)
-
-        # Non-shuffled loader for stable evaluation/tracking (sample-mode ordering may not match row ordering)
-        self.train_loader_ordered = DataLoader(train, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True)
-
-        # Canonical ordered loader for latent solving (row-aligned with its own targets)
+        self.train_loader = DataLoader(
+            train,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            drop_last=True,
+            num_workers=8,
+            pin_memory=True,
+        )
+        self.val_loader = DataLoader(
+            val,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=8,
+            pin_memory=True,
+        )
+        self.test_loader = DataLoader(
+            test,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=8,
+            pin_memory=True,
+        )
         self.train_loader_bin_ordered = DataLoader(
             train_bin_ordered,
             batch_size=self.cfg.batch_size_bin,
@@ -138,103 +249,154 @@ class Trainer:
             collate_fn=None,
         )
 
-        # LR scheduler — total steps = epochs × batches per epoch (one scheduler step per batch)
         total_steps = self.cfg.epochs * len(self.train_loader)
         warmup_steps = max(1, int(0.1 * total_steps))
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
+            self.optimizer,
+            start_factor=1e-3,
+            end_factor=1.0,
+            total_iters=warmup_steps,
         )
         cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=1e-6
+            self.optimizer,
+            T_max=max(1, total_steps - warmup_steps),
+            eta_min=1e-6,
         )
         self.scheduler = torch.optim.lr_scheduler.SequentialLR(
-            self.optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps]
+            self.optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
         )
-        
-        # Track best validation loss for checkpointing
-        self.best_val_loss = float('inf')
 
-        # Loss tracking for visualization
-        self.train_losses = []  # List of (epoch, step, loss) tuples
-        self.val_losses = []    # List of (epoch, step, loss) tuples
-        self.cycle_train_losses = []  # End-of-epoch train losses (kept for compatibility)
-        self.cycle_val_losses = []    # End-of-epoch val losses (kept for compatibility)
-        self.timeline_train_losses = []  # List of (phase, epoch, step, loss) tuples
-        self.timeline_val_losses = []    # List of (phase, epoch, step, loss) tuples
-        
-        # Prepare save path
-        root = os.path.dirname(os.path.abspath(__file__))
-        self.save_path = os.path.join(root, "models", f"{time.strftime('%Y-%m-%d_%H:%M:%S')}.pt")
-        os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
+        if self.resume:
+            self._resume_from_latest()
 
+    def _checkpoint_path(self, name: str) -> str:
+        return os.path.join(self.checkpoint_dir, name)
 
-    def train_epoch(self) -> float:
-        """Train for one epoch. Returns average loss."""
-        self.model.train()
-        running_loss = 0.0
-        n_samples = 0
+    def _build_checkpoint_payload(self, epoch: int, val_loss: float, val_metrics: Dict[str, float]) -> Dict[str, Any]:
+        return {
+            "model_name": self.model_name,
+            "run_id": self.run_id,
+            "epoch": epoch,
+            "global_step": self.global_step,
+            "best_val_loss": self.best_val_loss,
+            "val_loss": val_loss,
+            "val_metrics": val_metrics,
+            "config": asdict(self.cfg),
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "train_losses": self.train_losses,
+            "val_losses": self.val_losses,
+            "rng_numpy": np.random.get_state(),
+            "rng_torch": torch.get_rng_state(),
+            "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "saved_at": time.strftime("%Y-%m-%d_%H-%M-%S"),
+        }
 
-        for batch in self.train_loader:
-            inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
+    def _save_checkpoint(self, epoch: int, val_loss: float, val_metrics: Dict[str, float], best: bool = False) -> None:
+        payload = self._build_checkpoint_payload(epoch=epoch, val_loss=val_loss, val_metrics=val_metrics)
 
-            if self.loss_mode == "sample":
-                # Sample mode: inputs [B, max_bins, features], bin_idx [B, max_bins]
-                # Forward pass on all bins at once
-                B, max_bins, n_feat = inputs.shape
-                inputs_flat = inputs.view(B * max_bins, n_feat)  # [B*max_bins, features]
-                bin_idx_flat = bin_idx.view(B * max_bins)        # [B*max_bins]
-                
-                outputs_flat = self.model(inputs_flat, bin_idx_flat)  # [B*max_bins]
-                outputs = outputs_flat.view(B, max_bins)              # [B, max_bins]
-                
-                # Apply mask: set padded positions to large negative (will become ~0 after softmax)
-                outputs = outputs.masked_fill(mask == 0, float('-inf'))
-                
-                # Loss expects [B, max_bins] logits, [B, max_bins] target probs, and mask
-                loss = self.criterion(outputs, targets, mask)
-            else:
-                # Bin mode: standard forward pass
-                outputs = self.model(inputs, bin_idx)
-                loss = self.criterion(outputs, targets)
+        latest_path = self._checkpoint_path("latest.pt")
+        torch.save(payload, latest_path)
 
-            self.optimizer.zero_grad()
-            loss.backward()
+        if (epoch + 1) % self.cfg.checkpoint_every == 0:
+            periodic_name = f"epoch_{epoch + 1:04d}.pt"
+            torch.save(payload, self._checkpoint_path(periodic_name))
 
-            if self.cfg.grad_clip is not None:
-                params_to_clip = list(self.model.mlp.parameters())
-                if self.cfg.embed_dim > 1:
-                    params_to_clip += list(self.model.final_linear.parameters())
-                torch.nn.utils.clip_grad_norm_(params_to_clip, self.cfg.grad_clip)
+        if best:
+            torch.save(payload, self._checkpoint_path("best.pt"))
 
-            self.optimizer.step()
+    def _find_latest_checkpoint_path(self) -> Optional[str]:
+        latest = self._checkpoint_path("latest.pt")
+        if os.path.exists(latest):
+            return latest
+        if not os.path.exists(self.checkpoint_dir):
+            return None
+        ckpts = [
+            os.path.join(self.checkpoint_dir, p)
+            for p in os.listdir(self.checkpoint_dir)
+            if p.endswith(".pt")
+        ]
+        if not ckpts:
+            return None
+        ckpts.sort(key=os.path.getmtime, reverse=True)
+        return ckpts[0]
 
-            batch_size = targets.size(0)
-            running_loss += loss.item() * batch_size
-            n_samples += batch_size
+    def _resume_from_latest(self) -> None:
+        ckpt_path = self._find_latest_checkpoint_path()
+        if ckpt_path is None:
+            log.warning("Resume requested but no checkpoint was found. Starting from epoch 0.")
+            return
 
-        epoch_loss = running_loss / max(1, n_samples)
-        return epoch_loss
+        checkpoint = torch.load(ckpt_path, map_location=self.device)
+        saved_cfg = checkpoint.get("config", {})
+        for key in ["embed_dim", "gating_fn", "loss_type"]:
+            if key in saved_cfg and getattr(self.cfg, key) != saved_cfg[key]:
+                raise ValueError(
+                    f"Checkpoint/config mismatch for '{key}': "
+                    f"checkpoint={saved_cfg[key]} current={getattr(self.cfg, key)}"
+                )
 
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
-    def _train_batch(self, batch: Dict[str, torch.Tensor]) -> float:
-        """Perform one MLP gradient step on a single batch. Returns batch loss."""
+        self.current_epoch = int(checkpoint.get("epoch", -1))
+        self.start_epoch = self.current_epoch + 1
+        self.global_step = int(checkpoint.get("global_step", 0))
+        self.best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+        self.train_losses = list(checkpoint.get("train_losses", []))
+        self.val_losses = list(checkpoint.get("val_losses", []))
+        self.last_val_metrics = dict(checkpoint.get("val_metrics", {}))
+
+        rng_numpy = checkpoint.get("rng_numpy")
+        rng_torch = checkpoint.get("rng_torch")
+        rng_cuda = checkpoint.get("rng_cuda")
+        if rng_numpy is not None:
+            np.random.set_state(rng_numpy)
+        if rng_torch is not None:
+            torch.set_rng_state(rng_torch)
+        if rng_cuda is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng_cuda)
+
+        log.info(f"Resumed from checkpoint: {ckpt_path} (epoch {self.current_epoch})")
+
+    def _to_device(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        inputs = batch["input"].to(self.device)
+        targets = batch["target"].to(self.device)
+        bin_idx = batch["bin_idx"].to(self.device)
+        sample_idx = batch["sample_idx"].to(self.device)
+        mask = batch.get("mask")
+        if mask is not None:
+            mask = mask.to(self.device)
+        return inputs, targets, bin_idx, sample_idx, mask
+
+    def _train_batch(self, batch: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, float]]:
         self.model.train()
         inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
 
+        t0 = time.perf_counter()
         if self.loss_mode == "sample":
-            B, max_bins, n_feat = inputs.shape
-            inputs_flat = inputs.view(B * max_bins, n_feat)
-            bin_idx_flat = bin_idx.view(B * max_bins)
+            bsz, max_bins, n_feat = inputs.shape
+            inputs_flat = inputs.view(bsz * max_bins, n_feat)
+            bin_idx_flat = bin_idx.view(bsz * max_bins)
             outputs_flat = self.model(inputs_flat, bin_idx_flat)
-            outputs = outputs_flat.view(B, max_bins)
-            outputs = outputs.masked_fill(mask == 0, float('-inf'))
+            outputs = outputs_flat.view(bsz, max_bins)
+            outputs = outputs.masked_fill(mask == 0, float("-inf"))
             loss = self.criterion(outputs, targets, mask)
         else:
             outputs = self.model(inputs, bin_idx)
             loss = self.criterion(outputs, targets)
+        t1 = time.perf_counter()
 
         self.optimizer.zero_grad()
         loss.backward()
+        t2 = time.perf_counter()
 
         if self.cfg.grad_clip is not None:
             params_to_clip = list(self.model.mlp.parameters())
@@ -243,35 +405,36 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(params_to_clip, self.cfg.grad_clip)
 
         self.optimizer.step()
-        return loss.item()
+        t3 = time.perf_counter()
 
+        timing = {
+            "forward_s": float(t1 - t0),
+            "backward_s": float(t2 - t1),
+            "optim_s": float(t3 - t2),
+            "total_s": float(t3 - t0),
+        }
+        return float(loss.item()), timing
 
     @torch.no_grad()
     def validate(self, split: Literal["train", "val", "test"]) -> float:
         data_loader = (
-            self.val_loader if split == "val" else 
-            self.test_loader if split == "test" else 
-            self.train_loader
+            self.train_loader if split == "train" else
+            self.val_loader if split == "val" else
+            self.test_loader
         )
-        if data_loader is None:
-            raise ValueError(f"Unknown split {split}")
-        
+
         self.model.eval()
         running_loss = 0.0
         n_samples = 0
-
         for batch in data_loader:
             inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
-            
             if self.loss_mode == "sample":
-                B, max_bins, n_feat = inputs.shape
-                inputs_flat = inputs.view(B * max_bins, n_feat)
-                bin_idx_flat = bin_idx.view(B * max_bins)
-                
+                bsz, max_bins, n_feat = inputs.shape
+                inputs_flat = inputs.view(bsz * max_bins, n_feat)
+                bin_idx_flat = bin_idx.view(bsz * max_bins)
                 outputs_flat = self.model(inputs_flat, bin_idx_flat)
-                outputs = outputs_flat.view(B, max_bins)
-                outputs = outputs.masked_fill(mask == 0, float('-inf'))
-                
+                outputs = outputs_flat.view(bsz, max_bins)
+                outputs = outputs.masked_fill(mask == 0, float("-inf"))
                 loss = self.criterion(outputs, targets, mask)
             else:
                 outputs = self.model(inputs, bin_idx)
@@ -281,95 +444,10 @@ class Trainer:
             running_loss += loss.item() * batch_size
             n_samples += batch_size
 
-        val_loss = running_loss / max(1, n_samples)
-        return val_loss
-
-    @torch.no_grad()
-    def compute_metrics(self, split: str) -> Dict[str, float]:
-        """Compute interpretable metrics for a given split."""
-        data_loader = (
-            self.train_loader if split == "train" else
-            self.val_loader if split == "val" else
-            self.test_loader if split == "test" else
-            None
-        )
-        if data_loader is None:
-            return {}
-        self.model.eval()
-        
-        # Metrics to compute
-        classification_accuracy = []
-        classification_precision = []
-        classification_recall = []
-        classification_specificity = []
-        classification_f1 = []
-        mae_when_present = []
-        mae_when_absent = []
-        
-        for batch in data_loader:
-            inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
-            
-            if self.loss_mode == "sample":
-                # Sample mode: inputs [B, max_bins, features]
-                B, max_bins, n_feat = inputs.shape
-                inputs_flat = inputs.view(B * max_bins, n_feat)
-                bin_idx_flat = bin_idx.view(B * max_bins)
-                
-                outputs_flat = self.model(inputs_flat, bin_idx_flat)
-                outputs = outputs_flat.view(B, max_bins)
-                outputs = outputs.masked_fill(mask == 0, float('-inf'))
-                
-                # Apply softmax to get probabilities
-                probs = F.softmax(outputs, dim=-1)
-                
-                # Flatten but only keep valid (non-padded) entries
-                mask_flat = mask.view(-1).bool()
-                probs_np = probs.view(-1)[mask_flat].cpu().numpy()
-                targets_np = targets.view(-1)[mask_flat].cpu().numpy()
-            else:
-                outputs = self.model(inputs, bin_idx)
-                probs = torch.sigmoid(outputs)
-                probs_np = probs.cpu().numpy().flatten()
-                targets_np = targets.cpu().numpy().flatten()
-            
-            # Classification metrics (predicted absent when prob < epsilon)
-            epsilon = 1e-2
-            tp = sum((p >= epsilon) and (t > 0) for p, t in zip(probs_np, targets_np))
-            tn = sum((p < epsilon) and (t == 0) for p, t in zip(probs_np, targets_np))
-            fp = sum((p >= epsilon) and (t == 0) for p, t in zip(probs_np, targets_np))
-            fn = sum((p < epsilon) and (t > 0) for p, t in zip(probs_np, targets_np))
-            accuracy = (tp + tn) / max(1, (tp + tn + fp + fn))
-            precision = tp / max(1, (tp + fp))
-            recall = tp / max(1, (tp + fn))
-            specificity = tn / max(1, (tn + fp))
-            f1 = 2 * (precision * recall) / max(1e-12, (precision + recall))
-            classification_accuracy.append(accuracy)
-            classification_precision.append(precision)
-            classification_recall.append(recall)
-            classification_specificity.append(specificity)
-            classification_f1.append(f1)
-            
-            # MAE when present / absent
-            for p, t in zip(probs_np, targets_np):
-                if t > 0:
-                    mae_when_present.append(abs(p - t))
-                else:
-                    mae_when_absent.append(abs(p - t))
-        
-        return {
-            "classification_accuracy": float(np.mean(classification_accuracy)),
-            "classification_precision": float(np.mean(classification_precision)),
-            "classification_recall": float(np.mean(classification_recall)),
-            "classification_specificity": float(np.mean(classification_specificity)),
-            "classification_f1": float(np.mean(classification_f1)),
-            "mae_when_present": float(np.mean(mae_when_present)) if mae_when_present else 0.0,
-            "mae_when_absent": float(np.mean(mae_when_absent)) if mae_when_absent else 0.0,
-        }
+        return float(running_loss / max(1, n_samples))
 
     def solve_latent(self, prox_weight: float = 0.0) -> np.ndarray:
-        """Solve for latent variable using current MLP predictions and update model."""
         self.model.eval()
-
         intrinsic_list: List[np.ndarray] = []
         y_list: List[np.ndarray] = []
         bin_list: List[np.ndarray] = []
@@ -384,8 +462,7 @@ class Trainer:
 
                 intrinsic = self.model.mlp(x).detach().cpu().numpy()
                 if self.cfg.embed_dim == 1:
-                    intrinsic = intrinsic.reshape(-1)  # (N,)
-                # else: keep as (N, d)
+                    intrinsic = intrinsic.reshape(-1)
 
                 intrinsic_list.append(intrinsic)
                 y_list.append(y.reshape(-1))
@@ -396,8 +473,8 @@ class Trainer:
         y_vec = np.concatenate(y_list, axis=0)
         bin_ids = np.concatenate(bin_list, axis=0).astype(np.int64)
         sample_ids = np.concatenate(sample_list, axis=0).astype(np.int64)
-
         x0_latent = self.model.latent_vec.detach().cpu().numpy()
+
         if self.cfg.embed_dim > 1:
             latent_vec = self.model.latent_solver.solve(
                 y=y_vec,
@@ -405,7 +482,7 @@ class Trainer:
                 final_weights=self.model.final_linear.weight.detach().cpu().numpy().squeeze(),
                 bin_ids=bin_ids,
                 sample_ids=sample_ids,
-                loss_type="cross_entropy" if self.loss_type == "cross_entropy" else "logistic",
+                loss_type=self.loss_type,
                 x0=x0_latent,
                 prox_weight=prox_weight,
                 x_anchor=x0_latent,
@@ -416,166 +493,281 @@ class Trainer:
                 intrinsic_vec=intrinsic_vec,
                 bin_ids=bin_ids,
                 sample_ids=sample_ids,
-                loss_type="cross_entropy" if self.loss_type == "cross_entropy" else "logistic",
+                loss_type=self.loss_type,
                 x0=x0_latent,
                 prox_weight=prox_weight,
                 x_anchor=x0_latent,
             )
+
         self.model.set_latent(latent_vec)
         return latent_vec
 
     @torch.no_grad()
-    def get_predictions(self, split: Literal["train", "val", "test"] = "test") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Get predictions and targets for a given split.
-        Returns:
-            Tuple of (predictions, targets, sample_labels, bin_labels) as flat 1D arrays.
-            - predictions:   float32 (N,) — predicted probabilities/values
-            - targets:       float32 (N,) — true relative abundances
-            - sample_labels: (N,) str    — sample ID for each entry (from self.sample_index)
-            - bin_labels:    (N,) str    — BIN URI for each entry (from self.bin_index)
-            where N = total valid (sample, BIN) pairs across the requested split.
-        """
+    def get_predictions(
+        self,
+        split: Literal["train", "val", "test"] = "test",
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         data_loader = (
             self.train_loader if split == "train" else
             self.val_loader if split == "val" else
             self.test_loader
         )
         self.model.eval()
-        # Accumulate per-sample lists
-        sample_pred: Dict[int, list] = {}
-        sample_true: Dict[int, list] = {}
-        sample_bins: Dict[int, list] = {}  # integer bin indices (from self.bin_index)
+
+        sample_pred: Dict[int, List[float]] = {}
+        sample_true: Dict[int, List[float]] = {}
+        sample_bins: Dict[int, List[int]] = {}
+
         for batch in data_loader:
             if self.loss_mode == "sample":
                 inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
-                B = inputs.shape[0]
-                for b in range(B):
-                    s_idx = sample_idx[b].item() if hasattr(sample_idx[b], 'item') else int(sample_idx[b])
+                if mask is None:
+                    raise ValueError("Sample mode requires a mask in batched data.")
+                bsz = inputs.shape[0]
+                for b in range(bsz):
+                    s_idx = int(sample_idx[b].item())
                     valid_mask = mask[b].bool()
                     inputs_flat = inputs[b][valid_mask]
                     bin_idx_flat = bin_idx[b][valid_mask]
-                    outputs = self.model(inputs_flat, bin_idx_flat)
-                    outputs = outputs.unsqueeze(0)  # [1, n_bins]
+                    outputs = self.model(inputs_flat, bin_idx_flat).unsqueeze(0)
                     probs = F.softmax(outputs, dim=-1).squeeze(0).cpu().numpy()
                     y_true = targets[b][valid_mask].cpu().numpy()
                     sample_pred.setdefault(s_idx, []).extend(probs.tolist())
                     sample_true.setdefault(s_idx, []).extend(y_true.tolist())
                     sample_bins.setdefault(s_idx, []).extend(bin_idx_flat.cpu().numpy().tolist())
             else:
-                # Bin mode: batch is a dict (from DataLoader, no collate_fn)
                 inputs = batch["input"].to(self.device)
                 targets = batch["target"].to(self.device)
                 bin_idx = batch["bin_idx"].to(self.device)
                 sample_idx = batch["sample_idx"].to(self.device)
-                # If batch_size=1, make sure dims are right
+
                 if len(inputs.shape) == 1:
                     inputs = inputs.unsqueeze(0)
                     targets = targets.unsqueeze(0)
                     bin_idx = bin_idx.unsqueeze(0)
                     sample_idx = sample_idx.unsqueeze(0)
+
                 for i in range(inputs.shape[0]):
-                    s_idx = sample_idx[i].item() if hasattr(sample_idx[i], 'item') else int(sample_idx[i])
-                    b_idx = int(bin_idx[i].item() if hasattr(bin_idx[i], 'item') else bin_idx[i])
-                    input_i = inputs[i].unsqueeze(0)
-                    bin_idx_i = bin_idx[i].unsqueeze(0)
-                    output = self.model(input_i, bin_idx_i)
-                    prob = torch.sigmoid(output).cpu().numpy().item()
-                    y_true = targets[i].cpu().numpy().item()
+                    s_idx = int(sample_idx[i].item())
+                    b_idx = int(bin_idx[i].item())
+                    output = self.model(inputs[i].unsqueeze(0), bin_idx[i].unsqueeze(0))
+                    prob = float(torch.sigmoid(output).cpu().numpy().item())
+                    y_true = float(targets[i].cpu().numpy().item())
                     sample_pred.setdefault(s_idx, []).append(prob)
                     sample_true.setdefault(s_idx, []).append(y_true)
                     sample_bins.setdefault(s_idx, []).append(b_idx)
-        
-        # Normalize predictions per sample if using logistic loss
+
         if self.loss_type == "logistic":
-            for s_idx in sample_pred:
-                preds = np.array(sample_pred[s_idx])
-                pred_sum = preds.sum()
+            for s_idx, preds in sample_pred.items():
+                pred_arr = np.array(preds)
+                pred_sum = pred_arr.sum()
                 if pred_sum > 0:
-                    sample_pred[s_idx] = (preds / pred_sum).tolist()
-        
-        # Invert index dicts to recover string labels
+                    sample_pred[s_idx] = (pred_arr / pred_sum).tolist()
+
         idx_to_sample = {v: k for k, v in self.sample_index.items()}
         idx_to_bin = {v: k for k, v in self.bin_index.items()}
-        # Flatten into 1D arrays, ordered by sample_idx
-        preds_flat, trues_flat, s_labels, b_labels = [], [], [], []
+
+        preds_flat, trues_flat, sample_labels, bin_labels = [], [], [], []
         for s_idx in sorted(sample_pred.keys()):
             n = len(sample_pred[s_idx])
             preds_flat.extend(sample_pred[s_idx])
             trues_flat.extend(sample_true[s_idx])
-            s_labels.extend([idx_to_sample[s_idx]] * n)
-            b_labels.extend([idx_to_bin[int(b)] for b in sample_bins[s_idx]])
+            sample_labels.extend([idx_to_sample[s_idx]] * n)
+            bin_labels.extend([idx_to_bin[int(b)] for b in sample_bins[s_idx]])
+
         return (
             np.array(preds_flat, dtype=np.float32),
             np.array(trues_flat, dtype=np.float32),
-            np.array(s_labels),
-            np.array(b_labels),
+            np.array(sample_labels),
+            np.array(bin_labels),
         )
 
+    def compute_metrics(self, split: Literal["train", "val", "test"]) -> Dict[str, float]:
+        preds, targets, sample_labels, _ = self.get_predictions(split=split)
+        return compute_extended_metrics(y_true=targets, y_pred=preds, sample_labels=sample_labels)
+
+    def _metric_key(self, metric_name: str) -> str:
+        return (
+            metric_name.lower()
+            .replace(" ", "_")
+            .replace("(", "")
+            .replace(")", "")
+            .replace("²", "2")
+            .replace("+", "plus")
+            .replace("-", "_")
+            .replace("/", "_")
+        )
+
+    def _plot_training_progress(self) -> None:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+
+        epoch_nums = [e for e, _ in self.train_losses]
+        train_vals = [l for _, l in self.train_losses]
+        val_vals = [l for _, l in self.val_losses]
+
+        ax.plot(epoch_nums, train_vals, "b-", linewidth=2, alpha=0.8, label="Train Loss")
+        ax.plot(epoch_nums, val_vals, "r-", linewidth=2, alpha=0.8, label="Validation Loss")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_title("Training Progress")
+        ax.grid(True, alpha=0.3)
+        ax.legend(frameon=False)
+
+        fig_dir = os.path.join(self.base_artifact_dir, "figures")
+        os.makedirs(fig_dir, exist_ok=True)
+        save_path = os.path.join(fig_dir, f"training_progress_{self.model_name}_{self.run_id}.png")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+
     def run(self, use_wandb: bool = True) -> Dict[str, Any]:
-        """Run full alternation training with per-batch latent/MLP alternation."""
         warmup_epochs = max(1, int(self.cfg.latent_warmup_frac * self.cfg.epochs))
-        log.debug(f"Starting per-batch alternation training (latent warms up over first {warmup_epochs} epochs)...")
-        for epoch in tqdm(range(self.cfg.epochs), desc="Epochs", leave=False):
-            # Proximal weight ρ: decays linearly from ρ₀ → 0 over warmup_epochs (proximal/damped EM).
-            # At epoch 0: ρ = latent_prox_scale * latent_l2_reg (large anchor near D=0).
-            # At epoch = warmup_epochs: ρ = 0 (standard unconstrained solve).
+        log.info(
+            f"Starting training for model={self.model_name}, epochs={self.cfg.epochs}, resume={self.resume}"
+        )
+
+        for epoch in tqdm(range(self.start_epoch, self.cfg.epochs), desc="Epochs", leave=False):
+            self.current_epoch = epoch
+            epoch_start = time.perf_counter()
+
             alpha = min(1.0, epoch / warmup_epochs)
-            phase_tag = "latent_warmup" if alpha < 1.0 else "latent"
             prox_weight = self.cfg.latent_prox_scale * self.cfg.latent_l2_reg * (1.0 - alpha)
 
-            # Alternate: for each batch, solve latent then take one MLP gradient step
-            latent_vec = self.model.latent_vec.detach().cpu().numpy()  # fallback if loader is empty
-            for batch in self.train_loader:
-                # Phase A: solve for latent with fixed MLP
+            batch_forward, batch_backward, batch_optim, batch_total, batch_latent = [], [], [], [], []
+            latent_vec = self.model.latent_vec.detach().cpu().numpy()
+
+            for batch_idx, batch in enumerate(self.train_loader):
+                batch_start = time.perf_counter()
+
+                latent_start = time.perf_counter()
                 latent_vec = self.solve_latent(prox_weight=prox_weight)
-                # Phase B: one MLP gradient step on this batch
-                self._train_batch(batch)
+                latent_s = time.perf_counter() - latent_start
+
+                loss_value, timings = self._train_batch(batch)
                 self.scheduler.step()
+                self.global_step += 1
 
-            # End-of-epoch evaluation
+                total_s = time.perf_counter() - batch_start
+                batch_forward.append(timings["forward_s"])
+                batch_backward.append(timings["backward_s"])
+                batch_optim.append(timings["optim_s"])
+                batch_total.append(total_s)
+                batch_latent.append(latent_s)
+
+                if use_wandb and WANDB_AVAILABLE:
+                    wandb.log(
+                        {
+                            "train/batch/loss": loss_value,
+                            "timing/batch/forward_s": timings["forward_s"],
+                            "timing/batch/backward_s": timings["backward_s"],
+                            "timing/batch/optim_s": timings["optim_s"],
+                            "timing/batch/latent_solve_s": latent_s,
+                            "timing/batch/total_s": total_s,
+                            "train/epoch": epoch,
+                            "train/batch_idx": batch_idx,
+                            "train/global_step": self.global_step,
+                        },
+                        step=self.global_step,
+                    )
+
+            train_eval_start = time.perf_counter()
             train_loss = self.validate(split="train")
-            val_loss = self.validate(split="val")
+            train_eval_s = time.perf_counter() - train_eval_start
 
-            self.timeline_train_losses.append((phase_tag, epoch, 0, train_loss))
-            self.timeline_val_losses.append((phase_tag, epoch, 0, val_loss))
-            self.train_losses.append((epoch, 0, train_loss))
-            self.val_losses.append((epoch, 0, val_loss))
-            self.cycle_train_losses.append((epoch, train_loss))
-            self.cycle_val_losses.append((epoch, val_loss))
+            val_eval_start = time.perf_counter()
+            val_loss = self.validate(split="val")
+            val_eval_s = time.perf_counter() - val_eval_start
+
+            metric_start = time.perf_counter()
+            val_metrics = self.compute_metrics(split="val")
+            metric_s = time.perf_counter() - metric_start
+            self.last_val_metrics = val_metrics
+
+            self.train_losses.append((epoch, train_loss))
+            self.val_losses.append((epoch, val_loss))
+
+            improved = val_loss < self.best_val_loss
+            if improved:
+                self.best_val_loss = val_loss
+
+            self._save_checkpoint(epoch=epoch, val_loss=val_loss, val_metrics=val_metrics, best=improved)
+
+            epoch_total_s = time.perf_counter() - epoch_start
+            batch_forward_arr = np.array(batch_forward, dtype=float)
+            batch_backward_arr = np.array(batch_backward, dtype=float)
+            batch_optim_arr = np.array(batch_optim, dtype=float)
+            batch_total_arr = np.array(batch_total, dtype=float)
+            batch_latent_arr = np.array(batch_latent, dtype=float)
+
+            epoch_log_payload = {
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "train/epoch": epoch,
+                "train/global_step": self.global_step,
+                "latent/mean": float(latent_vec.mean()),
+                "latent/std": float(latent_vec.std()),
+                "latent/min": float(latent_vec.min()),
+                "latent/max": float(latent_vec.max()),
+                "timing/epoch/total_s": float(epoch_total_s),
+                "timing/epoch/train_eval_s": float(train_eval_s),
+                "timing/epoch/val_eval_s": float(val_eval_s),
+                "timing/epoch/metrics_s": float(metric_s),
+                "timing/epoch/batch_forward_mean_s": float(np.mean(batch_forward_arr)),
+                "timing/epoch/batch_backward_mean_s": float(np.mean(batch_backward_arr)),
+                "timing/epoch/batch_optim_mean_s": float(np.mean(batch_optim_arr)),
+                "timing/epoch/batch_total_mean_s": float(np.mean(batch_total_arr)),
+                "timing/epoch/batch_latent_mean_s": float(np.mean(batch_latent_arr)),
+                "timing/epoch/batch_forward_p95_s": float(np.percentile(batch_forward_arr, 95)),
+                "timing/epoch/batch_backward_p95_s": float(np.percentile(batch_backward_arr, 95)),
+                "timing/epoch/batch_total_p95_s": float(np.percentile(batch_total_arr, 95)),
+                "timing/epoch/batch_latent_p95_s": float(np.percentile(batch_latent_arr, 95)),
+                "timing/epoch/latent_total_s": float(np.sum(batch_latent_arr)),
+            }
+            for metric_name, metric_value in val_metrics.items():
+                epoch_log_payload[f"val/metrics/{self._metric_key(metric_name)}"] = metric_value
 
             if use_wandb and WANDB_AVAILABLE:
-                metrics = self.compute_metrics(split="val")
-                wandb.log({
-                    "epoch": epoch,
-                    "cycle": epoch,
-                    "final_train_loss": train_loss,
-                    "final_val_loss": val_loss,
-                    **{f"val_{k}": v for k, v in metrics.items()},
-                    "latent_mean": float(latent_vec.mean()),
-                    "latent_std": float(latent_vec.std()),
-                    "latent_min": float(latent_vec.min()),
-                    "latent_max": float(latent_vec.max()),
-                })
-            if val_loss < self.best_val_loss - 1e-4:
-                self.best_val_loss = val_loss
-                self.model.save_model(self.save_path)
+                wandb.log(epoch_log_payload, step=self.global_step)
 
-            log.info(f"Epoch {epoch} (ρ={prox_weight:.4f}): val_loss={val_loss:.6f}, train_loss={train_loss:.6f}")
-        
-        # Load best saved model before final evaluation (end-of-training weights may be worse)
-        if os.path.exists(self.save_path):
-            self.model.load_model(self.save_path)
-            log.debug(f"Loaded best checkpoint from {self.save_path} for final evaluation")
+            log.info(
+                f"Epoch {epoch + 1}/{self.cfg.epochs}: "
+                f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}, "
+                f"best_val={self.best_val_loss:.6f}, epoch_s={epoch_total_s:.2f}"
+            )
 
-        # Plot training progress
+        best_ckpt = self._checkpoint_path("best.pt")
+        if os.path.exists(best_ckpt):
+            checkpoint = torch.load(best_ckpt, map_location=self.device)
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+
         self._plot_training_progress()
 
-        # Return results for external use
+        test_eval_start = time.perf_counter()
+        test_loss = self.validate(split="test")
+        test_eval_s = time.perf_counter() - test_eval_start
+
+        test_metric_start = time.perf_counter()
+        test_metrics = self.compute_metrics(split="test")
+        test_metric_s = time.perf_counter() - test_metric_start
+
+        if use_wandb and WANDB_AVAILABLE:
+            payload = {
+                "test/loss": test_loss,
+                "timing/test/eval_s": float(test_eval_s),
+                "timing/test/metrics_s": float(test_metric_s),
+            }
+            for metric_name, metric_value in test_metrics.items():
+                payload[f"test/metrics/{self._metric_key(metric_name)}"] = metric_value
+            wandb.log(payload, step=self.global_step)
+
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
-        # Save the final latent vector for downstream analysis
         latent_vector = self.model.latent_vec.detach().cpu().numpy()
+
         return {
+            "model": self.model_name,
+            "run_id": self.run_id,
             "best_val_loss": self.best_val_loss,
+            "test_loss": test_loss,
             "predictions": predictions,
             "targets": targets,
             "sample_labels": sample_labels,
@@ -583,154 +775,47 @@ class Trainer:
             "latent_vector": latent_vector,
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
-            "cycle_train_losses": self.cycle_train_losses,
-            "cycle_val_losses": self.cycle_val_losses,
-            "timeline_train_losses": self.timeline_train_losses,
-            "timeline_val_losses": self.timeline_val_losses,
+            "val_metrics": self.last_val_metrics,
+            "test_metrics": test_metrics,
         }
 
-    def _plot_training_progress(self) -> None:
-        """Plot training and validation losses over time."""
-        import matplotlib.pyplot as plt
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-        # Plot 1: Overall evolution (init + latent warmup + latent + mlp)
-        train_vals = [l for _, _, _, l in self.timeline_train_losses]
-        val_vals   = [l for _, _, _, l in self.timeline_val_losses]
-        steps = list(range(len(train_vals)))
-
-        ax1.plot(steps, train_vals, 'b-', alpha=0.7, linewidth=1.2, label='Train Loss')
-        ax1.plot(steps, val_vals,   'r-', alpha=0.7, linewidth=1.2, label='Val Loss')
-
-        # Shade latent warmup region (Phase 2) as a green band
-        warmup_indices = [
-            i for i, (phase, _, _, _) in enumerate(self.timeline_train_losses)
-            if phase == "latent_warmup"
-        ]
-        if warmup_indices:
-            ax1.axvspan(warmup_indices[0], warmup_indices[-1] + 1,
-                        color='green', alpha=0.08, label='Latent Warmup (Phase 2)')
-
-        # Mark alternation latent-solve steps with gray dashed lines
-        latent_steps = [
-            i for i, (phase, _, _, _) in enumerate(self.timeline_train_losses)
-            if phase == "latent"
-        ]
-        for boundary in latent_steps:
-            ax1.axvline(x=boundary, color='gray', linestyle='--', alpha=0.25, linewidth=1)
-
-        ax1.set_xlabel('Training Step (Init + Latent Warmup + Alternation)')
-        ax1.set_ylabel('Loss')
-        ax1.set_title('Training Progress: Overall Loss Evolution')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-
-        # Plot 2: End-of-epoch losses (summary view)
-        if len(self.cycle_train_losses) > 0:
-            epoch_nums  = [e for e, l in self.cycle_train_losses]
-            epoch_train = [l for e, l in self.cycle_train_losses]
-            epoch_val   = [l for e, l in self.cycle_val_losses]
-
-            ax2.plot(epoch_nums, epoch_train, 'bo-', linewidth=2, markersize=8, label='Train Loss', alpha=0.7)
-            ax2.plot(epoch_nums, epoch_val,   'ro-', linewidth=2, markersize=8, label='Val Loss',   alpha=0.7)
-            ax2.set_xlabel('Epoch')
-            ax2.set_ylabel('Loss')
-            ax2.set_title('Training Progress: End-of-Epoch Losses')
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-
-        root = os.path.dirname(os.path.abspath(__file__))
-        save_path = os.path.join(root, "figures", "training_progress.png")
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        log.info(f"Training progress plot saved to: {save_path}")
-        plt.close()
-
-    def _to_device(
-        self, batch: Dict[str, torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """Move batch tensors to device. Returns mask only for sample mode."""
-        inputs = batch["input"].to(self.device)
-        targets = batch["target"].to(self.device)
-        bin_idx = batch["bin_idx"].to(self.device)
-        sample_idx = batch["sample_idx"].to(self.device)
-        mask = batch.get("mask")
-        if mask is not None:
-            mask = mask.to(self.device)
-        return inputs, targets, bin_idx, sample_idx, mask
-    
-    
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Metabarcoding training script")
-    data_group = parser.add_mutually_exclusive_group(required=False)
-    data_group.add_argument("--data_path", type=str, default=None,
-                            help="Path to raw data CSV file (e.g. data/ecuador_training_data.csv)")
-    data_group.add_argument("--data_dir", type=str, default=None,
-                            help="Path to directory containing processed CSV files (X_*.csv, y_*.csv, taxonomic_data.csv)")
-    parser.add_argument("--loss_type", type=str, choices=["cross_entropy", "logistic"],
-                        default="cross_entropy", help="Type of loss function to use")
+    parser = argparse.ArgumentParser(description="Metabarcoding training entrypoint")
+    parser.add_argument("--model", type=str, required=True, help="Name of the model variant being trained")
+    parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
-    
-    # Set some generic configurations
+
     set_seed()
-    cfg = Config()
-    root_dir = os.path.dirname(os.path.abspath(__file__))
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    # Initialize Weights & Biases (optional)
+    cfg = Config()
+
+    run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = os.path.abspath(os.path.join(cfg.results_dir, args.model))
+    os.makedirs(run_dir, exist_ok=True)
+
     use_wandb = WANDB_AVAILABLE
     if not WANDB_AVAILABLE:
         log.warning("wandb is not installed; continuing without wandb logging")
     else:
         wandb.init(
             project="metabarcoding",
-            name=time.strftime("%Y-%m-%d_%H-%M"),
-            config=asdict(cfg),
-            dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wandb")
+            name=f"{args.model}_{run_id}",
+            config={"model": args.model, **asdict(cfg)},
+            dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wandb"),
         )
 
-    # Create Trainer and run
-    # Default behavior: if neither is provided, fall back to raw CSV in data/
-    data_path = args.data_path
-    data_dir = args.data_dir
-    if data_path is None and data_dir is None:
-        data_path = cfg.data_path
-
-    trainer = Trainer(cfg, data_path=data_path, data_dir=data_dir, loss_type=args.loss_type)
-
-    log.debug(f"\n   Starting training...")
+    trainer = Trainer(cfg=cfg, model_name=args.model, run_id=run_id, resume=args.resume)
     results = trainer.run(use_wandb=use_wandb)
 
-    # Save results to pickle for downstream visualization
-    os.makedirs(cfg.results_dir, exist_ok=True)
-    pkl_path = os.path.join(cfg.results_dir, f"results_{time.strftime('%Y-%m-%d_%H-%M')}.pkl")
+    pkl_name = f"results_{args.model}_{run_id}.pkl"
+    pkl_path = os.path.join(run_dir, pkl_name)
     with open(pkl_path, "wb") as fh:
         pickle.dump(results, fh)
     log.info(f"Results saved to: {pkl_path}")
 
-    # Evaluate on test set
-    log.debug(f"\n   Final evaluation...")
-
-    test_loss = trainer.validate(split="test")
-    log.info(f"Test loss: {test_loss:.6f}")
-
-    log.info("\n" + "="*50)
-    log.info("METRICS")
-    log.info("="*50)
-    for split_name in ["val", "test"]: # FIXME : + train
-        loss_ = trainer.validate(split=split_name)  # type: ignore
-        metrics = trainer.compute_metrics(split_name)        
-        if use_wandb:
-            wandb.log({
-                f"final_{split_name}_loss": loss_,
-                **{f"{split_name}_{k}": v for k, v in metrics.items()}
-            })
-
-    # Finish wandb run
     if use_wandb:
         wandb.finish()

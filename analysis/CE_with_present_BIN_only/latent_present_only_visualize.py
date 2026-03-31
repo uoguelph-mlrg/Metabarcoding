@@ -23,9 +23,9 @@ import seaborn as sns
 from scipy.stats import gaussian_kde
 from matplotlib.colors import Normalize
 
-# Add parent directory to path to import centralized visualization module
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
-from src.visualize_results import create_all_visualizations as create_viz_centralized
+# Add analysis folder to path to import centralized visualization module.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from visualize_results import create_all_visualizations as create_viz_centralized
 
 
 # ============================================================================
@@ -480,8 +480,9 @@ def run_all(results: Dict[str, Any], output_dir: str):
     create_viz_centralized(
         results=results,
         output_dir=output_dir,
-        comparison_names=VARIANT_LABELS,
-        comparison_colors=VARIANT_COLORS
+        labels=VARIANT_LABELS,
+        colors=VARIANT_COLORS,
+        title="Present-Only vs All-BINs Latent",
     )
     
     # Add analysis-specific plot for validation loss curves

@@ -14,6 +14,14 @@ Usage
         --labels '{"baseline": "Baseline", "exp": "Exponential"}' \\
         --title "My Experiment Comparison"
 
+    python visualize_results.py \\
+        --results_paths path/to/a.pkl path/to/b.pkl path/to/c.pkl \\
+        --output_dir figures
+
+    python visualize_results.py \\
+        --results_path path/to/results_folder \\
+        --output_dir figures
+
 The results pickle must be a dict with one key per model/variant:
     {
         "model_a": {"predictions": np.ndarray, "targets": np.ndarray, ...},
@@ -28,11 +36,9 @@ Required per-model keys:
     - "bin_labels":     str array (N,)      — BIN URI for each entry
     where N = total valid (sample, BIN) pairs in the test split.
 
-    Backward compatible: old result files with 2-D NaN-padded arrays are
-    still accepted (sample_labels / bin_labels keys will be absent; macro
-    metrics fall back to the 2-D row-wise computation).
-
 Optional per-model keys (used when present):
+    - "latent_vector":  np.ndarray with latent values per BIN (used for latent
+                        comparison plots when at least two models provide it)
     - "train_losses", "val_losses": list of (cycle, epoch, loss) tuples
     - "timeline_train_losses", "timeline_val_losses": list of (phase, cycle, step, loss)
     - "cycle_train_losses", "cycle_val_losses": list of (cycle, loss) tuples
@@ -42,6 +48,7 @@ Optional per-model keys (used when present):
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -79,6 +86,8 @@ def get_color(key: str, colors: Optional[Dict[str, str]]) -> str:
     """Return a hex color for *key*, falling back to the default palette."""
     if colors and key in colors:
         return colors[key]
+    palette = ["#95a5a6", "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#34495e"]
+    return palette[abs(hash(key)) % len(palette)]
 
 
 def get_label(key: str, labels: Optional[Dict[str, str]] = None) -> str:
@@ -117,6 +126,82 @@ def _colorbar_axes(n_rows: int) -> tuple[float, float, float, float]:
     if n_rows == 1:
         return (0.94, 0.15, 0.02, 0.70)
     return (0.95, 0.10, 0.015, 0.80)
+
+
+def _shannon_diversity(values: np.ndarray, eps: float = 1e-10) -> float:
+    """Compute Shannon diversity from non-negative abundance values."""
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return np.nan
+    probs = (arr + eps) / np.sum(arr + eps)
+    return float(-np.sum(probs * np.log(probs + eps)))
+
+
+def _fit_r2_intercept(x: np.ndarray, y: np.ndarray) -> Tuple[Optional[float], Optional[float]]:
+    """Return (r2, intercept) from linear fit y ~ x; None when undefined."""
+    x_arr = np.asarray(x, dtype=float).reshape(-1)
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr, y_arr = x_arr[valid], y_arr[valid]
+    if x_arr.size < 2 or np.allclose(x_arr, x_arr[0]):
+        return None, None
+
+    slope, intercept = np.polyfit(x_arr, y_arr, 1)
+    corr = np.corrcoef(x_arr, y_arr)[0, 1]
+
+    r2 = float(corr ** 2) if np.isfinite(corr) else None
+    i0 = float(intercept) if np.isfinite(intercept) else None
+    return r2, i0
+
+
+def _safe_spearman_rho(x: np.ndarray, y: np.ndarray) -> Optional[float]:
+    """Compute Spearman rho and return None if undefined."""
+    x_arr = np.asarray(x, dtype=float).reshape(-1)
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr, y_arr = x_arr[valid], y_arr[valid]
+    if x_arr.size < 2:
+        return None
+
+    rank_x = pd.Series(x_arr).rank(method="average").to_numpy(dtype=float)
+    rank_y = pd.Series(y_arr).rank(method="average").to_numpy(dtype=float)
+    if np.std(rank_x) == 0 or np.std(rank_y) == 0:
+        return None
+    rho = float(np.corrcoef(rank_x, rank_y)[0, 1])
+    return rho if np.isfinite(rho) else None
+
+
+def _bootstrap_shannon_fit_ci(
+    shannon_true: np.ndarray,
+    shannon_pred: np.ndarray,
+    n_bootstrap: int = 1000,
+) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+    """Bootstrap CIs for Shannon fit R^2 and intercept across samples."""
+    x = np.asarray(shannon_true, dtype=float)
+    y = np.asarray(shannon_pred, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y)
+    x, y = x[valid], y[valid]
+    if x.size < 2:
+        return None, None
+
+    r2_vals: List[float] = []
+    intercept_vals: List[float] = []
+    for _ in range(n_bootstrap):
+        idx = np.random.choice(x.size, size=x.size, replace=True)
+        xb, yb = x[idx], y[idx]
+        r2, intercept = _fit_r2_intercept(xb, yb)
+        if r2 is not None:
+            r2_vals.append(r2)
+        if intercept is not None:
+            intercept_vals.append(intercept)
+
+    def _ci(vals: List[float]) -> Optional[Tuple[float, float]]:
+        if len(vals) < 2:
+            return None
+        arr = np.asarray(vals, dtype=float)
+        return (float(np.percentile(arr, 2.5)), float(np.percentile(arr, 97.5)))
+
+    return _ci(r2_vals), _ci(intercept_vals)
 
 
 # ============================================================================
@@ -173,14 +258,12 @@ def compute_extended_metrics(
 ) -> Dict[str, Any]:
     """Compute comprehensive prediction metrics.
 
-    Accepts flat 1-D arrays (the canonical format produced by every
-    ``get_predictions`` implementation) plus optional label arrays that enable
-    rigorous grouped metrics.  For backward compatibility with older result
-    pickles that still carry 2-D NaN-padded arrays, the 2-D path is preserved.
+    Accepts flat 1-D arrays (the canonical format produced by
+    ``Trainer.get_predictions``) with label arrays that enable rigorous
+    grouped metrics.
 
     Args:
-        y_true:         Ground-truth relative abundances — shape (N,) or
-                        (n_samples, max_bins) for old-style pickles.
+        y_true:         Ground-truth relative abundances — shape (N,).
         y_pred:         Predicted values — same shape as y_true.
         sample_labels:  (N,) string array identifying which sample each entry
                         belongs to.  When provided, per-sample macro metrics
@@ -191,8 +274,21 @@ def compute_extended_metrics(
                         summary metrics but passed through for callers that
                         want per-BIN breakdown via ``groupby(bin_labels)``.
     """
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    if y_true.shape != y_pred.shape:
+        raise ValueError("'targets' and 'predictions' must have the same shape")
+
+    if sample_labels is not None:
+        sample_labels = np.asarray(sample_labels).reshape(-1)
+        if sample_labels.shape[0] != y_true.shape[0]:
+            raise ValueError("'sample_labels' length must match 'targets' and 'predictions'")
+
+    if bin_labels is not None:
+        bin_labels = np.asarray(bin_labels).reshape(-1)
+        if bin_labels.shape[0] != y_true.shape[0]:
+            raise ValueError("'bin_labels' length must match 'targets' and 'predictions'")
+
     valid = np.isfinite(y_true) & np.isfinite(y_pred)
     y_true = y_true[valid]
     y_pred = np.clip(y_pred[valid], 0, 1)
@@ -200,16 +296,20 @@ def compute_extended_metrics(
     rmse_macro: Optional[float] = np.nan
     mae_macro: Optional[float] = np.nan
     kl_divergence: Optional[float] = np.nan
+    shannon_r2: Optional[float] = np.nan
+    shannon_intercept: Optional[float] = np.nan
+    spearman_macro: Optional[float] = np.nan
     eps = 1e-10
 
     # ------------------------------------------------------------------
     # Per sample metrics (macro-averaged)
     # ------------------------------------------------------------------
     if sample_labels is not None:
-        sample_labels = np.asarray(sample_labels)
         sample_labels_v = sample_labels[valid]
 
         rmse_per, mae_per, kl_per = [], [], []
+        shannon_true_per, shannon_pred_per = [], []
+        spearman_per = []
         for s in np.unique(sample_labels_v):
             mask = sample_labels_v == s
             true_s = y_true[mask]
@@ -223,30 +323,34 @@ def compute_extended_metrics(
             pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
             kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
 
+            shannon_true = _shannon_diversity(true_s, eps=eps)
+            shannon_pred = _shannon_diversity(pred_s, eps=eps)
+            if np.isfinite(shannon_true) and np.isfinite(shannon_pred):
+                shannon_true_per.append(shannon_true)
+                shannon_pred_per.append(shannon_pred)
+
+            if len(true_s) > 1:
+                rho = _safe_spearman_rho(true_s, pred_s)
+                if rho is not None:
+                    spearman_per.append(rho)
+
         if rmse_per:
             rmse_macro = float(np.mean(rmse_per))
             mae_macro = float(np.mean(mae_per))
             kl_divergence = float(np.mean(kl_per))
-    
-    elif y_true.ndim == 2:
-        rmse_per, mae_per, kl_per = [], [], []
-        for i in range(y_true.shape[0]):
-            row_true = y_true[i]
-            row_pred = y_pred[i]
-            valid_i = np.isfinite(row_true) & np.isfinite(row_pred)
-            if valid_i.sum() == 0:
-                continue
-            row_true = row_true[valid_i]
-            row_pred = np.clip(row_pred[valid_i], 0, 1)
-            rmse_per.append(float(np.sqrt(np.mean((row_true - row_pred) ** 2))))
-            mae_per.append(float(np.mean(np.abs(row_true - row_pred))))
-            row_true_norm = (row_true + eps) / (row_true + eps).sum()
-            row_pred_norm = (row_pred + eps) / (row_pred + eps).sum()
-            kl_per.append(float(np.sum(row_true_norm * np.log(row_true_norm / row_pred_norm))))
-        if rmse_per:
-            rmse_macro = float(np.mean(rmse_per))
-            mae_macro = float(np.mean(mae_per))
-            kl_divergence = float(np.mean(kl_per))
+
+        if len(shannon_true_per) >= 2:
+            fit_r2, fit_intercept = _fit_r2_intercept(
+                np.asarray(shannon_true_per, dtype=float),
+                np.asarray(shannon_pred_per, dtype=float),
+            )
+            if fit_r2 is not None:
+                shannon_r2 = fit_r2
+            if fit_intercept is not None:
+                shannon_intercept = fit_intercept
+
+        if spearman_per:
+            spearman_macro = float(np.mean(spearman_per))
     
     # ------------------------------------------------------------------
     # Overall micro-averaged metrics (treating all entries as a single vector)
@@ -255,6 +359,13 @@ def compute_extended_metrics(
     mse = np.mean((y_true - y_pred) ** 2)
     rmse_micro = float(np.sqrt(mse))
     mae_micro = float(np.mean(np.abs(y_true - y_pred)))
+
+    if np.isnan(rmse_macro):
+        rmse_macro = rmse_micro
+        mae_macro = mae_micro
+        y_tn = (y_true + eps) / (y_true + eps).sum()
+        y_pn = (y_pred + eps) / (y_pred + eps).sum()
+        kl_divergence = float(np.sum(y_tn * np.log(y_tn / y_pn)))
 
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
@@ -296,6 +407,9 @@ def compute_extended_metrics(
         "MAE (micro)": mae_micro,
         "MAE (macro)": mae_macro,
         "Absolute Relative Error": absolute_relative_error,
+        "R² (Shannon diversity)": shannon_r2,
+        "Shannon intercept": shannon_intercept,
+        "Spearman ρ (macro)": spearman_macro,
         "R²": r2,
         "R² (log + 1)": r2_log,
         "RMSE (zeros)": rmse_zeros,
@@ -335,7 +449,8 @@ def plot_metrics_comparison(
 
     metrics_to_plot = [
         "MAE (macro)", "MAE (micro)", "Absolute Relative Error", "KL Divergence", 
-        "MAE (zeros)", "MAE (non-zeros)", "R²", "R² (log + 1)"
+        "MAE (zeros)", "MAE (non-zeros)", "Spearman ρ (macro)",
+        "R² (Shannon diversity)", "Shannon intercept", "R²", "R² (log + 1)"
     ]
     n_metrics = len(metrics_to_plot)
 
@@ -351,16 +466,36 @@ def plot_metrics_comparison(
             cis[model] = {m: None for m in metrics_to_plot}
             continue
         
-        # Get macro metrics for CI computation
+        # Get macro metrics for CI computation (sample-wise, then averaged)
         mae_per_s, kl_div_per_s = [], []
-        for s in np.unique(sample_labels[valid]) if sample_labels is not None else [0]:
-            mask = sample_labels[valid] == s if sample_labels is not None else np.arange(len(y_true))
-            true_s = y_true[mask]
-            pred_s = y_pred[mask]
-            if len(true_s) == 0:
-                continue
-            mae_per_s.append(float(np.mean(np.abs(true_s - pred_s))))
-            kl_div_per_s.append(float(np.sum((true_s + 1e-10) * np.log((true_s + 1e-10) / (pred_s + 1e-10)))))
+        shannon_true_per_s, shannon_pred_per_s = [], []
+        spearman_per_s = []
+        if sample_labels is not None:
+            sample_labels_v = np.asarray(sample_labels).reshape(-1)[valid]
+            for s in np.unique(sample_labels_v):
+                mask = sample_labels_v == s
+                true_s = y_true[mask]
+                pred_s = y_pred[mask]
+                if len(true_s) == 0:
+                    continue
+                mae_per_s.append(float(np.mean(np.abs(true_s - pred_s))))
+                true_s_norm = (true_s + 1e-10) / (true_s + 1e-10).sum()
+                pred_s_norm = (pred_s + 1e-10) / (pred_s + 1e-10).sum()
+                kl_div_per_s.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
+                shannon_true = _shannon_diversity(true_s)
+                shannon_pred = _shannon_diversity(pred_s)
+                if np.isfinite(shannon_true) and np.isfinite(shannon_pred):
+                    shannon_true_per_s.append(shannon_true)
+                    shannon_pred_per_s.append(shannon_pred)
+                if len(true_s) > 1:
+                    rho = _safe_spearman_rho(true_s, pred_s)
+                    if rho is not None:
+                        spearman_per_s.append(rho)
+        else:
+            mae_per_s.append(float(np.mean(np.abs(y_true - y_pred))))
+            y_tn = (y_true + 1e-10) / (y_true + 1e-10).sum()
+            y_pn = (y_pred + 1e-10) / (y_pred + 1e-10).sum()
+            kl_div_per_s.append(float(np.sum(y_tn * np.log(y_tn / y_pn))))
         mae_per_s, kl_div_per_s = np.array(mae_per_s), np.array(kl_div_per_s)
         
         # Get masks for zero vs non-zero true values (used for subgroup CI computation)
@@ -370,6 +505,17 @@ def plot_metrics_comparison(
         
         # Get micro metrics for CI computation
         abs_err = np.abs(y_true - y_pred)
+
+        shannon_r2_ci, shannon_intercept_ci = _bootstrap_shannon_fit_ci(
+            np.asarray(shannon_true_per_s, dtype=float),
+            np.asarray(shannon_pred_per_s, dtype=float),
+        )
+        if len(spearman_per_s) > 1:
+            spearman_ci = compute_95ci_bootstrap(np.asarray(spearman_per_s, dtype=float))
+        elif len(spearman_per_s) == 1:
+            spearman_ci = (spearman_per_s[0], spearman_per_s[0])
+        else:
+            spearman_ci = None
         
         cis[model] = {
             'MAE (macro)': compute_95ci_bootstrap(mae_per_s),
@@ -378,6 +524,9 @@ def plot_metrics_comparison(
             "KL Divergence": compute_95ci_bootstrap(kl_div_per_s),
             "MAE (zeros)": compute_95ci_bootstrap(abs_err[zero_m]),
             "MAE (non-zeros)": compute_95ci_bootstrap(abs_err[nonzero_m]),
+            "Spearman ρ (macro)": spearman_ci,
+            "R² (Shannon diversity)": shannon_r2_ci,
+            "Shannon intercept": shannon_intercept_ci,
             "R²": None,
             "R² (log + 1)": None,
         }
@@ -391,7 +540,8 @@ def plot_metrics_comparison(
 
     for idx, metric in enumerate(metrics_to_plot):
         ax = axes[idx]
-        values = [ext[model][metric] for model in models]
+        values = np.asarray([ext[model][metric] for model in models], dtype=float)
+        values_plot = np.where(np.isfinite(values), values, 0.0)
         ci_info = [cis[model].get(metric) for model in models]
         bar_colors = [get_color(model, colors) for model in models]
         x_pos = np.arange(len(models))
@@ -399,20 +549,31 @@ def plot_metrics_comparison(
         if all(c is None for c in ci_info):
             yerr = None
         else:
-            ci_lower = [c[0] if isinstance(c, tuple) else 0.0 for c in ci_info]
-            ci_upper = [c[1] if isinstance(c, tuple) else 0.0 for c in ci_info]
+            ci_lower = [c[0] if isinstance(c, tuple) else values_plot[i] for i, c in enumerate(ci_info)]
+            ci_upper = [c[1] if isinstance(c, tuple) else values_plot[i] for i, c in enumerate(ci_info)]
             yerr = [
-                np.abs(np.array(values) - np.array(ci_lower)),
-                np.abs(np.array(ci_upper) - np.array(values)),
+                np.abs(np.array(values_plot) - np.array(ci_lower)),
+                np.abs(np.array(ci_upper) - np.array(values_plot)),
             ]
 
         ax.bar(
-            x_pos, values, color=bar_colors, edgecolor="white", linewidth=1.5,
+            x_pos, values_plot, color=bar_colors, edgecolor="white", linewidth=1.5,
             yerr=yerr, capsize=4,
             error_kw={"elinewidth": 1.5} if yerr is not None else {},
         )
         ax.set_title(metric, fontsize=11, fontweight="bold")
-        ax.set_ylim(0, max(values) * 1.25 if max(values) > 0 else 1)
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size > 0:
+            max_val = float(np.max(finite_values))
+            min_val = float(np.min(finite_values))
+            if min_val < 0:
+                lower = min_val * 1.25
+                upper = max_val * 1.25 if max_val > 0 else 1.0
+                ax.set_ylim(lower, upper)
+            else:
+                ax.set_ylim(0, max_val * 1.25 if max_val > 0 else 1)
+        else:
+            ax.set_ylim(0, 1)
         ax.set_xticks(x_pos)
         ax.set_xticklabels(
             [get_label(model, labels) for model in models], rotation=45, ha="right", fontsize=9
@@ -716,7 +877,7 @@ def _grouped_range_bar(
         )
 
     xtick_labels = [
-        f"{r}\n(n={int(count_df.loc[r, 'Count']):,})" if r in count_df.index else r
+        f"{r}\n(n={int(np.asarray(count_df.loc[r, 'Count']).item()):,})" if r in count_df.index else r
         for r in range_order
     ]
     ax.set_xlabel(xlabel, fontsize=12)
@@ -929,7 +1090,9 @@ def plot_residual_distribution(
         color = get_color(model, colors)
         lbl = get_label(model, labels)
         counts, _, _ = ax.hist(res, bins=60, color=color, alpha=0.3, edgecolor="none")
-        max_count = max(max_count, counts.max())
+        counts_arr = np.asarray(counts, dtype=float)
+        if counts_arr.size > 0:
+            max_count = max(max_count, float(counts_arr.max()))
         if len(res) > 1:
             kde_vals = gaussian_kde(res)(x_kde)
             ax.plot(x_kde, kde_vals, color=color, linewidth=2)
@@ -1182,6 +1345,165 @@ def plot_latent_importance_diagnostics(
     log.info("  ✓ Saved: latent_importance_diagnostics.png")
 
 
+def plot_latent_comparison(
+    results: Dict[str, Any],
+    output_dir: str,
+    colors: Optional[Dict[str, str]] = None,
+    labels: Optional[Dict[str, str]] = None,
+) -> None:
+    """Compare latent vectors between two models when latent vectors are available.
+
+    If more than two models include ``latent_vector``, the first two are used,
+    prioritizing ("taxonomy", "barcodebert") when both are present.
+    """
+    latent_models = [m for m in results if isinstance(results[m], dict) and results[m].get("latent_vector") is not None]
+    if len(latent_models) < 2:
+        log.info("  (Skipping latent comparison — fewer than two models provide latent vectors.)")
+        return
+
+    if "taxonomy" in latent_models and "barcodebert" in latent_models:
+        m1, m2 = "taxonomy", "barcodebert"
+    else:
+        m1, m2 = latent_models[0], latent_models[1]
+
+    lv1 = np.asarray(results[m1]["latent_vector"]).flatten()
+    lv2 = np.asarray(results[m2]["latent_vector"]).flatten()
+    if lv1.shape != lv2.shape:
+        log.warning(
+            f"Latent vectors have different shapes ({m1}: {lv1.shape}, {m2}: {lv2.shape}); skipping latent comparison."
+        )
+        return
+
+    set_style()
+    fig, axes = plt.subplots(1, 3, figsize=(21, 5))
+
+    label1 = get_label(m1, labels)
+    label2 = get_label(m2, labels)
+    color1 = get_color(m1, colors)
+    color2 = get_color(m2, colors)
+
+    # Panel 1: Overlapping latent distributions.
+    ax = axes[0]
+    sns.histplot(lv1, bins=50, kde=True, stat="density", color=color1, alpha=0.35, edgecolor="none", ax=ax, label=label1)
+    sns.histplot(lv2, bins=50, kde=True, stat="density", color=color2, alpha=0.35, edgecolor="none", ax=ax, label=label2)
+    ax.axvline(lv1.mean(), color=color1, linestyle="--", linewidth=1.5, alpha=0.9)
+    ax.axvline(lv2.mean(), color=color2, linestyle="--", linewidth=1.5, alpha=0.9)
+    ax.set_xlabel("Latent value")
+    ax.set_ylabel("Density")
+    ax.set_title("Latent Value Distributions", fontsize=13, fontweight="bold")
+    ax.legend(frameon=False)
+    sns.despine(ax=ax)
+
+    # Panel 2: Distribution of latent differences.
+    ax = axes[1]
+    diff = lv2 - lv1
+    sns.histplot(diff, bins=50, kde=True, stat="density", color="#4a90d9", alpha=0.8, edgecolor="none", ax=ax)
+    ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.7)
+    ax.axvline(diff.mean(), color="#e74c3c", linestyle="-", linewidth=1.5, alpha=0.9)
+    ax.set_xlabel(f"Difference ({label2} - {label1})")
+    ax.set_ylabel("Density")
+    ax.set_title("Latent Difference Distribution", fontsize=13, fontweight="bold")
+    sns.despine(ax=ax)
+
+    # Panel 3: Per-bin scatter with density coloring.
+    ax = axes[2]
+    try:
+        xy = np.vstack([lv1, lv2]) + np.random.normal(0, 1e-8, (2, len(lv1)))
+        density = gaussian_kde(xy)(xy)
+    except Exception:
+        density = np.ones(len(lv1))
+    order = np.argsort(density)
+    sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis", s=10, alpha=0.65, edgecolors="none")
+    lo = min(lv1.min(), lv2.min())
+    hi = max(lv1.max(), lv2.max())
+    ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.5, alpha=0.7)
+    corr = float(np.corrcoef(lv1, lv2)[0, 1]) if len(lv1) > 1 else 0.0
+    ax.set_xlabel(label1)
+    ax.set_ylabel(label2)
+    ax.set_title(f"Per-BIN Latent Comparison (r={corr:.3f})", fontsize=13, fontweight="bold")
+    sns.despine(ax=ax)
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.85)
+    cbar.set_label("Point Density")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "latent_comparison.png"), dpi=150, bbox_inches="tight")
+    plt.close()
+    log.info("  ✓ Saved: latent_comparison.png")
+
+
+def plot_top_models_overview(
+    results: Dict[str, Any],
+    output_dir: str,
+    colors: Optional[Dict[str, str]] = None,
+    labels: Optional[Dict[str, str]] = None,
+    top_n: int = 5,
+) -> None:
+    """Create a radar-chart overview for top models (only meaningful for many-model comparisons)."""
+    if len(results) <= 4:
+        log.info("  (Skipping top-model overview — requires more than 4 models.)")
+        return
+
+    metrics = [
+        "MAE (micro)",
+        "MAE (macro)",
+        "Absolute Relative Error",
+        "KL Divergence",
+        "MAE (zeros)",
+        "MAE (non-zeros)",
+        "Correlation",
+    ]
+
+    ext = {
+        model: compute_extended_metrics(
+            results[model]["targets"],
+            results[model]["predictions"],
+            sample_labels=results[model].get("sample_labels"),
+            bin_labels=results[model].get("bin_labels"),
+        )
+        for model in results
+    }
+
+    score_df = pd.DataFrame(
+        [{"Model": m, **{k: ext[m][k] for k in metrics}} for m in results]
+    )
+    score_df = score_df.sort_values("MAE (micro)", ascending=True).head(top_n)
+
+    normalized = score_df[metrics].copy()
+    for col in metrics:
+        col_min = normalized[col].min()
+        col_max = normalized[col].max()
+        if col_max <= col_min:
+            normalized[col] = 1.0
+        elif col == "Correlation":
+            normalized[col] = (normalized[col] - col_min) / (col_max - col_min)
+        else:
+            normalized[col] = 1.0 - (normalized[col] - col_min) / (col_max - col_min)
+
+    set_style()
+    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={"polar": True})
+    angles = np.linspace(0, 2 * np.pi, len(metrics), endpoint=False).tolist()
+    angles += angles[:1]
+
+    for i, model in enumerate(score_df["Model"].tolist()):
+        values = normalized.iloc[i].tolist()
+        values += values[:1]
+        color = get_color(model, colors)
+        label = get_label(model, labels)
+        ax.plot(angles, values, "o-", linewidth=2, color=color, label=label)
+        ax.fill(angles, values, alpha=0.08, color=color)
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(metrics)
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Top Models Overview (larger area = better)", fontsize=13, fontweight="bold", pad=20)
+    ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1), frameon=False)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "top_models_radar.png"), dpi=150, bbox_inches="tight")
+    plt.close()
+    log.info("  ✓ Saved: top_models_radar.png")
+
+
 # ============================================================================
 # Plot 12 – Summary table
 # ============================================================================
@@ -1207,11 +1529,13 @@ def plot_summary_table(
 
     metrics = [
         "MAE (macro)", "MAE (micro)", "Absolute Relative Error", "KL Divergence", 
-        "MAE (zeros)", "MAE (non-zeros)", "R²", "R² (log + 1)"
+        "MAE (zeros)", "MAE (non-zeros)", "Spearman ρ (macro)",
+        "R² (Shannon diversity)", "Shannon intercept", "R²", "R² (log + 1)"
     ]
     best_is_high = {
         "MAE (macro)": False, "MAE (micro)": False, "Absolute Relative Error": False, "KL Divergence": False,
-        "MAE (zeros)": False, "MAE (non-zeros)": False, "R²": True, "R² (log + 1)": True,
+        "MAE (zeros)": False, "MAE (non-zeros)": False, "Spearman ρ (macro)": True,
+        "R² (Shannon diversity)": True, "R²": True, "R² (log + 1)": True,
     }
 
     data = [{"Model": get_label(model, labels), **{m: ext[model][m] for m in metrics}} for model in models]
@@ -1220,8 +1544,17 @@ def plot_summary_table(
     # Best value per metric
     best_rows: Dict[str, List[int]] = {}
     for col in metrics:
-        best_val = df[col].max() if best_is_high[col] else df[col].min()
-        best_rows[col] = df[df[col] == best_val].index.tolist()
+        col_vals = pd.to_numeric(df[col], errors="coerce")
+        valid_vals = col_vals.dropna()
+        if valid_vals.empty:
+            best_rows[col] = []
+            continue
+        if col == "Shannon intercept":
+            best_abs = float(valid_vals.abs().min())
+            best_rows[col] = col_vals[(col_vals.abs() == best_abs)].index.tolist()
+        else:
+            best_val = float(valid_vals.max() if best_is_high[col] else valid_vals.min())
+            best_rows[col] = col_vals[(col_vals == best_val)].index.tolist()
 
     display_df = df.copy()
     for col in metrics:
@@ -1234,7 +1567,7 @@ def plot_summary_table(
     ax.axis("off")
 
     table = ax.table(
-        cellText=display_df.values,
+        cellText=display_df.values.tolist(),
         colLabels=list(display_df.columns),
         cellLoc="center",
         loc="center",
@@ -1327,7 +1660,13 @@ def create_all_visualizations(
     log.info("11. Latent importance diagnostics (if available)...")
     plot_latent_importance_diagnostics(results, output_dir, model_key=latent_model_key)
 
-    log.info("12. Summary table...")
+    log.info("12. Latent vector comparison (if available)...")
+    plot_latent_comparison(results, output_dir, colors, labels)
+
+    log.info("13. Top-model radar overview (>4 models only)...")
+    plot_top_models_overview(results, output_dir, colors, labels)
+
+    log.info("14. Summary table...")
     plot_summary_table(results, output_dir, colors, labels, title=title, csv_filename=csv_filename)
 
     log.info(f"\n✅ All visualizations saved to: {output_dir}/")
@@ -1353,19 +1692,22 @@ def print_comparison(
     }
 
     metrics_cfg = [
-        ("RMSE (micro)", False),
-        ("RMSE (macro)", False),
-        ("MAE (micro)", False),
-        ("MAE (macro)", False),
-        ("Absolute Relative Error", False),
-        ("R²", True),
-        ("R² (log + 1)", True),
-        ("KL Divergence", False),
-        ("RMSE (zeros)", False),
-        ("MAE (zeros)", False),
-        ("RMSE (non-zeros)", False),
-        ("MAE (non-zeros)", False),
-        ("Correlation", True),
+        ("RMSE (micro)", "min"),
+        ("RMSE (macro)", "min"),
+        ("MAE (micro)", "min"),
+        ("MAE (macro)", "min"),
+        ("Absolute Relative Error", "min"),
+        ("R² (Shannon diversity)", "max"),
+        ("Shannon intercept", "absmin"),
+        ("Spearman ρ (macro)", "max"),
+        ("R²", "max"),
+        ("R² (log + 1)", "max"),
+        ("KL Divergence", "min"),
+        ("RMSE (zeros)", "min"),
+        ("MAE (zeros)", "min"),
+        ("RMSE (non-zeros)", "min"),
+        ("MAE (non-zeros)", "min"),
+        ("Correlation", "max"),
     ]
 
     col_w = 22
@@ -1378,9 +1720,17 @@ def print_comparison(
     log.info("-" * len(header))
 
     wins = {model: 0 for model in models}
-    for metric, higher_better in metrics_cfg:
-        vals = [ext[model][metric] for model in models]
-        best_idx = vals.index(max(vals) if higher_better else min(vals))
+    for metric, criterion in metrics_cfg:
+        vals = np.asarray([ext[model][metric] for model in models], dtype=float)
+        if criterion == "max":
+            score = np.where(np.isfinite(vals), vals, -np.inf)
+            best_idx = int(np.argmax(score))
+        elif criterion == "absmin":
+            score = np.where(np.isfinite(vals), np.abs(vals), np.inf)
+            best_idx = int(np.argmin(score))
+        else:
+            score = np.where(np.isfinite(vals), vals, np.inf)
+            best_idx = int(np.argmin(score))
         wins[models[best_idx]] += 1
         row = f"{metric:<{col_w}}"
         row += "".join(f"{v:<{col_w}.6f}" for v in vals)
@@ -1391,7 +1741,7 @@ def print_comparison(
     log.info("\nWin summary:")
     for model in models:
         log.info(f"  {get_label(model, labels)}: {wins[model]} wins")
-    overall = max(wins, key=wins.get)
+    overall = max(wins.items(), key=lambda item: item[1])[0]
     log.info(f"\n✓ Best overall: {get_label(overall, labels)} ({wins[overall]}/{len(metrics_cfg)} metrics)")
 
     # Improvement over first model (treated as baseline)
@@ -1400,10 +1750,14 @@ def print_comparison(
         log.info(f"\nImprovement over {get_label(baseline, labels)}:")
         for model in models[1:]:
             log.info(f"\n  {get_label(model, labels)}:")
-            for metric, higher_better in metrics_cfg:
+            for metric, criterion in metrics_cfg:
                 bv, kv = ext[baseline][metric], ext[model][metric]
-                if higher_better:
+                if criterion == "max":
                     pct = ((kv - bv) / abs(bv)) * 100 if bv != 0 else 0.0
+                    sym = "↑" if pct > 0 else "↓"
+                elif criterion == "absmin":
+                    b_abs, k_abs = abs(bv), abs(kv)
+                    pct = ((b_abs - k_abs) / b_abs) * 100 if b_abs != 0 else 0.0
                     sym = "↑" if pct > 0 else "↓"
                 else:
                     pct = ((bv - kv) / abs(bv)) * 100 if bv != 0 else 0.0
@@ -1421,6 +1775,114 @@ def load_results(results_path: str) -> Dict[str, Any]:
         return pickle.load(f)
 
 
+def _is_model_payload(obj: Any) -> bool:
+    required = {"predictions", "targets", "sample_labels", "bin_labels"}
+    return isinstance(obj, dict) and required.issubset(set(obj.keys()))
+
+
+def _validate_model_payload(model_key: str, payload: Dict[str, Any]) -> None:
+    required = ("predictions", "targets", "sample_labels", "bin_labels")
+    missing = [k for k in required if k not in payload]
+    if missing:
+        raise ValueError(f"Model entry '{model_key}' is missing required keys: {missing}")
+
+    preds = np.asarray(payload["predictions"])
+    trues = np.asarray(payload["targets"])
+    samples = np.asarray(payload["sample_labels"])
+    bins = np.asarray(payload["bin_labels"])
+
+    if preds.ndim != 1 or trues.ndim != 1:
+        raise ValueError(
+            f"Model entry '{model_key}' must use flat 1-D arrays for 'predictions' and 'targets'"
+        )
+    if preds.shape != trues.shape:
+        raise ValueError(
+            f"Model entry '{model_key}' has mismatched shapes: predictions {preds.shape}, targets {trues.shape}"
+        )
+    if samples.ndim != 1 or bins.ndim != 1:
+        raise ValueError(
+            f"Model entry '{model_key}' must use flat 1-D arrays for 'sample_labels' and 'bin_labels'"
+        )
+    if samples.shape[0] != preds.shape[0] or bins.shape[0] != preds.shape[0]:
+        raise ValueError(
+            f"Model entry '{model_key}' has inconsistent lengths among predictions/targets/sample_labels/bin_labels"
+        )
+
+
+def _stem(path: str) -> str:
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _load_one_pickle_as_results_dict(results_path: str) -> Dict[str, Any]:
+    loaded = load_results(results_path)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Pickle must contain a dict: {results_path}")
+
+    if _is_model_payload(loaded):
+        return {_stem(results_path): loaded}
+
+    # Standard case: combined dict keyed by model name.
+    return loaded
+
+
+def _merge_results_dicts(results_dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for d in results_dicts:
+        for key, value in d.items():
+            if key in merged:
+                raise ValueError(
+                    f"Duplicate model key '{key}' while merging results. "
+                    "Use --labels to rename display names or avoid duplicate file/model keys."
+                )
+            if not isinstance(value, dict):
+                raise ValueError(f"Model entry '{key}' must be a dict")
+            _validate_model_payload(key, value)
+            merged[key] = value
+    return merged
+
+
+def load_results_multi(results_path: Optional[str], results_paths: Optional[List[str]]) -> Dict[str, Any]:
+    """Load results from one file, many files, or a folder containing pickle files."""
+    if not results_path and not results_paths:
+        raise ValueError("Provide --results_path or --results_paths")
+
+    candidate_files: List[str] = []
+
+    if results_paths:
+        candidate_files.extend(os.path.abspath(p) for p in results_paths)
+
+    if results_path:
+        abs_path = os.path.abspath(results_path)
+        if os.path.isdir(abs_path):
+            found = sorted(glob.glob(os.path.join(abs_path, "*.pkl")))
+            if not found:
+                raise ValueError(f"No .pkl files found in folder: {abs_path}")
+            candidate_files.extend(found)
+        else:
+            candidate_files.append(abs_path)
+
+    if not candidate_files:
+        raise ValueError("No result pickle files to load")
+
+    # De-duplicate while preserving order.
+    seen = set()
+    unique_files: List[str] = []
+    for p in candidate_files:
+        if p not in seen:
+            seen.add(p)
+            unique_files.append(p)
+
+    for p in unique_files:
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"Results file not found: {p}")
+
+    loaded = [_load_one_pickle_as_results_dict(p) for p in unique_files]
+    merged = _merge_results_dicts(loaded)
+    if not merged:
+        raise ValueError("Loaded results are empty")
+    return merged
+
+
 # ============================================================================
 # CLI entry point
 # ============================================================================
@@ -1431,8 +1893,10 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--results_path", required=True,
-                        help="Path to the results pickle file.")
+    parser.add_argument("--results_path", required=False,
+                        help="Path to one results pickle file OR a folder containing .pkl files.")
+    parser.add_argument("--results_paths", nargs="+", default=None,
+                        help="Explicit list of results pickle files to compare.")
     parser.add_argument("--output_dir", default="figures",
                         help="Directory where plots will be saved.")
     parser.add_argument("--colors", default=None,
@@ -1453,12 +1917,15 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(message)s",
     )
     
-    # Resolve paths relative to cwd
-    results_path = os.path.abspath(args.results_path)
+    # Resolve output path relative to cwd
     output_dir = os.path.abspath(args.output_dir)
 
-    log.info(f"Loading results from {results_path} ...")
-    results = load_results(results_path)
+    if args.results_path:
+        log.info(f"Loading results from --results_path={os.path.abspath(args.results_path)} ...")
+    if args.results_paths:
+        log.info(f"Loading results from --results_paths ({len(args.results_paths)} file(s)) ...")
+
+    results = load_results_multi(args.results_path, args.results_paths)
     log.info(f"Found {len(results)} model(s): {list(results.keys())}")
 
     labels = json.loads(args.labels) if args.labels else {k: get_label(k) for k in results.keys()}

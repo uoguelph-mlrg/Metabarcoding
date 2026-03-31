@@ -12,8 +12,9 @@ import os
 import sys
 import argparse
 import warnings
+import pickle
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import numpy as np
 import pandas as pd
@@ -35,7 +36,7 @@ def train_and_evaluate_model(
     y_test: pd.Series,
     metadata: Dict,
     verbose: bool = True
-) -> Dict[str, Dict[str, float]]:
+) -> Dict[str, Any]:
     """
     Train a single model and evaluate on validation and test sets.
     
@@ -49,16 +50,17 @@ def train_and_evaluate_model(
     
     # Special handling for two-stage model
     if isinstance(model, TwoStageModel):
+        presence_train = metadata['presence_train']
         model.fit(
             X_train, y_train,
-            presence=metadata.get('presence_train')
+            presence=presence_train
         )
     else:
         model.fit(X_train, y_train)
     
     # Predict on validation set
     val_preds = model.predict(X_val)
-    val_metrics = compute_metrics(y_val, val_preds)
+    val_metrics = compute_metrics(y_val.to_numpy(), val_preds)
     
     # Sample-level metrics for validation
     val_sample_metrics = compute_sample_level_metrics(
@@ -69,7 +71,7 @@ def train_and_evaluate_model(
     
     # Predict on test set
     test_preds = model.predict(X_test)
-    test_metrics = compute_metrics(y_test, test_preds)
+    test_metrics = compute_metrics(y_test.to_numpy(), test_preds)
     
     # Sample-level metrics for test
     test_sample_metrics = compute_sample_level_metrics(
@@ -83,9 +85,28 @@ def train_and_evaluate_model(
         print(f"  Test       - RMSE: {test_metrics['rmse']:.4f}, MAE: {test_metrics['mae']:.4f}, R²: {test_metrics['r2']:.4f}")
         print(f"  Zero Recall (test): {test_metrics['zero_recall']:.2%}")
     
+    test_sample_labels = metadata['test_meta']['sample_id'].to_numpy()
+    test_bin_labels = metadata['test_meta']['bin_uri'].to_numpy()
+    unified_payload = {
+        "model": model.name,
+        "run_id": "baseline",
+        "best_val_loss": float('nan'),
+        "test_loss": float(test_metrics.get('rmse', np.nan)),
+        "predictions": np.asarray(test_preds, dtype=np.float32),
+        "targets": np.asarray(y_test.to_numpy(), dtype=np.float32),
+        "sample_labels": np.asarray(test_sample_labels),
+        "bin_labels": np.asarray(test_bin_labels),
+        "latent_vector": np.array([np.nan], dtype=np.float32),
+        "train_losses": [],
+        "val_losses": [],
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+    }
+
     return {
         'val': val_metrics,
-        'test': test_metrics
+        'test': test_metrics,
+        'payload': unified_payload,
     }
 
 
@@ -141,6 +162,7 @@ def run_all_baselines(
     # Train and evaluate each model
     all_results = {}
     test_results = {}
+    unified_results = {}
     
     for name, model in models.items():
         try:
@@ -154,6 +176,7 @@ def run_all_baselines(
             )
             all_results[name] = results
             test_results[name] = results['test']
+            unified_results[name] = results['payload']
         except Exception as e:
             print(f"Error training {name}: {e}")
             continue
@@ -183,6 +206,7 @@ def run_all_baselines(
         # No sample-level metrics for now (unless needed)
         test_results["latent_mlp"] = val_metrics
         all_results["latent_mlp"] = {"val": val_metrics, "test": val_metrics}
+        unified_results["latent_mlp"] = latent_results
         print("\nLatent+MLP (cross-entropy) model evaluated and added to results.")
     except Exception as e:
         print(f"Error training latent+MLP model: {e}")
@@ -197,6 +221,12 @@ def run_all_baselines(
     # Save test results
     test_filepath = os.path.join(output_dir, f"baseline_results_test_{timestamp}.csv")
     save_results_to_csv(test_results, test_filepath)
+
+    # Save unified model payloads for centralized visualization.
+    unified_filepath = os.path.join(output_dir, f"baseline_model_comparison_results_{timestamp}.pkl")
+    with open(unified_filepath, "wb") as f:
+        pickle.dump(unified_results, f)
+    print(f"Unified visualization payload saved to: {unified_filepath}")
     
     # Save validation results
     val_results = {name: res['val'] for name, res in all_results.items()}

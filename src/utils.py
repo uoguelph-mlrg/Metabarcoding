@@ -69,6 +69,48 @@ def load(
         "sample-eventid": "sample_id"
     })
 
+    # Sample-level curation: keep samples with enough total reads.
+    # Threshold is defined as min(5th percentile, 50000) on raw (non-log) read counts.
+    if "total_reads_per_sample" in df.columns:
+        sample_reads = pd.to_numeric(
+            df.groupby("sample_id")["total_reads_per_sample"].first(),
+            errors="coerce",
+        )
+    elif "total_reads" in df.columns:
+        sample_reads = pd.to_numeric(
+            df.groupby("sample_id")["total_reads"].sum(),
+            errors="coerce",
+        )
+        log.warning(
+            "Column 'total_reads_per_sample' not found; using summed 'total_reads' per sample for filtering."
+        )
+    else:
+        sample_reads = pd.Series(dtype=float)
+        log.warning(
+            "No read-count column found for sample filtering ('total_reads_per_sample' or 'total_reads')."
+        )
+
+    if len(sample_reads) > 0:
+        q05 = float(sample_reads.quantile(0.05))
+        reads_threshold = min(q05, 50000.0)
+        kept_sample_ids = sample_reads[sample_reads >= reads_threshold].index
+        dropped_samples = int((sample_reads < reads_threshold).sum())
+
+        if len(kept_sample_ids) == 0:
+            raise ValueError(
+                f"Sample filtering removed all samples at threshold {reads_threshold:.2f}."
+            )
+
+        df = df[df["sample_id"].isin(kept_sample_ids)].copy()
+        log.info(
+            "Applied sample read-count filter: threshold=min(q05=%.2f, 50000)=%.2f; kept %d/%d samples; dropped %d.",
+            q05,
+            reads_threshold,
+            len(kept_sample_ids),
+            len(sample_reads),
+            dropped_samples,
+        )
+
     # Parse date and extract day of year as numeric feature
     if "collection_start_date" in df.columns:
         df["collection_day"] = pd.to_datetime(df["collection_start_date"], format="%m/%d/%Y", errors="coerce").dt.dayofyear
@@ -118,7 +160,17 @@ def load(
         train_sample_idx = fixed_split_indices["train"]
         val_sample_idx = fixed_split_indices["val"]
         test_sample_idx = fixed_split_indices["test"]
-    else:
+        if (
+            train_sample_idx.max(initial=-1) >= n_samples
+            or val_sample_idx.max(initial=-1) >= n_samples
+            or test_sample_idx.max(initial=-1) >= n_samples
+        ):
+            log.warning(
+                "Provided fixed_split_indices are incompatible with current filtered samples; falling back to random split."
+            )
+            fixed_split_indices = None
+
+    if fixed_split_indices is None:
         sample_indices = np.arange(n_samples)
         np.random.shuffle(sample_indices)
 
