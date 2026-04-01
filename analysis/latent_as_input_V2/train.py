@@ -29,17 +29,16 @@ if _HERE not in sys.path:
 if _SRC not in sys.path:
     sys.path.insert(1, _SRC)
 
-from dataset import MBDataset, collate_samples
-from loss import Loss
-from mlp import MLPModel
-from neighbor_graph import NeighbourGraph
-from utils import load
-
 # Import variant-specific components from this analysis directory.
 from config import Config, set_seed
 from latent_solver import LatentSolver
 from model import Model
 
+from dataset import MBDataset, collate_samples
+from loss import Loss
+from mlp import MLPModel
+from neighbor_graph import NeighbourGraph
+from utils import load
 
 def compute_extended_metrics(
     y_true: np.ndarray,
