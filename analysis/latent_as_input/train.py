@@ -22,17 +22,17 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
+# Import variant-specific components from this analysis directory.
+from config import Config, set_seed
+from latent_solver import LatentSolver
+from model import Model
+
 _HERE = os.path.dirname(__file__)
 _SRC = os.path.join(_HERE, '..', '..', 'src')
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 if _SRC not in sys.path:
     sys.path.insert(1, _SRC)
-
-# Import variant-specific components from this analysis directory.
-from config import Config, set_seed
-from latent_solver import LatentSolver
-from model import Model
 
 from dataset import MBDataset, collate_samples
 from loss import Loss
