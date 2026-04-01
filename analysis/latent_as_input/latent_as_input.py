@@ -12,13 +12,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import pickle
 import sys
 import logging as log
 from typing import Dict, Any
 
-sys.path.insert(0, '..')
+ANALYSIS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ANALYSIS_DIR not in sys.path:
+	sys.path.insert(0, ANALYSIS_DIR)
 from variant_helpers import (
 	make_output_dir,
 	make_run_group,
@@ -38,19 +41,30 @@ except ImportError:
 
 def load_variant_trainer(local_dir: str, src_path: str):
 	"""Load latent-as-input Trainer and Config from local folder with clean imports."""
-	# Ensure local dir takes precedence over src for config.py
-	if local_dir not in sys.path:
-		sys.path.insert(0, local_dir)
-	if src_path not in sys.path:
-		sys.path.append(src_path)
+	# Ensure deterministic import order: local analysis dir first, src second.
+	if local_dir in sys.path:
+		sys.path.remove(local_dir)
+	sys.path.insert(0, local_dir)
+	if src_path in sys.path:
+		sys.path.remove(src_path)
+	sys.path.insert(1, src_path)
+	importlib.invalidate_caches()
 
 	# Clear cached modules that could shadow local config
 	for mod in ["config", "train", "model", "latent_solver"]:
 		if mod in sys.modules:
 			del sys.modules[mod]
 
-	import train as local_train
-	import config as local_config
+	local_model = importlib.import_module("model")
+	importlib.import_module("latent_solver")
+	local_train = importlib.import_module("train")
+	local_config = importlib.import_module("config")
+
+	model_file = os.path.abspath(getattr(local_model, "__file__", ""))
+	if not model_file.startswith(os.path.abspath(local_dir) + os.sep):
+		raise ImportError(
+			f"Resolved wrong model module: {model_file}. Expected under {local_dir}"
+		)
 	return local_train.Trainer, local_config.Config, local_config.set_seed
 
 

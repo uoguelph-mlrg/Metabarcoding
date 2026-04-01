@@ -7,7 +7,6 @@ import torch.nn as nn
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
-from mlp import MLPModel
 
 # Import from local folder (modified for latent-as-input)
 from latent_solver import LatentSolver

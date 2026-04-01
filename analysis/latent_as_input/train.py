@@ -16,6 +16,17 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC = os.path.abspath(os.path.join(_HERE, '..', '..', 'src'))
+
+if _HERE in sys.path:
+    sys.path.remove(_HERE)
+sys.path.insert(0, _HERE)
+
+if _SRC in sys.path:
+    sys.path.remove(_SRC)
+sys.path.insert(1, _SRC)
+
 try:
     import wandb  # type: ignore
     WANDB_AVAILABLE = True
@@ -26,13 +37,6 @@ except ImportError:
 from config import Config, set_seed
 from latent_solver import LatentSolver
 from model import Model
-
-_HERE = os.path.dirname(__file__)
-_SRC = os.path.join(_HERE, '..', '..', 'src')
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-if _SRC not in sys.path:
-    sys.path.insert(1, _SRC)
 
 from dataset import MBDataset, collate_samples
 from loss import Loss
