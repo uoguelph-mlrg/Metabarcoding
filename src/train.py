@@ -148,8 +148,6 @@ class Trainer:
             elif not os.path.isabs(barcode_path) or not os.path.exists(barcode_path):
                 self.cfg.barcode_data_path = effective_data_path
 
-        effective_loss_type = cast(Literal["cross_entropy", "logistic"], loss_type or self.cfg.loss_type)
-
         self.start_epoch = 0
         self.current_epoch = -1
         self.global_step = 0
