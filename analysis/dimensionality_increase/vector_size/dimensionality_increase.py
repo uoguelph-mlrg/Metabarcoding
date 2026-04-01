@@ -96,7 +96,6 @@ def run_comparison(
         with variant_wandb_run(
             use_wandb=use_wandb,
             wandb_module=wandb,
-            project="metabarcoding-dimensionality-analysis",
             analysis_name="dimensionality_analysis",
             variant_name=variant,
             run_group=run_group,

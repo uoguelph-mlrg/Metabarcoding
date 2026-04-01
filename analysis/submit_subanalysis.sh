@@ -29,6 +29,7 @@ COLORS_JSON_OVERRIDE=""
 
 declare -a TARGETS=()
 declare -a DEFAULT_TARGETS=(
+  "BarcodeBERT"
   "interpolated_latent/V1"
   "interpolated_latent/V2"
   "interpolated_latent/V3"
@@ -191,6 +192,7 @@ fi
 
 if [[ "$LIST_TARGETS" == "1" ]]; then
   cat <<'EOF'
+BarcodeBERT
 interpolated_latent/V1
 interpolated_latent/V2
 interpolated_latent/V3
@@ -244,6 +246,16 @@ resolve_target() {
   OPTIONAL_DATA_ARG_TEMPLATE=""
 
   case "$target" in
+    BarcodeBERT)
+      TARGET_DIR="BarcodeBERT"
+      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
+      TRAIN_CMD_TEMPLATE='python barcode_bert.py __OPTIONAL_DATA_ARG__'
+      RESULTS_PATTERNS='BarcodeBERT/results/barcode_bert_*.pkl'
+      FIGURES_DIR='figures/BarcodeBERT'
+      DEFAULT_LABELS_JSON='{"baseline":"Taxonomy","barcode_bert":"BarcodeBERT"}'
+      DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","barcode_bert":"#9b59b6"}'
+      DEFAULT_TIME="8:00:00"
+      ;;
     interpolated_latent/V1)
       TARGET_DIR="interpolated_latent/V1"
       OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
@@ -300,7 +312,7 @@ resolve_target() {
       TRAIN_CMD_TEMPLATE='python latent_as_input.py __OPTIONAL_DATA_ARG__ --output_dir results'
       RESULTS_PATTERNS='latent_as_input/results/latent_as_input_*.pkl'
       FIGURES_DIR='figures/latent_as_input'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent-as-Input"}'
+      DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent as Input"}'
       DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","latent_as_input":"#e67e22"}'
       DEFAULT_TIME="8:00:00"
       ;;
@@ -310,7 +322,7 @@ resolve_target() {
       TRAIN_CMD_TEMPLATE='python latent_as_input.py __OPTIONAL_DATA_ARG__ --output_dir results'
       RESULTS_PATTERNS='latent_as_input_V2/results/latent_as_input_v2_*.pkl'
       FIGURES_DIR='figures/latent_as_input_V2'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent-as-Input"}'
+      DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent as In-&-Output"}'
       DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","latent_as_input":"#e67e22"}'
       DEFAULT_TIME="8:00:00"
       ;;

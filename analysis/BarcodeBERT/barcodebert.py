@@ -84,7 +84,6 @@ def run_comparison(
     with variant_wandb_run(
         use_wandb=use_wandb,
         wandb_module=wandb,
-        project="metabarcoding-barcodebert-comparison",
         analysis_name="barcodebert",
         variant_name="barcodebert",
         run_group=run_group,

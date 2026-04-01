@@ -78,7 +78,6 @@ def run_comparison(
         with variant_wandb_run(
             use_wandb=use_wandb,
             wandb_module=wandb,
-            project="metabarcoding-preprocessing-comparison",
             analysis_name="preprocessing",
             variant_name=method,
             run_group=run_group,

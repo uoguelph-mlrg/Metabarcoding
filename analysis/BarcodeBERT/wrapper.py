@@ -214,7 +214,7 @@ if __name__ == "__main__":
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     if use_wandb:
         wandb.init(
-            project="metabarcoding-barcodebert-comparison",
+            project="metabarcoding",
             name=f"taxonomy_vs_barcodebert_{time.strftime('%Y-%m-%d_%H-%M')}",
             reinit=True,
         )

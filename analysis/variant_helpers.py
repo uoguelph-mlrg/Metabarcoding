@@ -57,7 +57,6 @@ def variant_wandb_run(
     *,
     use_wandb: bool,
     wandb_module: Any,
-    project: str,
     analysis_name: str,
     variant_name: str,
     run_group: Optional[str],
@@ -66,7 +65,7 @@ def variant_wandb_run(
 ) -> Iterator[None]:
     if use_wandb:
         wandb_module.init(
-            project=project,
+            project="metabarcoding",
             name=make_variant_run_name(analysis_name, variant_name),
             group=run_group,
             tags=tags or [analysis_name, variant_name, "variant_only"],

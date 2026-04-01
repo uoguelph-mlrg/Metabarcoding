@@ -99,7 +99,7 @@ def run_comparison(
         with variant_wandb_run(
             use_wandb=use_wandb,
             wandb_module=wandb,
-            project="metabarcoding-gating-comparison",
+            project="metabarcoding",
             analysis_name="gating_comparison",
             variant_name=gating_fn,
             run_group=run_group,

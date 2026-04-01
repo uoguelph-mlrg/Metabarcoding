@@ -70,7 +70,6 @@ def run_comparison(
         with variant_wandb_run(
             use_wandb=use_wandb,
             wandb_module=wandb,
-            project="metabarcoding-loss-comparison",
             analysis_name="loss_comparison",
             variant_name=variant,
             run_group=run_group,

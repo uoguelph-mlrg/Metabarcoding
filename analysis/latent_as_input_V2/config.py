@@ -57,7 +57,11 @@ class Config:
 
 
     # Training - per-batch alternation: for each batch, solve D analytically then take one MLP+Z gradient step
-    device: str = "cpu"  # Force CPU to avoid MPS issues with nn.Embedding
+    device: str = (
+        "mps" if torch.backends.mps.is_available() else 
+        "cuda" if torch.cuda.is_available() else 
+        "cpu"
+    )
     batch_size_bin: int = 1024          # Batch size (in number of observations not samples)
     batch_size_sample: int = 8          # Batch size in number of samples
     lr: float = 5e-4                    # Learning rate for MLP parameters

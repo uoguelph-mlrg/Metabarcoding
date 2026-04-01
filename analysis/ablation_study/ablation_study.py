@@ -701,7 +701,7 @@ def run_ablation_study(
 
     if use_wandb:
         wandb.init(
-            project="metabarcoding-ablation",
+            project="metabarcoding",
             name=f"ablation_study_mlp_no_taxonomy_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
             group=run_group,
             tags=["ablation_study", "mlp_no_taxonomy", "variant_only"],
@@ -749,7 +749,7 @@ def run_ablation_study(
 
     if use_wandb:
         wandb.init(
-            project="metabarcoding-ablation",
+            project="metabarcoding",
             name=f"ablation_study_mlp_with_taxonomy_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
             group=run_group,
             tags=["ablation_study", "mlp_with_taxonomy", "variant_only"],

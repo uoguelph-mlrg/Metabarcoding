@@ -186,7 +186,6 @@ def run_comparison(
             with variant_wandb_run(
                 use_wandb=use_wandb,
                 wandb_module=wandb,
-                project="metabarcoding-location-embeddings",
                 analysis_name="location_embedding",
                 variant_name=embedder_name,
                 run_group=run_group,

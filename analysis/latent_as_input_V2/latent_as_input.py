@@ -77,7 +77,6 @@ def run_comparison(
 	with variant_wandb_run(
 		use_wandb=use_wandb,
 		wandb_module=wandb,
-		project="metabarcoding-model-comparison",
 		analysis_name="latent_as_input_v2",
 		variant_name="latent_as_input",
 		run_group=run_group,

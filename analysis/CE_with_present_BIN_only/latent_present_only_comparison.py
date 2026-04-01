@@ -64,7 +64,7 @@ def run_comparison(
 
         if use_wandb and WANDB_AVAILABLE:
             wandb.init(
-                project="metabarcoding-latent-comparison",
+                project="metabarcoding",
                 name=f"{key}_{time.strftime('%Y-%m-%d_%H-%M')}",
                 config={**run_cfg.__dict__, "variant": key},
                 reinit=True,

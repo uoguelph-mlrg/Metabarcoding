@@ -128,7 +128,6 @@ def run_comparison(
 	with variant_wandb_run(
 		use_wandb=use_wandb,
 		wandb_module=wandb,
-		project="metabarcoding-model-comparison",
 		analysis_name="interpolated_latent_v4",
 		variant_name="interpolated_latent",
 		run_group=run_group,
