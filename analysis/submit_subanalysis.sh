@@ -13,7 +13,6 @@ CPUS="8"
 MEM="32G"
 QOS="normal"
 TIME_OVERRIDE=""
-JOB_PREFIX=""
 DATA_PATH="$PROJECT_ROOT/data/data_merged.csv"
 DATA_PATH_SET="0"
 VENV_ACTIVATE='~/barcode/bin/activate'
@@ -72,7 +71,6 @@ Options:
   --mem SIZE               SLURM memory (default: 32G)
   --time HH:MM:SS          Override walltime for all targets
   --qos NAME               SLURM QoS (default: normal)
-  --job-prefix NAME        Job name prefix (default: metabarcoding)
   --venv-activate PATH     Venv activate script (default: ~/barcode/bin/activate)
   --module-load "A B C"     Modules for `module load` (default: python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0)
   --dry-run                Print generated sbatch script path and command, do not submit
@@ -160,10 +158,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --qos)
       QOS="$2"
-      shift 2
-      ;;
-    --job-prefix)
-      JOB_PREFIX="$2"
       shift 2
       ;;
     --venv-activate)
@@ -394,7 +388,7 @@ submit_baseline() {
 
   local safe_baseline="baseline"
   local job_file="$JOB_DIR/${safe_baseline}_$(date +%Y%m%d_%H%M%S).sbatch"
-  local job_name="${JOB_PREFIX}_baseline"
+  local job_name="baseline"
 
   cat > "$job_file" <<EOF
 #!/usr/bin/env bash
@@ -490,7 +484,7 @@ submit_target() {
   safe_target="${target//\//_}"
 
   local job_file="$JOB_DIR/${safe_target}_$(date +%Y%m%d_%H%M%S).sbatch"
-  local job_name="${JOB_PREFIX}_${safe_target}"
+  local job_name="${safe_target}"
 
   cat > "$job_file" <<EOF
 #!/usr/bin/env bash
