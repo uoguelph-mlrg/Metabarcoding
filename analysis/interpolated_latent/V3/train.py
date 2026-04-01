@@ -134,7 +134,6 @@ class Trainer:
         cfg: Config,
         data_path: Optional[str] = None,
         data_dir: Optional[str] = None,
-        loss_type: Optional[Literal["cross_entropy", "logistic"]] = None,
         model_name: str = "interpolated_latent_v3",
         run_id: Optional[str] = None,
         resume: bool = False,
@@ -213,7 +212,7 @@ class Trainer:
             lr=self.cfg.lr,
         )
         # Loss configuration
-        self.loss_type = loss_type or "cross_entropy"
+        self.loss_type = self.cfg.loss_type
         self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
         self.criterion = Loss(task=self.loss_type)
         
@@ -907,7 +906,6 @@ if __name__ == "__main__":
         cfg,
         data_path=data_path,
         data_dir=data_dir,
-        loss_type=args.loss_type,
         model_name=args.model,
         run_id=run_id,
         resume=args.resume,

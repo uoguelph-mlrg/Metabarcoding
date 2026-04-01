@@ -16,7 +16,7 @@ cfg = Config()
 cfg.epochs = 3
 cfg.patience = None
 
-t = Trainer(cfg, data_dir='../../data', loss_type='cross_entropy')
+t = Trainer(cfg, data_dir='../../data')
 res = t.run(use_wandb=False)
 Z = res['latent_embeddings']
 print(f"OK — best_val={res['best_val_loss']:.6f}, latent std={Z.std():.6f}, latent norm={Z.sum():.4f}")

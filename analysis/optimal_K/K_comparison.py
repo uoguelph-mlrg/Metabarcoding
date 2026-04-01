@@ -5,8 +5,8 @@ This script trains only selected K-value variants (no baseline retraining).
 Each variant is saved to its own pickle file for later comparison.
 
 Usage:
-    python K_comparison.py --data_path ../../data/ecuador_training_data.csv
-    python K_comparison.py --data_path ../../data/ecuador_training_data.csv --k_values 972 --no_wandb
+    python K_comparison.py --data_path ../../data/data_merged.csv
+    python K_comparison.py --data_path ../../data/data_merged.csv --k_values 972 --no_wandb
 """
 from __future__ import annotations
 

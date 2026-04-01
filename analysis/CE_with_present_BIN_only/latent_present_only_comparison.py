@@ -60,7 +60,7 @@ def run_comparison(
         run_cfg.latent_present_only = variant["latent_present_only"]
 
         set_seed(SEED)
-        trainer = Trainer(run_cfg, data_path=data_path, data_dir=data_dir, loss_type="cross_entropy")
+        trainer = Trainer(run_cfg, data_path=data_path, data_dir=data_dir)
 
         if use_wandb and WANDB_AVAILABLE:
             wandb.init(

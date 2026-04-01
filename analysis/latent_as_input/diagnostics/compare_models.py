@@ -47,7 +47,6 @@ def compare_training_dynamics():
     baseline_trainer = BaselineTrainer(
         cfg=baseline_cfg,
         data_path=data_path,
-        loss_type="cross_entropy",
     )
     
     baseline_metrics = {
@@ -107,7 +106,6 @@ def compare_training_dynamics():
     latent_trainer = LatentInputTrainer(
         cfg=latent_cfg,
         data_path=data_path,
-        loss_type="cross_entropy",
     )
     
     latent_metrics = {

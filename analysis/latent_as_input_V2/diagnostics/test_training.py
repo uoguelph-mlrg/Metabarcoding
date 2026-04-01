@@ -41,7 +41,6 @@ def test_training():
     trainer = Trainer(
         cfg=cfg,
         data_path=data_path,
-        loss_type="cross_entropy",
     )
     
     # Train initial MLP (Phase 0)

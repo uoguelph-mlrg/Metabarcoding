@@ -35,7 +35,6 @@ def verify_loss_computation():
     trainer = Trainer(
         cfg=cfg,
         data_path="../../../data/ecuador_training_data.csv",
-        loss_type="cross_entropy",
     )
     
     # Get a single batch
@@ -134,7 +133,6 @@ def check_data_leakage():
     trainer = Trainer(
         cfg=cfg,
         data_path="../../../data/ecuador_training_data.csv",
-        loss_type="cross_entropy",
     )
     
     # Extract sample indices from each split
@@ -243,7 +241,6 @@ def check_gradient_flow():
     trainer = Trainer(
         cfg=cfg,
         data_path="../../../data/ecuador_training_data.csv",
-        loss_type="cross_entropy",
     )
     
     # Get a single batch

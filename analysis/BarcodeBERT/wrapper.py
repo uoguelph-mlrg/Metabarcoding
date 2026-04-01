@@ -109,7 +109,6 @@ def run_comparison(
         base_cfg,
         data_path=data_path,
         data_dir=data_dir,
-        loss_type="cross_entropy",
     )
     baseline_results = base_trainer.run(use_wandb=use_wandb)
 
@@ -132,7 +131,6 @@ def run_comparison(
         emb_cfg,
         data_path=data_path,
         data_dir=data_dir,
-        loss_type="cross_entropy",
         fixed_split_indices=base_trainer.split_indices,
     )
     barcodebert_results = emb_trainer.run(use_wandb=use_wandb)

@@ -458,7 +458,6 @@ class LatentMLPModel(BaselineModel):
             cfg,
             data_path=self.data_path,
             fixed_split_indices=self.fixed_split_indices,
-            loss_type="cross_entropy",
         )
         trainer.run(use_wandb=False)
 

@@ -23,7 +23,7 @@ def diagnose_latent_solver():
     print("="*70)
     
     # Create trainer
-    trainer = Trainer(cfg, data_path, loss_type="logistic")
+    trainer = Trainer(cfg, data_path)
     
     # Train MLP only for a bit
     print("\n1. Training MLP for 50 epochs...")

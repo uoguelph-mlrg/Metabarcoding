@@ -14,8 +14,8 @@ This script trains only gating-function variants (no baseline retraining):
 Each variant is saved to its own pickle file for later comparison.
 
 Usage:
-    python dimensionality_increase.py --data_path ../../data/ecuador_training_data.csv
-    python dimensionality_increase.py --data_path ../../data/ecuador_training_data.csv --no_wandb
+    python dimensionality_increase.py --data_path ../../data/data_merged.csv
+    python dimensionality_increase.py --data_path ../../data/data_merged.csv --no_wandb
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def run_comparison(
             tags=["gating_comparison", gating_fn, "variant_only"],
             config={"embed_dim": cfg.embed_dim, "gating_fn": cfg.gating_fn},
         ):
-            trainer = train_module.Trainer(cfg, data_path, loss_type="cross_entropy")
+            trainer = train_module.Trainer(cfg, data_path)
             log.info(f"Model type: {type(trainer.model).__name__}")
             log.info(f"Gating function: {trainer.model.gating_fn}")
             

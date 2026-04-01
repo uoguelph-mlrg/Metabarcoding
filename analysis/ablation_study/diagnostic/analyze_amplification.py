@@ -41,7 +41,7 @@ def analyze_amplification():
     
     # Create trainer with the UPDATED architecture [128, 64]
     print("\n1. Creating Trainer (now with [128, 64] hidden dims)...")
-    trainer = Trainer(cfg, data_path, loss_type="logistic")
+    trainer = Trainer(cfg, data_path)
     
     print(f"\n2. Model Architecture Comparison:")
     print(f"   MLP + Latent:")

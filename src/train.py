@@ -124,7 +124,6 @@ class Trainer:
         cfg: Config,
         data_path: Optional[str] = None,
         data_dir: Optional[str] = None,
-        loss_type: Optional[Literal["cross_entropy", "logistic"]] = None,
         model_name: str = "default",
         run_id: Optional[str] = None,
         resume: bool = False,
@@ -137,7 +136,18 @@ class Trainer:
 
         if data_dir is not None:
             log.warning("`data_dir` is deprecated in Trainer and will be ignored. Raw preprocessing is always used.")
-        effective_data_path = data_path or self.cfg.data_path
+        effective_data_path = os.path.abspath(data_path or self.cfg.data_path)
+
+        if self.cfg.use_embedding:
+            # Keep barcode path aligned with the actual training CSV unless an explicit valid absolute path is provided.
+            barcode_path = self.cfg.barcode_data_path
+            if data_path is not None:
+                self.cfg.barcode_data_path = effective_data_path
+            elif not barcode_path:
+                self.cfg.barcode_data_path = effective_data_path
+            elif not os.path.isabs(barcode_path) or not os.path.exists(barcode_path):
+                self.cfg.barcode_data_path = effective_data_path
+
         effective_loss_type = cast(Literal["cross_entropy", "logistic"], loss_type or self.cfg.loss_type)
 
         self.start_epoch = 0
@@ -208,7 +218,7 @@ class Trainer:
             ]
         self.optimizer = torch.optim.AdamW(optim_params, lr=self.cfg.lr)
 
-        self.loss_type: Literal["cross_entropy", "logistic"] = effective_loss_type
+        self.loss_type: Literal["cross_entropy", "logistic"] = self.cfg.loss_type
         self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
         self.criterion = Loss(task=self.loss_type)
 

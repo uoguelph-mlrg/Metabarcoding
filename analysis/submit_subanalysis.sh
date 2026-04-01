@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SLOG_DIR="$SCRIPT_DIR/slogs"
 JOB_DIR="$SCRIPT_DIR/.slurm_jobs"
 
@@ -13,7 +14,8 @@ MEM="32G"
 QOS="normal"
 TIME_OVERRIDE=""
 JOB_PREFIX="metabarcoding"
-DATA_PATH="../../data/data_merged.csv"
+DATA_PATH="$PROJECT_ROOT/data/data_merged.csv"
+DATA_PATH_SET="0"
 VENV_ACTIVATE='~/barcode/bin/activate'
 MODULE_LOAD='python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0'
 NO_WANDB="0"
@@ -58,7 +60,7 @@ Options:
   --all                    Submit all default targets
   --baseline-train         Train baseline model once (from Metabarcoding/)
   --list-targets           Print supported targets and exit
-  --data-path PATH         Data CSV path for targets that support --data_path
+  --data-path PATH         Override Data CSV path (default: PROJECT_ROOT/data/data_merged.csv)
   --baseline-results PATH  Path to one reusable baseline pickle from src/train.py
   --baseline-key KEY       Model key to use for baseline in merged visualization (default: baseline)
   --no-baseline            Do not include baseline in visualization input
@@ -113,6 +115,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --data-path)
       DATA_PATH="$2"
+      DATA_PATH_SET="1"
       shift 2
       ;;
     --baseline-results)
@@ -221,6 +224,20 @@ if [[ ${#TARGETS[@]} -eq 0 && "$BASELINE_TRAIN" == "0" ]]; then
   exit 1
 fi
 
+# Resolve data path once to an absolute path so nested target directories behave consistently.
+if [[ "$DATA_PATH" != /* ]]; then
+  if [[ -e "$DATA_PATH" ]]; then
+    DATA_PATH="$(cd "$(dirname "$DATA_PATH")" && pwd)/$(basename "$DATA_PATH")"
+  else
+    DATA_PATH="$(cd "$SCRIPT_DIR" && cd "$(dirname "$DATA_PATH")" && pwd)/$(basename "$DATA_PATH")"
+  fi
+fi
+
+if [[ ! -f "$DATA_PATH" ]]; then
+  echo "Data file not found: $DATA_PATH" >&2
+  exit 1
+fi
+
 resolve_target() {
   local target="$1"
   TARGET_DIR=""
@@ -230,11 +247,13 @@ resolve_target() {
   DEFAULT_LABELS_JSON=""
   DEFAULT_COLORS_JSON=""
   DEFAULT_TIME="8:00:00"
+  OPTIONAL_DATA_ARG_TEMPLATE=""
 
   case "$target" in
     interpolated_latent/V1)
       TARGET_DIR="interpolated_latent/V1"
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py'
+      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
+      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __OPTIONAL_DATA_ARG__'
       RESULTS_PATTERNS='interpolated_latent/V1/results/interpolated_latent_v1_*.pkl'
       FIGURES_DIR='figures/interpolated_latent/V1'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}'
@@ -243,7 +262,8 @@ resolve_target() {
       ;;
     interpolated_latent/V2)
       TARGET_DIR="interpolated_latent/V2"
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py'
+      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
+      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __OPTIONAL_DATA_ARG__'
       RESULTS_PATTERNS='interpolated_latent/V2/results/interpolated_latent_v2_*.pkl'
       FIGURES_DIR='figures/interpolated_latent/V2'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}'
@@ -252,7 +272,8 @@ resolve_target() {
       ;;
     interpolated_latent/V3)
       TARGET_DIR="interpolated_latent/V3"
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py'
+      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
+      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __OPTIONAL_DATA_ARG__'
       RESULTS_PATTERNS='interpolated_latent/V3/results/interpolated_latent_v3_*.pkl'
       FIGURES_DIR='figures/interpolated_latent/V3'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}'
@@ -261,7 +282,8 @@ resolve_target() {
       ;;
     interpolated_latent/V4)
       TARGET_DIR="interpolated_latent/V4"
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py'
+      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
+      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __OPTIONAL_DATA_ARG__'
       RESULTS_PATTERNS='interpolated_latent/V4/results/interpolated_latent_v4_*.pkl'
       FIGURES_DIR='figures/interpolated_latent/V4'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}'
@@ -270,7 +292,8 @@ resolve_target() {
       ;;
     location_embedding)
       TARGET_DIR="location_embedding"
-      TRAIN_CMD_TEMPLATE='python location_embedding.py'
+      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
+      TRAIN_CMD_TEMPLATE='python location_embedding.py __OPTIONAL_DATA_ARG__'
       RESULTS_PATTERNS='location_embedding/results/location_embedding_*.pkl'
       FIGURES_DIR='figures/location_embedding'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (No Location Embedding)","satclip":"SatCLIP (256D)","range":"RANGE (1280D)","geoclip":"GeoCLIP (512D)","alphaearth":"AlphaEarth (64D)"}'
@@ -279,7 +302,8 @@ resolve_target() {
       ;;
     latent_as_input)
       TARGET_DIR='latent_as_input'
-      TRAIN_CMD_TEMPLATE='python latent_as_input.py --data_path "__DATA_PATH__" --output_dir results __NO_WANDB__'
+      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
+      TRAIN_CMD_TEMPLATE='python latent_as_input.py __OPTIONAL_DATA_ARG__ --output_dir results'
       RESULTS_PATTERNS='latent_as_input/results/latent_as_input_*.pkl'
       FIGURES_DIR='figures/latent_as_input'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent-as-Input"}'
@@ -288,7 +312,8 @@ resolve_target() {
       ;;
     latent_as_input_V2)
       TARGET_DIR='latent_as_input_V2'
-      TRAIN_CMD_TEMPLATE='python latent_as_input.py --data_path "__DATA_PATH__" --output_dir results __NO_WANDB__'
+      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
+      TRAIN_CMD_TEMPLATE='python latent_as_input.py __OPTIONAL_DATA_ARG__ --output_dir results'
       RESULTS_PATTERNS='latent_as_input_V2/results/latent_as_input_v2_*.pkl'
       FIGURES_DIR='figures/latent_as_input_V2'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent-as-Input"}'
@@ -297,7 +322,7 @@ resolve_target() {
       ;;
     ablation_study)
       TARGET_DIR='ablation_study'
-      TRAIN_CMD_TEMPLATE='python ablation_study.py --data_path "__DATA_PATH__" --output_dir results __NO_WANDB__'
+      TRAIN_CMD_TEMPLATE='python ablation_study.py --data_path "__DATA_PATH__" --output_dir results'
       RESULTS_PATTERNS='ablation_study/results/ablation_study_*.pkl'
       FIGURES_DIR='figures/ablation_study'
       DEFAULT_LABELS_JSON='{"baseline":"MLP + Latent","mlp_no_taxonomy":"MLP (no taxonomy)","mlp_with_taxonomy":"MLP (with taxonomy)"}'
@@ -306,7 +331,7 @@ resolve_target() {
       ;;
     loss_comparison)
       TARGET_DIR='loss_comparison'
-      TRAIN_CMD_TEMPLATE='python loss_comparison.py --data_path "__DATA_PATH__" --output_dir results __NO_WANDB__'
+      TRAIN_CMD_TEMPLATE='python loss_comparison.py --data_path "__DATA_PATH__" --output_dir results'
       RESULTS_PATTERNS='loss_comparison/results/loss_comparison_*.pkl'
       FIGURES_DIR='figures/loss_comparison'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","cross_entropy":"Cross-Entropy","logistic":"Logistic (BCE)"}'
@@ -315,7 +340,7 @@ resolve_target() {
       ;;
     optimal_K)
       TARGET_DIR='optimal_K'
-      TRAIN_CMD_TEMPLATE='python K_comparison.py --data_path "__DATA_PATH__" --output_dir results __NO_WANDB__'
+      TRAIN_CMD_TEMPLATE='python K_comparison.py --data_path "__DATA_PATH__" --output_dir results'
       RESULTS_PATTERNS='optimal_K/results/K_comparison_*.pkl'
       FIGURES_DIR='figures/optimal_K'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","K_13":"K=13","K_78":"K=78 (Optimal)","K_972":"K=972"}'
@@ -324,7 +349,7 @@ resolve_target() {
       ;;
     preprocessing)
       TARGET_DIR='preprocessing'
-      TRAIN_CMD_TEMPLATE='python utils_test.py --data_path "__DATA_PATH__" && python read_count_preprocessing.py --output_dir results __NO_WANDB__'
+      TRAIN_CMD_TEMPLATE='python utils_test.py --data_path "__DATA_PATH__" && python read_count_preprocessing.py --output_dir results'
       RESULTS_PATTERNS='preprocessing/results/preprocessing_*.pkl'
       FIGURES_DIR='figures/preprocessing'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","original":"Original (raw counts)","normalized":"Normalized Only","logarithm":"Logarithm Only"}'
@@ -333,7 +358,7 @@ resolve_target() {
       ;;
     dimensionality_increase/gating_function)
       TARGET_DIR='dimensionality_increase/gating_function'
-      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py --data_path "__DATA_PATH__" --output_dir results __NO_WANDB__'
+      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py --data_path "__DATA_PATH__" --output_dir results'
       RESULTS_PATTERNS='dimensionality_increase/gating_function/results/gating_comparison_*.pkl'
       FIGURES_DIR='figures/dimensionality_gating'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (Additive)","exp":"Exponential","scaled_exp":"Scaled Exponential","additive":"Additive (1+h)","softplus":"Softplus","tanh":"Tanh","sigmoid":"Sigmoid","dot_product":"Dot Product"}'
@@ -342,7 +367,7 @@ resolve_target() {
       ;;
     dimensionality_increase/vector_size)
       TARGET_DIR='dimensionality_increase/vector_size'
-      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py --data_path "__DATA_PATH__" --output_dir results __NO_WANDB__'
+      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py --data_path "__DATA_PATH__" --output_dir results'
       RESULTS_PATTERNS='dimensionality_increase/vector_size/results/dimensionality_analysis_*.pkl'
       FIGURES_DIR='figures/dimensionality_vector'
       DEFAULT_LABELS_JSON='{"baseline":"Dim=1 (Baseline)","dim_2":"Dim=2","dim_5":"Dim=5","dim_6":"Dim=6","dim_8":"Dim=8","dim_10":"Dim=10","dim_12":"Dim=12","dim_15":"Dim=15","dim_20":"Dim=20","dim_50":"Dim=50"}'
@@ -390,7 +415,7 @@ source $VENV_ACTIVATE
 
 cd "$baseline_train_dir"
 echo "[$(date)] Training baseline model"
-python src/train.py --model baseline --output_dir results/baseline
+python src/train.py --model baseline
 echo "[$(date)] Baseline training completed"
 EOF
 
@@ -448,6 +473,11 @@ submit_target() {
   fi
 
   local train_cmd="$TRAIN_CMD_TEMPLATE"
+  local optional_data_arg=""
+  if [[ "$DATA_PATH_SET" == "1" ]]; then
+    optional_data_arg="$OPTIONAL_DATA_ARG_TEMPLATE"
+  fi
+  train_cmd="${train_cmd//__OPTIONAL_DATA_ARG__/$optional_data_arg}"
   train_cmd="${train_cmd//__DATA_PATH__/$DATA_PATH}"
   train_cmd="${train_cmd//__NO_WANDB__/$wandb_flag}"
 
@@ -481,6 +511,7 @@ source $VENV_ACTIVATE
 
 cd "$target_dir_abs"
 echo "[$(date)] Target: $target"
+echo "[$(date)] Data path: $DATA_PATH"
 echo "[$(date)] Train command: $train_cmd"
 $train_cmd
 

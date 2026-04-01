@@ -196,7 +196,7 @@ def run_all_baselines(
         set_seed(14)
         cfg = Config()
         # Use same data_path as baselines
-        latent_trainer = Trainer(cfg, data_path=data_path, loss_type="cross_entropy")
+        latent_trainer = Trainer(cfg, data_path=data_path)
         latent_results = latent_trainer.run(use_wandb=False)
         # Compute metrics using baselines' compute_metrics
         from evaluate import compute_metrics, compute_sample_level_metrics

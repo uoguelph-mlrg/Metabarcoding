@@ -133,7 +133,6 @@ class Trainer:
         cfg: Config,
         data_path: Optional[str] = None,
         data_dir: Optional[str] = None,
-        loss_type: Optional[Literal["cross_entropy", "logistic"]] = None,
         model_name: str = "latent_as_input",
         run_id: Optional[str] = None,
         resume: bool = False,
@@ -147,7 +146,6 @@ class Trainer:
         if data_dir is not None:
             log.warning("`data_dir` is deprecated in Trainer and will be ignored. Raw preprocessing is always used.")
         effective_data_path = data_path or self.cfg.data_path
-        effective_loss_type = cast(Literal["cross_entropy", "logistic"], loss_type or self.cfg.loss_type)
 
         self.start_epoch = 0
         self.current_epoch = -1
@@ -223,7 +221,7 @@ class Trainer:
             {"params": [self.model.latent_embedding.weight], "lr": cfg.latent_lr, "weight_decay": 0.0},
         ])
 
-        self.loss_type: Literal["cross_entropy", "logistic"] = effective_loss_type
+        self.loss_type = self.cfg.loss_type
         self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
         self.criterion = Loss(task=self.loss_type)
 

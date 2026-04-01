@@ -33,7 +33,6 @@ def test_latent_convergence(n_steps_options=[5, 10, 20, 50, 100]):
     trainer = Trainer(
         cfg=cfg,
         data_path=data_path,
-        loss_type="cross_entropy",
     )
     
     # Train initial MLP (Phase 0)

@@ -6,7 +6,7 @@ This script trains only the latent-as-input variant
 Results are saved as one variant pickle for later comparison.
 
 Usage:
-	python latent_as_input.py --data_path ../../data/ecuador_training_data.csv
+	python latent_as_input.py --data_path ../../data/data_merged.csv
 	python latent_as_input.py --data_dir ../../data --no_wandb
 """
 from __future__ import annotations
@@ -87,7 +87,6 @@ def run_comparison(
 			local_cfg,
 			data_path=data_path,
 			data_dir=data_dir,
-			loss_type="cross_entropy",
 		)
 		local_results = local_trainer.run(use_wandb=use_wandb)
 		results["latent_as_input"] = local_results
@@ -112,7 +111,7 @@ if __name__ == "__main__":
 		"--data_path",
 		type=str,
 		default=None,
-		help="Path to raw data CSV file (e.g. ../../data/ecuador_training_data.csv)",
+		help="Path to raw data CSV file (e.g. ../../data/data_merged.csv)",
 	)
 	group.add_argument(
 		"--data_dir",
@@ -138,7 +137,7 @@ if __name__ == "__main__":
 	data_path = args.data_path
 	data_dir = args.data_dir
 	if data_path is None and data_dir is None:
-		data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "ecuador_training_data.csv"))
+		data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "data_merged.csv"))
 		log.info(f"No data_path or data_dir provided. Using default: {data_path}")
 
 	use_wandb = WANDB_AVAILABLE and not args.no_wandb

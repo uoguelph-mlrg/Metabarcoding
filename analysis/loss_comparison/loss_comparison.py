@@ -5,8 +5,8 @@ This script trains only loss-function variants (no baseline retraining).
 Each variant is saved to its own pickle file for later comparison.
 
 Usage:
-    python loss_comparison.py --data_path ../../data/ecuador_training_data.csv
-    python loss_comparison.py --data_path ../../data/ecuador_training_data.csv --variants logistic --no_wandb
+    python loss_comparison.py --data_path ../../data/data_merged.csv
+    python loss_comparison.py --data_path ../../data/data_merged.csv --variants logistic --no_wandb
 """
 from __future__ import annotations
 
@@ -64,6 +64,7 @@ def run_comparison(
         log.info("\n" + "="*70)
         log.info(f"TRAINING LOSS VARIANT: {variant.upper()}")
         log.info("="*70)
+        cfg.loss_type = variant
 
         set_seed(14)
         with variant_wandb_run(
@@ -76,7 +77,7 @@ def run_comparison(
             tags=["loss_comparison", variant, "variant_only"],
             config={**cfg.__dict__, "variant": variant},
         ):
-            trainer = Trainer(cfg, data_path, loss_type=variant)
+            trainer = Trainer(cfg, data_path)
             results[variant] = trainer.run(use_wandb=use_wandb)
     
     return results

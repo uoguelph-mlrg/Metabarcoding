@@ -23,7 +23,7 @@ def final_diagnostic():
     print("="*70)
     
     # Create trainer and train MLP
-    trainer = Trainer(cfg, data_path, loss_type="logistic")
+    trainer = Trainer(cfg, data_path)
     for _ in range(50):
         trainer.train_epoch()
     

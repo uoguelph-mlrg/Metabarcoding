@@ -6,7 +6,7 @@ This script trains only the interpolated-latent variant
 Results are saved as one variant pickle for later comparison.
 
 Usage:
-	python interpolated_latent.py --data_path ../../data/ecuador_training_data.csv
+	python interpolated_latent.py --data_path ../../data/data_merged.csv
 	python interpolated_latent.py --data_dir ../../data --no_wandb
 """
 from __future__ import annotations
@@ -138,7 +138,6 @@ def run_comparison(
 			local_cfg,
 			data_path=data_path,
 			data_dir=data_dir,
-			loss_type="cross_entropy",
 		)
 		local_results = local_trainer.run(use_wandb=use_wandb)
 		results["interpolated_latent"] = local_results
@@ -163,7 +162,7 @@ if __name__ == "__main__":
 		"--data_path",
 		type=str,
 		default=None,
-		help="Path to raw data CSV file (e.g. ../../data/ecuador_training_data.csv)",
+		help="Path to raw data CSV file (e.g. ../../data/data_merged.csv)",
 	)
 	group.add_argument(
 		"--data_dir",

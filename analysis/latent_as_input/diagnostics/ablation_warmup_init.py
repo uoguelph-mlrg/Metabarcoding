@@ -97,7 +97,6 @@ def run_ablation(
         trainer = LocalTrainer(
             cfg,
             data_dir=data_dir,
-            loss_type="cross_entropy",
         )
         variant_results = trainer.run(use_wandb=use_wandb)
 

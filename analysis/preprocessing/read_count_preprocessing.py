@@ -85,7 +85,7 @@ def run_comparison(
             tags=["preprocessing", method, "variant_only"],
             config={**cfg.__dict__, "variant": method},
         ):
-            trainer = Trainer(cfg, data_dir=data_dir, loss_type="cross_entropy")
+            trainer = Trainer(cfg, data_dir=data_dir)
             method_results = trainer.run(use_wandb=use_wandb)
 
         results[method] = method_results

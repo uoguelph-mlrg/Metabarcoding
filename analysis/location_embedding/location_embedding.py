@@ -12,7 +12,7 @@ All models use the same training data and random seed for fair comparison.
 Results are saved to pickle for analysis and visualization.
 
 Usage:
-    python location_embedding.py --data_path ../../data/ecuador_training_data.csv
+    python location_embedding.py --data_path ../../data/data_merged.csv
     python location_embedding.py --data_dir ../../data --no_wandb
     python location_embedding.py --data_dir ../../data \\
         --satclip_ckpt_path /path/to/satclip.pth \\
@@ -148,7 +148,7 @@ def run_comparison(
     # LOCATION EMBEDDING VARIANTS
     # =========================================================================
     if embedders is None:
-        embedders = ["alphaearth"]
+        embedders = ["satclip", "geoclip", "range", "alphaearth"]
     
     for embedder_name in embedders:
         log.info("\n" + "=" * 78)
@@ -196,7 +196,6 @@ def run_comparison(
                     cfg,
                     data_path=data_path,
                     data_dir=data_dir,
-                    loss_type="cross_entropy",
                 )
                 embedder_results = trainer.run(use_wandb=use_wandb)
                 results[embedder_name] = embedder_results
@@ -228,7 +227,7 @@ if __name__ == "__main__":
         "--data_path",
         type=str,
         default=None,
-        help="Path to raw data CSV file (e.g. ../../data/ecuador_training_data.csv)",
+        help="Path to raw data CSV file (e.g. ../../data/data_merged.csv)",
     )
     group.add_argument(
         "--data_dir",
@@ -302,7 +301,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--embedders",
         nargs="+",
-        default=["alphaearth"],
+        default=["satclip", "range", "geoclip", "alphaearth"],
         choices=["satclip", "range", "geoclip", "alphaearth"],
         help="Location embedding variants to train (default: alphaearth)",
     )

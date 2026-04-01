@@ -2,8 +2,13 @@
 from re import L
 from typing import Tuple, Dict, Any, Literal, Optional
 import os
+import sys
 import pandas as pd
 import numpy as np
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from config import Config
 import logging as log
 
@@ -300,7 +305,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Generate datasets with different read count preprocessing")
-    parser.add_argument("--data_path", type=str, default="data/ecuador_training_data.csv",
+    parser.add_argument("--data_path", type=str, default="../../data/data_merged.csv",
                        help="Path to raw data CSV")
     parser.add_argument("--seed", type=int, default=14, help="Random seed")
     args = parser.parse_args()

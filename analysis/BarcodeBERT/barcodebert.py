@@ -100,7 +100,6 @@ def run_comparison(
             barcode_cfg,
             data_path=data_path,
             data_dir=data_dir,
-            loss_type="cross_entropy",
         )
         barcodebert_results = barcode_trainer.run(use_wandb=use_wandb)
         results["barcodebert"] = barcodebert_results

@@ -12,8 +12,8 @@ All models use cross-entropy loss for fair comparison.
 Results are saved to pickle for visualization.
 
 Usage:
-    python ablation_study.py --data_path ../../data/ecuador_training_data.csv
-    python ablation_study.py --data_path ../../data/ecuador_training_data.csv --no_wandb
+    python ablation_study.py --data_path ../../data/data_merged.csv
+    python ablation_study.py --data_path ../../data/data_merged.csv --no_wandb
 """
 from __future__ import annotations
 
@@ -352,6 +352,8 @@ class MLPOnlyTrainer:
         self.device = torch.device(cfg.device)
         self.bin_index = bin_index
         self.sample_index = sample_index
+        self.idx_to_bin = {idx: str(bin_uri) for bin_uri, idx in bin_index.items()}
+        self.idx_to_sample = {idx: str(sample_id) for sample_id, idx in sample_index.items()}
         
         n_features = data_splits["train"]["X"].shape[1]
         n_bins = len(bin_index)
@@ -480,11 +482,13 @@ class MLPOnlyTrainer:
         return running_loss / max(1, n_samples)
     
     @torch.no_grad()
-    def get_predictions(self, loader: DataLoader = None) -> Tuple[np.ndarray, np.ndarray]:
-        """Get predictions and targets for evaluation."""
+    def get_predictions(self, loader: DataLoader = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Get flattened predictions, targets, and their sample/BIN labels for evaluation."""
         self.model.eval()
         all_preds = []
         all_targets = []
+        all_sample_labels = []
+        all_bin_labels = []
         
         eval_loader = loader if loader is not None else self.test_loader
         
@@ -507,10 +511,23 @@ class MLPOnlyTrainer:
                 valid_mask = mask[b].bool()
                 y_pred = probs[b, valid_mask].cpu().numpy()
                 y_true = targets[b, valid_mask].cpu().numpy()
+                valid_bin_idx = bin_idx[b, valid_mask].cpu().numpy()
+                sample_idx_scalar = int(sample_idx[b].item())
+                sample_label = self.idx_to_sample.get(sample_idx_scalar, str(sample_idx_scalar))
                 all_preds.extend(y_pred)
                 all_targets.extend(y_true)
+                all_sample_labels.extend([sample_label] * len(y_pred))
+                all_bin_labels.extend([
+                    self.idx_to_bin.get(int(bin_id), str(int(bin_id)))
+                    for bin_id in valid_bin_idx
+                ])
         
-        return np.array(all_preds), np.array(all_targets)
+        return (
+            np.array(all_preds),
+            np.array(all_targets),
+            np.array(all_sample_labels),
+            np.array(all_bin_labels),
+        )
     
     def save_model(self):
         torch.save({"model_state_dict": self.model.state_dict()}, self.save_path)
@@ -547,7 +564,7 @@ class MLPOnlyTrainer:
                     break
         
         # Final evaluation
-        predictions, targets = self.get_predictions(self.test_loader)
+        predictions, targets, sample_labels, bin_labels = self.get_predictions(self.test_loader)
         
         log.info(f"\n{self.model_name} Results:")
         log.info(f"  Best val loss: {best_val:.6f}")
@@ -557,6 +574,8 @@ class MLPOnlyTrainer:
             "best_val_loss": best_val,
             "predictions": predictions,
             "targets": targets,
+            "sample_labels": sample_labels,
+            "bin_labels": bin_labels,
         }
 
 
@@ -711,6 +730,8 @@ def run_ablation_study(
         "best_val_loss": mlp_no_tax_results["best_val_loss"],
         "predictions": mlp_no_tax_results["predictions"],
         "targets": mlp_no_tax_results["targets"],
+        "sample_labels": mlp_no_tax_results["sample_labels"],
+        "bin_labels": mlp_no_tax_results["bin_labels"],
         "metrics": mlp_no_tax_metrics,
         "n_features": data_no_tax["train"]["X"].shape[1],
     }
@@ -765,6 +786,8 @@ def run_ablation_study(
         "best_val_loss": mlp_with_tax_results["best_val_loss"],
         "predictions": mlp_with_tax_results["predictions"],
         "targets": mlp_with_tax_results["targets"],
+        "sample_labels": mlp_with_tax_results["sample_labels"],
+        "bin_labels": mlp_with_tax_results["bin_labels"],
         "metrics": mlp_with_tax_metrics,
         "n_features": data_no_tax["train"]["X"].shape[1],
     }

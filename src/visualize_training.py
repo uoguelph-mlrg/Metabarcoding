@@ -869,7 +869,7 @@ if __name__ == "__main__":
     print()
     
     print("  Creating trainer...")
-    trainer = Trainer(cfg, args.data_path, loss_type="cross_entropy")
+    trainer = Trainer(cfg, args.data_path)
     
     print("\n  Training model...")
     train_losses = []
