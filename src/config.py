@@ -38,8 +38,9 @@ class Config:
     latent_present_only: bool = False   # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
     latent_l2_reg: float = 1e-3         # L2 norm regularization on D (parameter r)
     
-    cg_tol: float = 1e-6                # conjugate gradient tolerance (i.e., stopping criterion)
-    cg_maxiter: int = 2000              # conjugate gradient max iterations
+    latent_convergence_tol: float = 1e-5    # Stopping tolerance for latent L-BFGS solves
+    latent_convergence_maxiter: int = 300   # Max iterations for latent L-BFGS solves
+    latent_profile_log_interval: int = 50   # Log latent-solver timing every N solves
     
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent

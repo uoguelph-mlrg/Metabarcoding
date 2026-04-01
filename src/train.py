@@ -153,6 +153,7 @@ class Trainer:
         self.global_step = 0
         self.best_val_loss = float("inf")
         self.last_val_metrics: Dict[str, float] = {}
+        self.latent_solve_calls = 0
 
         self.train_losses: List[Tuple[int, float]] = []
         self.val_losses: List[Tuple[int, float]] = []
@@ -454,6 +455,7 @@ class Trainer:
         y_list: List[np.ndarray] = []
         bin_list: List[np.ndarray] = []
         sample_list: List[np.ndarray] = []
+        feature_t0 = time.perf_counter()
 
         with torch.no_grad():
             for batch in self.train_loader_bin_ordered:
@@ -471,37 +473,41 @@ class Trainer:
                 bin_list.append(bin_idx.reshape(-1))
                 sample_list.append(sample_idx.reshape(-1))
 
+        feature_s = time.perf_counter() - feature_t0
+
+        concat_t0 = time.perf_counter()
         intrinsic_vec = np.concatenate(intrinsic_list, axis=0)
         y_vec = np.concatenate(y_list, axis=0)
         bin_ids = np.concatenate(bin_list, axis=0).astype(np.int64)
         sample_ids = np.concatenate(sample_list, axis=0).astype(np.int64)
         x0_latent = self.model.latent_vec.detach().cpu().numpy()
+        concat_s = time.perf_counter() - concat_t0
 
-        if self.cfg.embed_dim > 1:
-            latent_vec = self.model.latent_solver.solve(
-                y=y_vec,
-                intrinsic_vec=intrinsic_vec,
-                final_weights=self.model.final_linear.weight.detach().cpu().numpy().squeeze(),
-                bin_ids=bin_ids,
-                sample_ids=sample_ids,
-                loss_type=self.loss_type,
-                x0=x0_latent,
-                prox_weight=prox_weight,
-                x_anchor=x0_latent,
-            )
-        else:
-            latent_vec = self.model.latent_solver.solve(
-                y=y_vec,
-                intrinsic_vec=intrinsic_vec,
-                bin_ids=bin_ids,
-                sample_ids=sample_ids,
-                loss_type=self.loss_type,
-                x0=x0_latent,
-                prox_weight=prox_weight,
-                x_anchor=x0_latent,
-            )
+        solve_t0 = time.perf_counter()
+        latent_vec = self.model.latent_solver.solve(
+            y=y_vec,
+            intrinsic_vec=intrinsic_vec,
+            final_weights=self.model.final_linear.weight.detach().cpu().numpy().squeeze() if self.cfg.embed_dim > 1 else None,
+            bin_ids=bin_ids,
+            sample_ids=sample_ids,
+            loss_type=self.loss_type,
+            x0=x0_latent,
+            prox_weight=prox_weight,
+            x_anchor=x0_latent,
+        )
+        solve_s = time.perf_counter() - solve_t0
 
         self.model.set_latent(latent_vec)
+        self.latent_solve_calls += 1
+        log_interval = max(1, int(getattr(self.cfg, "latent_profile_log_interval", 50)))
+        if self.latent_solve_calls % log_interval == 0:
+            log.info(
+                "Latent solve #%d breakdown: feature=%.3fs, concat=%.3fs, optimizer=%.3fs",
+                self.latent_solve_calls,
+                feature_s,
+                concat_s,
+                solve_s,
+            )
         return latent_vec
 
     @torch.no_grad()

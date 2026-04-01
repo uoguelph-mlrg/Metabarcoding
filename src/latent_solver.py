@@ -9,6 +9,7 @@ from config import Config
 from gating_functions import make_gating_function
 from tqdm import tqdm
 import logging as log
+import time
 
 GatingFnName = Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"]
 
@@ -54,6 +55,7 @@ class LatentSolver:
         # scalar-mode precomputed matrices (embed_dim == 1 only)
         self.A: Optional[sparse.csc_matrix] = None   # precomputed LHS matrix
         self.S: Optional[sparse.csc_matrix] = None   # (I - H_smooth)^T (I - H_smooth)
+        self._solve_calls: int = 0
 
     def build_V_and_H(
         self, 
@@ -272,8 +274,8 @@ class LatentSolver:
             A_eff,
             b_eff,
             x0=x0_use,
-            atol=self.cfg.cg_tol,
-            maxiter=self.cfg.cg_maxiter
+            atol=self.cfg.latent_convergence_tol,
+            maxiter=self.cfg.latent_convergence_maxiter
         )
         D = D * self.cfg.latent_lr  # Rescale the solution by the latent learning rate to keep magnitudes stable across different regularization strengths
         
@@ -410,8 +412,8 @@ class LatentSolver:
             jac=jac,
             method="L-BFGS-B",
             options={
-                "maxiter": int(self.cfg.cg_maxiter),
-                "ftol": float(self.cfg.cg_tol),
+                "maxiter": int(self.cfg.latent_convergence_maxiter),
+                "ftol": float(self.cfg.latent_convergence_tol),
             },
         )
 
@@ -526,7 +528,10 @@ class LatentSolver:
 
         res = minimize(
             fun=fun, x0=x0_use.ravel(), jac=jac, method="L-BFGS-B",
-            options={"maxiter": int(self.cfg.cg_maxiter), "ftol": float(self.cfg.cg_tol)},
+            options={
+                "maxiter": int(self.cfg.latent_convergence_maxiter),
+                "ftol": float(self.cfg.latent_convergence_tol),
+            },
         )
         if not res.success:
             log.warning(f"L-BFGS did not converge: {res.message}")
@@ -598,7 +603,9 @@ class LatentSolver:
             H = H_flat.reshape(self.n_bins, self.embed_dim)
 
             h_obs = H[b_s]  # (N_obs, d)
-            m_tilde = m_s * self.gating.gate_np(h_obs)  # (N_obs, d)
+            gate_obs = self.gating.gate_np(h_obs)  # (N_obs, d)
+            gate_grad_obs = self.gating.gate_grad_np(h_obs)  # (N_obs, d)
+            m_tilde = m_s * gate_obs  # (N_obs, d)
             logits = m_tilde @ final_weights             # (N_obs,)
 
             grad_H = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
@@ -607,8 +614,6 @@ class LatentSolver:
             for st, en in zip(starts, ends):
                 z_seg = logits[st:en]
                 y_seg = y_s[st:en]
-                m_seg = m_s[st:en]
-                h_obs_seg = h_obs[st:en]
                 b_seg = b_s[st:en]
 
                 z_max = float(np.max(z_seg)) if len(z_seg) > 0 else 0.0
@@ -620,8 +625,8 @@ class LatentSolver:
                 loss += float(-(y_seg * (z_seg - logsumexp)).sum())
 
                 grad_logits_seg = p - y_seg
-                grad_m_tilde_seg = np.outer(grad_logits_seg, final_weights)             # (seg, d)
-                grad_h_obs_seg = m_seg * grad_m_tilde_seg * self.gating.gate_grad_np(h_obs_seg)  # (seg, d)
+                grad_m_tilde_seg = grad_logits_seg[:, None] * final_weights[None, :]   # (seg, d)
+                grad_h_obs_seg = m_s[st:en] * grad_m_tilde_seg * gate_grad_obs[st:en]   # (seg, d)
                 np.add.at(grad_H, b_seg, grad_h_obs_seg)
 
             if r > 0:
@@ -648,12 +653,30 @@ class LatentSolver:
         def fun(H_flat): f, _ = fun_and_jac(H_flat); return f
         def jac(H_flat): _, g = fun_and_jac(H_flat); return g
 
+        t0 = time.perf_counter()
         res = minimize(
             fun=fun, x0=x0_use.ravel(), jac=jac, method="L-BFGS-B",
-            options={"maxiter": int(self.cfg.cg_maxiter), "ftol": float(self.cfg.cg_tol)},
+            options={
+                "maxiter": int(self.cfg.latent_convergence_maxiter),
+                "ftol": float(self.cfg.latent_convergence_tol),
+            },
         )
+        solve_s = time.perf_counter() - t0
         if not res.success:
             log.warning(f"L-BFGS did not converge: {res.message}")
+
+        self._solve_calls += 1
+        log_interval = max(1, int(getattr(self.cfg, "latent_profile_log_interval", 50)))
+        if self._solve_calls % log_interval == 0:
+            log.info(
+                "Latent CE vector solve #%d: %.3fs, nit=%s, nfev=%s, njev=%s, success=%s",
+                self._solve_calls,
+                solve_s,
+                getattr(res, "nit", "n/a"),
+                getattr(res, "nfev", "n/a"),
+                getattr(res, "njev", "n/a"),
+                bool(getattr(res, "success", False)),
+            )
 
         H = res.x.reshape(self.n_bins, self.embed_dim)
         log.debug(f"Latent H (CE): mean={H.mean():.3f}, std={H.std():.3f}, range=[{H.min():.3f}, {H.max():.3f}]")
