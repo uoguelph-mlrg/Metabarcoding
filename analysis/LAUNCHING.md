@@ -8,6 +8,8 @@ From `Metabarcoding/analysis`:
 
 - List supported targets:
   - `./submit_subanalysis.sh --list-targets`
+- Train baseline model once:
+  - `./submit_subanalysis.sh --baseline-train`
 - Submit one target:
   - `./submit_subanalysis.sh --target interpolated_latent/V4`
 - Submit multiple targets in parallel:
@@ -16,6 +18,24 @@ From `Metabarcoding/analysis`:
   - `./submit_subanalysis.sh --target location_embedding --dry-run`
 
 ## Baseline-once workflow (recommended)
+
+**Option A: Use integrated baseline training**
+
+Submit baseline training directly from launcher:
+
+```bash
+# Train baseline model once (from Metabarcoding/)
+./submit_subanalysis.sh --baseline-train
+
+# Wait for baseline job to complete, then find the results file
+# Result will be in: ../../results/baseline/results_baseline_<run_id>.pkl
+
+# Reuse baseline for every subanalysis visualization
+./submit_subanalysis.sh --target interpolated_latent/V4 --baseline-results ../../results/baseline/results_baseline_<run_id>.pkl
+./submit_subanalysis.sh --target location_embedding --target latent_as_input --baseline-results ../../results/baseline/results_baseline_<run_id>.pkl
+```
+
+**Option B: Manual baseline training and reuse**
 
 Run one baseline model once from `Metabarcoding/`:
 

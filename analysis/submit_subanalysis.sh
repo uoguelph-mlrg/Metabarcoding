@@ -19,6 +19,7 @@ MODULE_LOAD='python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0'
 NO_WANDB="0"
 DRY_RUN="0"
 ALL_TARGETS="0"
+BASELINE_TRAIN="0"
 INCLUDE_BASELINE="1"
 BASELINE_RESULTS=""
 BASELINE_KEY="baseline"
@@ -27,8 +28,19 @@ COLORS_JSON_OVERRIDE=""
 
 declare -a TARGETS=()
 declare -a DEFAULT_TARGETS=(
+  "interpolated_latent/V1"
+  "interpolated_latent/V2"
+  "interpolated_latent/V3"
   "interpolated_latent/V4"
   "location_embedding"
+  "latent_as_input"
+  "latent_as_input_V2"
+  "ablation_study"
+  "loss_comparison"
+  "optimal_K"
+  "preprocessing"
+  "dimensionality_increase/gating_function"
+  "dimensionality_increase/vector_size"
 )
 LIST_TARGETS="0"
 
@@ -38,10 +50,13 @@ Usage:
   ./submit_subanalysis.sh --target interpolated_latent/V4
   ./submit_subanalysis.sh --target interpolated_latent/V4 --target location_embedding
   ./submit_subanalysis.sh --all
+  ./submit_subanalysis.sh --baseline-train
+  ./submit_subanalysis.sh --baseline-train --target interpolated_latent/V4
 
 Options:
   --target PATH            Subanalysis folder path under analysis/
   --all                    Submit all default targets
+  --baseline-train         Train baseline model once (from Metabarcoding/)
   --list-targets           Print supported targets and exit
   --data-path PATH         Data CSV path for targets that support --data_path
   --baseline-results PATH  Path to one reusable baseline pickle from src/train.py
@@ -86,6 +101,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --all)
       ALL_TARGETS="1"
+      shift
+      ;;
+    --baseline-train)
+      BASELINE_TRAIN="1"
       shift
       ;;
     --list-targets)
@@ -196,7 +215,7 @@ if [[ "$ALL_TARGETS" == "1" ]]; then
   TARGETS=("${DEFAULT_TARGETS[@]}")
 fi
 
-if [[ ${#TARGETS[@]} -eq 0 ]]; then
+if [[ ${#TARGETS[@]} -eq 0 && "$BASELINE_TRAIN" == "0" ]]; then
   echo "No targets specified. Use --target or --all." >&2
   usage
   exit 1
@@ -336,6 +355,57 @@ resolve_target() {
   esac
 
   return 0
+}
+
+submit_baseline() {
+  local baseline_train_dir="$(dirname "$SCRIPT_DIR")"
+  local baseline_results_dir="$baseline_train_dir/results/baseline"
+  mkdir -p "$baseline_results_dir"
+
+  local walltime="6:00:00"
+  if [[ -n "$TIME_OVERRIDE" ]]; then
+    walltime="$TIME_OVERRIDE"
+  fi
+
+  local safe_baseline="baseline"
+  local job_file="$JOB_DIR/${safe_baseline}_$(date +%Y%m%d_%H%M%S).sbatch"
+  local job_name="${JOB_PREFIX}_baseline"
+
+  cat > "$job_file" <<EOF
+#!/usr/bin/env bash
+#SBATCH --gres=gpu:$GPU
+#SBATCH --cpus-per-task=$CPUS
+#SBATCH --mem=$MEM
+#SBATCH --time=$walltime
+#SBATCH --job-name=$job_name
+#SBATCH --output=$SLOG_DIR/%x_%A.out
+#SBATCH --qos=$QOS
+#SBATCH --open-mode=append
+
+set -euo pipefail
+
+module load $MODULE_LOAD
+source ~/.bashrc
+source $VENV_ACTIVATE
+
+cd "$baseline_train_dir"
+echo "[$(date)] Training baseline model"
+python src/train.py --model baseline --output_dir results/baseline
+echo "[$(date)] Baseline training completed"
+EOF
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[DRY-RUN] Generated baseline job: $job_file"
+    echo "[DRY-RUN] Would submit: sbatch $job_file"
+    echo "[DRY-RUN] Baseline results will be saved to: $baseline_results_dir/"
+    return 0
+  fi
+
+  local sbatch_output
+  sbatch_output="$(sbatch "$job_file")"
+  echo "$sbatch_output"
+  echo "Submitted baseline training with script: $job_file"
+  echo "Results will be saved to: $baseline_results_dir/"
 }
 
 submit_target() {
@@ -486,6 +556,14 @@ EOF
   echo "Submitted target '$target' with script: $job_file"
 }
 
-for target in "${TARGETS[@]}"; do
-  submit_target "$target"
-done
+# Execute baseline training if requested
+if [[ "$BASELINE_TRAIN" == "1" ]]; then
+  submit_baseline
+fi
+
+# Execute target submissions
+if [[ ${#TARGETS[@]} -gt 0 ]]; then
+  for target in "${TARGETS[@]}"; do
+    submit_target "$target"
+  done
+fi
