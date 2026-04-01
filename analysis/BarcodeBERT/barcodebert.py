@@ -170,7 +170,7 @@ if __name__ == "__main__":
     data_dir = args.data_dir
     if data_path is None and data_dir is None:
         data_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "data", "ecuador_training_data.csv")
+            os.path.join(os.path.dirname(__file__), "..", "..", "data", "data_merged.csv")
         )
         log.info(f"No --data_path or --data_dir provided. Using default: {data_path}")
 

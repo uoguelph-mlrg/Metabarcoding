@@ -365,7 +365,7 @@ class MLPOnlyTrainer:
         log.info(f"  BIN embedding: disabled")
         log.info(f"  Taxonomy embeddings: {'enabled' if taxonomy is not None else 'disabled'}")
         
-        hidden_dims = [128, 64]
+        hidden_dims = [128, 128, 128, 128]  # Can tune this if desired, but keeping it fixed for fair comparison
         if taxonomy is None:
             # NO taxonomy, NO bin embedding: exact same inputs as latent model MLP
             self.model = MLPNoTaxonomy(

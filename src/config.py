@@ -66,7 +66,7 @@ class Config:
     epochs: int = 200                   # Epochs per training phase
     dropout: float = 0.15               # Dropout rate in MLP
     grad_clip: Optional[float] = 1.0    # Gradient clipping value (None to disable)
-    patience: Optional[int] = 25        # Patience for early stopping in number of cycles 
+    patience: Optional[int] = None      # Patience for early stopping in number of cycles 
 
 
 def set_seed(seed: int = 42) -> None:
