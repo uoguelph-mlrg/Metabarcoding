@@ -43,9 +43,9 @@ class Config:
     latent_present_only: bool = False   # If True, only fit latent on observations where y > 0
 
     # Latent D solver parameters (Phase A - analytic solve, same as baseline src)
-    latent_l2_reg: float = 1e-3         # L2 regularization on D in CG solve
-    cg_tol: float = 1e-6                # conjugate gradient tolerance (i.e., stopping criterion)
-    cg_maxiter: int = 2000              # conjugate gradient max iterations
+    latent_l2_reg: float = 1e-3             # L2 regularization on D in CG solve
+    latent_convergence_tol: float = 1e-5    # Stopping tolerance for latent L-BFGS solves
+    latent_convergence_maxiter: int = 300   # Max iterations for latent L-BFGS solves
     
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent
@@ -66,9 +66,8 @@ class Config:
     batch_size_sample: int = 8          # Batch size in number of samples
     lr: float = 5e-4                    # Learning rate for MLP parameters
     weight_decay: float = 1e-5          # Weight decay for MLP parameters
-    max_cycles: int = 500               # Max alternation cycles
     epochs: int = 200                   # Epochs per training phase
-    latent_warmup_frac: float = 0.2     # Fraction of max_cycles over which the proximal weight decays from ρ₀ → 0
+    latent_warmup_frac: float = 0.2     # Fraction of epochs over which the proximal weight decays from ρ₀ → 0
     latent_prox_scale: float = 50.0     # ρ₀ = latent_prox_scale × latent_l2_reg at cycle 0 (proximal damping strength)
     dropout: float = 0.15               # Dropout rate in MLP
     grad_clip: Optional[float] = 1.0    # Gradient clipping value (None to disable)

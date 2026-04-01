@@ -198,7 +198,7 @@ class Trainer:
         self.latent_dim = int(getattr(self.cfg, "latent_dim", getattr(self.cfg, "embed_dim", 1)))
         self.latent_init_std = float(getattr(self.cfg, "latent_init_std", 0.01))
         self.latent_norm_reg = float(getattr(self.cfg, "latent_norm_reg", getattr(self.cfg, "latent_l2_reg", 0.0)))
-        self.epochs = int(getattr(self.cfg, "max_cycles", getattr(self.cfg, "epochs", 100)))
+        self.epochs = int(self.cfg.epochs)
         
         # Adjust MLP input dimension: original features + latent_dim
         mlp_input_dim = input_dim + self.latent_dim

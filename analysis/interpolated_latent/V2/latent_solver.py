@@ -284,8 +284,8 @@ class LatentSolver:
             A_eff,
             b_eff,
             x0=x0_use,
-            atol=self.cfg.cg_tol,
-            maxiter=self.cfg.cg_maxiter
+            atol=self.cfg.latent_convergence_tol,
+            maxiter=self.cfg.latent_convergence_maxiter
         )
         D = D * self.cfg.latent_lr  # Rescale the solution by the latent learning rate to keep magnitudes stable across different regularization strengths
         
@@ -431,8 +431,8 @@ class LatentSolver:
             jac=jac,
             method="L-BFGS-B",
             options={
-                "maxiter": int(self.cfg.cg_maxiter),
-                "ftol": float(self.cfg.cg_tol),
+                "maxiter": int(self.cfg.latent_convergence_maxiter),
+                "ftol": float(self.cfg.latent_convergence_tol),
             },
         )
 
@@ -555,7 +555,7 @@ class LatentSolver:
 
         res = minimize(
             fun=fun, x0=x0_use.ravel(), jac=jac, method="L-BFGS-B",
-            options={"maxiter": int(self.cfg.cg_maxiter), "ftol": float(self.cfg.cg_tol)},
+            options={"maxiter": int(self.cfg.latent_convergence_maxiter), "ftol": float(self.cfg.latent_convergence_tol)},
         )
         if not res.success:
             log.warning(f"L-BFGS did not converge: {res.message}")
@@ -687,7 +687,7 @@ class LatentSolver:
 
         res = minimize(
             fun=fun, x0=x0_use.ravel(), jac=jac, method="L-BFGS-B",
-            options={"maxiter": int(self.cfg.cg_maxiter), "ftol": float(self.cfg.cg_tol)},
+            options={"maxiter": int(self.cfg.latent_convergence_maxiter), "ftol": float(self.cfg.latent_convergence_tol)},
         )
         if not res.success:
             log.warning(f"L-BFGS did not converge: {res.message}")

@@ -39,10 +39,10 @@ class Config:
     latent_present_only: bool = False   # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
 
     # Legacy parameters (kept for compatibility & reference but not used in gradient-based solver)
-    latent_l2_reg: float = 1e-3         # L2 norm regularization on D (parameter r)
-    cg_tol: float = 1e-6                # conjugate gradient tolerance (i.e., stopping criterion)
-    cg_maxiter: int = 2000              # conjugate gradient max iterations
-    
+    latent_l2_reg: float = 1e-3             # L2 norm regularization on D (parameter r)
+    latent_convergence_tol: float = 1e-5    # Stopping tolerance for latent L-BFGS solves
+    latent_convergence_maxiter: int = 300   # Max iterations for latent L-BFGS solves
+
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent
     gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid"  # Gating function type (sigmoid is primary)
@@ -62,7 +62,6 @@ class Config:
     lr: float = 5e-4                    # Learning rate for MLP parameters
     weight_decay: float = 1e-5          # Weight decay for MLP parameters
     epochs: int = 200                   # Epochs per training phase
-    max_cycles: int = 200               # Max training cycles
     dropout: float = 0.15               # Dropout rate in MLP
     grad_clip: Optional[float] = 1.0    # Gradient clipping value (None to disable)
 

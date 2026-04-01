@@ -221,8 +221,8 @@ class LatentSolver:
             A_use, 
             b, 
             x0=x0_use,
-            atol=self.cfg.cg_tol, 
-            maxiter=self.cfg.cg_maxiter
+            atol=self.cfg.latent_convergence_tol, 
+            maxiter=self.cfg.latent_convergence_maxiter
         )
         
         if info != 0:
@@ -360,8 +360,8 @@ class LatentSolver:
             jac=jac,
             method="L-BFGS-B",
             options={
-                "maxiter": int(self.cfg.cg_maxiter),
-                "ftol": float(self.cfg.cg_tol),
+                "maxiter": int(self.cfg.latent_convergence_maxiter),
+                "ftol": float(self.cfg.latent_convergence_tol),
             },
         )
 
