@@ -78,6 +78,7 @@ Options:
   -h, --help               Show this help
 
 Supported targets (first batch):
+  BarcodeBERT
   interpolated_latent/V1
   interpolated_latent/V2
   interpolated_latent/V3
@@ -259,8 +260,8 @@ resolve_target() {
     BarcodeBERT)
       TARGET_DIR="BarcodeBERT"
       OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python barcode_bert.py __OPTIONAL_DATA_ARG__'
-      RESULTS_PATTERNS='BarcodeBERT/results/barcode_bert_*.pkl'
+      TRAIN_CMD_TEMPLATE='python barcodebert.py __OPTIONAL_DATA_ARG__'
+      RESULTS_PATTERNS='BarcodeBERT/results/barcodebert_*.pkl'
       FIGURES_DIR='figures/BarcodeBERT'
       DEFAULT_LABELS_JSON='{"baseline":"Taxonomy","barcode_bert":"BarcodeBERT"}'
       DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","barcode_bert":"#9b59b6"}'
