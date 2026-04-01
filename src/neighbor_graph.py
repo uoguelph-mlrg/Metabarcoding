@@ -1,9 +1,5 @@
 from typing import List, Optional, Tuple
 import os
-# Prevent BLAS/OMP threading conflict with PyTorch MPS on macOS when using
-# embedding-based KNN (sklearn BLAS + MPS can segfault without this)
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors, BallTree

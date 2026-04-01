@@ -234,6 +234,16 @@ if [[ ! -f "$DATA_PATH" ]]; then
   exit 1
 fi
 
+if ! [[ "$CPUS" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --cpus value: $CPUS (must be an integer)" >&2
+  exit 1
+fi
+
+if (( CPUS > 16 )); then
+  echo "Invalid --cpus value: $CPUS (maximum supported is 16)" >&2
+  exit 1
+fi
+
 resolve_target() {
   local target="$1"
   TARGET_DIR=""
@@ -415,6 +425,11 @@ submit_baseline() {
 
 set -euo pipefail
 
+export OMP_NUM_THREADS=$CPUS
+export OPENBLAS_NUM_THREADS=$CPUS
+export MKL_NUM_THREADS=$CPUS
+export NUMEXPR_NUM_THREADS=$CPUS
+
 module load $MODULE_LOAD
 source ~/.bashrc
 source $VENV_ACTIVATE
@@ -510,6 +525,11 @@ submit_target() {
 #SBATCH --open-mode=append
 
 set -euo pipefail
+
+export OMP_NUM_THREADS=$CPUS
+export OPENBLAS_NUM_THREADS=$CPUS
+export MKL_NUM_THREADS=$CPUS
+export NUMEXPR_NUM_THREADS=$CPUS
 
 module load $MODULE_LOAD
 source ~/.bashrc

@@ -1,8 +1,5 @@
 from __future__ import annotations
 import os
-# Prevent BLAS/OMP threading conflict with PyTorch MPS on macOS
-#os.environ.setdefault("OMP_NUM_THREADS", "1")
-#os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import argparse
 import time
