@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -52,7 +51,9 @@ def _iter_batches(n: int, batch_size: int) -> Iterable[Tuple[int, int]]:
 
 
 def _sanitize_latlon(latlon: np.ndarray) -> np.ndarray:
-	arr = np.asarray(latlon, dtype=np.float64)
+	# Always materialize a writable copy. Some upstream arrays (views/readonly buffers)
+	# can be non-writeable and fail during in-place sanitization.
+	arr = np.array(latlon, dtype=np.float64, copy=True, order="C")
 	if arr.ndim != 2 or arr.shape[1] != 2:
 		raise ValueError("Coordinates must be an array with shape (N, 2) in [lat, lon] order")
 
@@ -132,20 +133,31 @@ class _RangeBackedEmbedder(BaseLocationEmbedder):
 		range_beta: float,
 	) -> None:
 		super().__init__(device=device, batch_size=batch_size)
+		range_src = _ensure_third_party_on_syspath("RANGE")
 		try:
 			import torch
-			try:
-				load_model_mod = importlib.import_module("range.load_model")
-			except ImportError:
-				# Fallback to local source clone under analysis/location_embedding/third_party/RANGE
-				_ensure_third_party_on_syspath("RANGE")
-				load_model_mod = importlib.import_module("range.load_model")
 		except ImportError as exc:
+			raise ImportError(
+				"RANGE backend requires 'torch'. Install with: pip install torch"
+			) from exc
+
+		import_errors: List[str] = []
+		load_model_mod = None
+		for mod_name in ("range.load_model",):
+			try:
+				importlib.invalidate_caches()
+				load_model_mod = importlib.import_module(mod_name)
+				break
+			except Exception as exc:  # pragma: no cover - import failures are env-specific
+				import_errors.append(f"{mod_name}: {exc}")
+
+		if load_model_mod is None:
+			local_hint = range_src / "range"
 			raise ImportError(
 				"RANGE backend import failed. Ensure RANGE source is available under "
 				"analysis/location_embedding/third_party/RANGE and dependencies are installed. "
-				f"Original error: {exc}"
-			) from exc
+				f"Checked path: {local_hint}. Import errors: {' | '.join(import_errors)}"
+			)
 
 		self._torch = torch
 		load_model = getattr(load_model_mod, "load_model")
@@ -171,7 +183,16 @@ class _RangeBackedEmbedder(BaseLocationEmbedder):
 				raise ValueError(
 					"RANGE requires a precomputed database file path via 'range_db_path'."
 				)
-			kwargs["db_path"] = range_db_path
+			range_db = Path(range_db_path).expanduser()
+			if not range_db.is_absolute():
+				range_db = (_REPO_DIR / range_db).resolve()
+			if not range_db.is_file():
+				raise FileNotFoundError(
+					"RANGE database not found. "
+					f"Expected file at: {range_db}. "
+					"Pass --range_db_path explicitly if needed."
+				)
+			kwargs["db_path"] = str(range_db)
 			kwargs["beta"] = float(range_beta)
 
 		self._model = load_model(
@@ -230,20 +251,27 @@ class SatCLIPEmbedder(BaseLocationEmbedder):
 				"Install with: pip install torch huggingface-hub"
 			) from exc
 
+		# Ensure local vendored SatCLIP paths are discoverable first.
+		vendored_satclip_pkg = _ensure_third_party_on_syspath("satclip", "satclip")
+		vendored_satclip_root = _ensure_third_party_on_syspath("satclip")
+		importlib.invalidate_caches()
+
 		# SatCLIP loaders exposed by the official repo:
 		# - load_lightweight.py: get_satclip_loc_encoder (no lightning dependency)
 		# - load.py: get_satclip
 		get_satclip = None
+		import_errors: List[str] = []
 		for mod_name in (
 			"load_lightweight",
-			"satclip.load_lightweight",
 			"load",
+			"satclip.load_lightweight",
 			"satclip.load",
 			"satclip.load_model",
 		):
 			try:
 				mod = importlib.import_module(mod_name)
-			except ImportError:
+			except Exception as exc:  # pragma: no cover - import failures are env-specific
+				import_errors.append(f"{mod_name}: {exc}")
 				continue
 			candidate = getattr(mod, "get_satclip", None) or getattr(mod, "get_satclip_loc_encoder", None)
 			if candidate is not None:
@@ -251,33 +279,12 @@ class SatCLIPEmbedder(BaseLocationEmbedder):
 				break
 
 		if get_satclip is None:
-			# Fallback to local source clone under analysis/location_embedding/third_party/satclip
-			# Load exact file path to avoid ambiguous module-name imports.
-			local_satclip_dir = _ensure_third_party_on_syspath("satclip", "satclip")
-			for local_file, mod_alias in (
-				("load_lightweight.py", "satclip_local_load_lightweight"),
-				("load.py", "satclip_local_load"),
-			):
-				local_path = local_satclip_dir / local_file
-				if not local_path.exists():
-					continue
-				try:
-					spec = importlib.util.spec_from_file_location(mod_alias, str(local_path))
-					if spec is not None and spec.loader is not None:
-						mod = importlib.util.module_from_spec(spec)
-						spec.loader.exec_module(mod)
-						candidate = getattr(mod, "get_satclip", None) or getattr(mod, "get_satclip_loc_encoder", None)
-						if candidate is not None:
-							get_satclip = candidate
-							break
-				except Exception:
-					continue
-
-		if get_satclip is None:
 			raise ImportError(
 				"SatCLIP backend could not find a loader function. Expected one of "
 				"'get_satclip' or 'get_satclip_loc_encoder' from SatCLIP source. "
-				"If using local clone, ensure third_party/satclip is present and SatCLIP deps are installed."
+				"If using local clone, ensure third_party/satclip is present and SatCLIP deps are installed. "
+				f"Checked paths: {vendored_satclip_pkg}, {vendored_satclip_root}. "
+				f"Import errors: {' | '.join(import_errors)}"
 			)
 
 		ckpt_path = satclip_ckpt_path

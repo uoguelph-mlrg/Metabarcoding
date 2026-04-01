@@ -26,7 +26,7 @@ import os
 import pickle
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # Local directory first so local config.py and utils.py shadow src versions
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -112,7 +112,7 @@ def run_comparison(
     location_embedder_batch_size: int = 2048,
     embedders: Optional[list[str]] = None,
     run_group: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """
     Train location-embedding variants (no baseline retraining) and return results.
     
@@ -132,6 +132,7 @@ def run_comparison(
         location_embedder_batch_size: Batch size for embedder inference
     """
     results: Dict[str, Any] = {}
+    failures: Dict[str, str] = {}
 
     root_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -198,6 +199,14 @@ def run_comparison(
                     data_dir=data_dir,
                 )
                 embedder_results = trainer.run(use_wandb=use_wandb)
+                required_keys = ("predictions", "targets", "sample_labels", "bin_labels")
+                missing = [k for k in required_keys if k not in embedder_results]
+                if missing:
+                    msg = f"missing required result keys: {missing}"
+                    failures[embedder_name] = msg
+                    log.error(f"✗ {embedder_name.upper()} result rejected: {msg}")
+                    log.info(f"Skipping {embedder_name.upper()} variant")
+                    continue
                 results[embedder_name] = embedder_results
                 log.info(f"✓ {embedder_name.upper()} training completed successfully")
         except Exception as e:
@@ -205,9 +214,9 @@ def run_comparison(
             import traceback
             traceback.print_exc()
             log.info(f"Skipping {embedder_name.upper()} variant")
-            results[embedder_name] = {"error": str(e)}
+            failures[embedder_name] = str(e)
 
-    return results
+    return results, failures
 
 
 def save_results(results: Dict[str, Any], output_path: str) -> None:
@@ -336,7 +345,7 @@ if __name__ == "__main__":
         log.warning("wandb is not installed; continuing without wandb logging")
 
     # Run comparison
-    results = run_comparison(
+    results, failures = run_comparison(
         data_path=data_path,
         data_dir=data_dir,
         use_wandb=use_wandb,
@@ -356,6 +365,13 @@ if __name__ == "__main__":
 
     # Save results
     output_dir = make_output_dir(__file__, args.output_dir)
+    if not results:
+        log.error("No successful location-embedding variants to save.")
+        if failures:
+            for variant, reason in failures.items():
+                log.error(f"  - {variant}: {reason}")
+        raise SystemExit(1)
+
     for variant, variant_results in results.items():
         save_variant_result(output_dir, "location_embedding", variant, variant_results)
 
@@ -363,7 +379,9 @@ if __name__ == "__main__":
     log.info("VARIANT TRAINING COMPLETE")
     log.info("=" * 78)
     log.info(f"Results saved to: {os.path.abspath(output_dir)}")
-    log.info(f"Models trained: {', '.join(args.embedders)}")
+    log.info(f"Successful variants: {', '.join(results.keys())}")
+    if failures:
+        log.info(f"Skipped variants: {', '.join(failures.keys())}")
     log.info(
         "Results contain training metrics for each variant and can be compared "
         "with visualize_results.py using --results_paths or a folder path"
