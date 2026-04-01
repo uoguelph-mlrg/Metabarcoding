@@ -6,9 +6,11 @@ import torch
 
 @dataclass
 class Config:
-    # Data path
-    data_path: str = "data/data_merged.csv"    # Path to raw data CSV file (e.g. data/ecuador_training_data.csv)
-    results_dir: str = "../results" # Directory to save results (e.g. results/results_2023-01-01_12-00.pkl)
+    # Run configuration
+    data_path: str = "data/data_merged.csv"    # Path to raw data CSV file
+    results_dir: str = "../results"                      # Directory where run artifacts are saved
+    loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
+    checkpoint_every: int = 5                             # Save periodic checkpoint every N epochs
     
     # Train / val / test split
     train_frac: float = 0.8
@@ -25,7 +27,7 @@ class Config:
 
     # DNA embedding settings (used when use_embedding=True)
     embedding_path: Optional[str] = None       # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = "data/data_merged.csv"    # path to TSV with 'bin_uri' and 'seq' columns
+    barcode_data_path: Optional[str] = "../../../data/data_merged.csv"    # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"        # distance metric: "cosine" or "euclidean"
 
     # Latent solver - regularization settings
@@ -55,10 +57,9 @@ class Config:
     lr: float = 5e-4                    # Learning rate for MLP parameters
     latent_lr: float = 1e-2             # Latent learning rate (rescaled, new parameter)
     weight_decay: float = 1e-5          # Weight decay for MLP parameters
-    latent_warmup_frac: float = 0.2     # Fraction of max_cycles over which the proximal weight decays from ρ₀ → 0
-    latent_prox_scale: float = 50.0     # ρ₀ = latent_prox_scale × latent_l2_reg at cycle 0 (proximal damping strength)
-    epochs: int = 100                   # Epochs per training phase
-    max_cycles: int = 100               # Max training cycles
+    latent_warmup_frac: float = 0.2     # Fraction of epochs over which proximal damping decays from ρ0 → 0
+    latent_prox_scale: float = 50.0     # ρ0 = latent_prox_scale × latent_l2_reg at epoch 0
+    epochs: int = 200                   # Epochs per training phase
     dropout: float = 0.15               # Dropout rate in MLP
     grad_clip: Optional[float] = 1.0    # Gradient clipping value (None to disable)
     patience: Optional[int] = 25        # Patience for early stopping in number of cycles 

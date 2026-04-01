@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import sys
 import time
 from dataclasses import asdict
 from typing import Any, Dict, List, Literal, Optional, Tuple, cast
@@ -115,8 +116,9 @@ def compute_extended_metrics(
 
 
 class Trainer:
-    """Reusable trainer for model variants and cluster-based runs."""
-
+    """
+    Trains MLP and latent embedding jointly in a single forward-backward pass per epoch.
+    """
     def __init__(
         self,
         cfg: Config,
@@ -217,30 +219,35 @@ class Trainer:
 
         batch_size = cfg.batch_size_sample if self.loss_mode == "sample" else cfg.batch_size_bin
         collate_fn = collate_samples if self.loss_mode == "sample" else None
+        # Safer loader defaults across platforms: multiprocessing + pinned memory can
+        # be unstable on macOS/MPS in some environments.
+        num_workers = int(getattr(self.cfg, "num_workers", 0 if sys.platform == "darwin" else 8))
+        pin_memory = bool(getattr(self.cfg, "pin_memory", self.device.type == "cuda"))
+
         self.train_loader = DataLoader(
             train,
             batch_size=batch_size,
             shuffle=True,
             collate_fn=collate_fn,
             drop_last=True,
-            num_workers=8,
-            pin_memory=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
         )
         self.val_loader = DataLoader(
             val,
             batch_size=batch_size,
             shuffle=False,
             collate_fn=collate_fn,
-            num_workers=8,
-            pin_memory=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
         )
         self.test_loader = DataLoader(
             test,
             batch_size=batch_size,
             shuffle=False,
             collate_fn=collate_fn,
-            num_workers=8,
-            pin_memory=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
         )
         self.train_loader_bin_ordered = DataLoader(
             train_bin_ordered,
@@ -330,7 +337,7 @@ class Trainer:
             log.warning("Resume requested but no checkpoint was found. Starting from epoch 0.")
             return
 
-        checkpoint = torch.load(ckpt_path, map_location=self.device)
+        checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         saved_cfg = checkpoint.get("config", {})
         for key in ["embed_dim", "gating_fn", "loss_type"]:
             if key in saved_cfg and getattr(self.cfg, key) != saved_cfg[key]:
@@ -362,19 +369,6 @@ class Trainer:
             torch.cuda.set_rng_state_all(rng_cuda)
 
         log.info(f"Resumed from checkpoint: {ckpt_path} (epoch {self.current_epoch})")
-
-    def _to_device(
-        self,
-        batch: Dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        inputs = batch["input"].to(self.device)
-        targets = batch["target"].to(self.device)
-        bin_idx = batch["bin_idx"].to(self.device)
-        sample_idx = batch["sample_idx"].to(self.device)
-        mask = batch.get("mask")
-        if mask is not None:
-            mask = mask.to(self.device)
-        return inputs, targets, bin_idx, sample_idx, mask
 
     def _train_batch(self, batch: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, float]]:
         self.model.train()
@@ -521,12 +515,13 @@ class Trainer:
         for batch in data_loader:
             if self.loss_mode == "sample":
                 inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
-                if mask is None:
-                    raise ValueError("Sample mode requires a mask in batched data.")
                 bsz = inputs.shape[0]
                 for b in range(bsz):
                     s_idx = int(sample_idx[b].item())
-                    valid_mask = mask[b].bool()
+                    if mask is not None:
+                        valid_mask = mask[b].bool()
+                    else:
+                        valid_mask = torch.ones(inputs.shape[1], dtype=torch.bool, device=inputs.device)
                     inputs_flat = inputs[b][valid_mask]
                     bin_idx_flat = bin_idx[b][valid_mask]
                     outputs = self.model(inputs_flat, bin_idx_flat).unsqueeze(0)
@@ -737,7 +732,7 @@ class Trainer:
 
         best_ckpt = self._checkpoint_path("best.pt")
         if os.path.exists(best_ckpt):
-            checkpoint = torch.load(best_ckpt, map_location=self.device)
+            checkpoint = torch.load(best_ckpt, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint["model_state_dict"])
 
         self._plot_training_progress()
@@ -778,6 +773,19 @@ class Trainer:
             "val_metrics": self.last_val_metrics,
             "test_metrics": test_metrics,
         }
+
+    def _to_device(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        inputs = batch["input"].to(self.device)
+        targets = batch["target"].to(self.device)
+        bin_idx = batch["bin_idx"].to(self.device)
+        sample_idx = batch["sample_idx"].to(self.device)
+        mask = batch.get("mask")
+        if mask is not None:
+            mask = mask.to(self.device)
+        return inputs, targets, bin_idx, sample_idx, mask
 
 
 if __name__ == "__main__":

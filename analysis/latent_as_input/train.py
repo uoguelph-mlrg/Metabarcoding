@@ -1,30 +1,26 @@
 from __future__ import annotations
-import os
-# Prevent BLAS/OMP threading conflict with PyTorch MPS on macOS
-#os.environ.setdefault("OMP_NUM_THREADS", "1")
-#os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import argparse
-import time
-from typing import Literal, Optional, List, Tuple, Dict, Any
-import logging as log
-from dataclasses import asdict
-
+import os
 import pickle
-import numpy as np
+import sys
+import time
+from dataclasses import asdict
+from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+import logging as log
+
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+
 try:
     import wandb  # type: ignore
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
-
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-
-import sys
 
 _HERE = os.path.dirname(__file__)
 _SRC = os.path.join(_HERE, '..', '..', 'src')
@@ -33,16 +29,16 @@ if _HERE not in sys.path:
 if _SRC not in sys.path:
     sys.path.insert(1, _SRC)
 
-from neighbor_graph import NeighbourGraph
 from dataset import MBDataset, collate_samples
 from loss import Loss
 from mlp import MLPModel
-from utils import load, load_processed
+from neighbor_graph import NeighbourGraph
+from utils import load
 
 # Import variant-specific components from this analysis directory.
+from config import Config, set_seed
 from latent_solver import LatentSolver
 from model import Model
-from config import Config, set_seed
 
 
 def compute_extended_metrics(
@@ -50,7 +46,7 @@ def compute_extended_metrics(
     y_pred: np.ndarray,
     sample_labels: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
-    """Compute regression metrics aligned with the baseline trainer outputs."""
+    """Compute regression metrics aligned with visualization outputs."""
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
     valid = np.isfinite(y_true) & np.isfinite(y_pred)
@@ -127,6 +123,7 @@ def compute_extended_metrics(
         "n_nonzeros": float(nonzero_mask.sum()),
     }
 
+
 class Trainer:
     """
     Trains MLP and latent embedding jointly in a single forward-backward pass per epoch.
@@ -146,40 +143,46 @@ class Trainer:
         self.model_name = model_name
         self.run_id = run_id or time.strftime("%Y-%m-%d_%H-%M-%S")
         self.resume = resume
+
+        if data_dir is not None:
+            log.warning("`data_dir` is deprecated in Trainer and will be ignored. Raw preprocessing is always used.")
+        effective_data_path = data_path or self.cfg.data_path
+        effective_loss_type = cast(Literal["cross_entropy", "logistic"], loss_type or self.cfg.loss_type)
+
         self.start_epoch = 0
         self.current_epoch = -1
         self.global_step = 0
         self.best_val_loss = float("inf")
         self.last_val_metrics: Dict[str, float] = {}
+
         self.train_losses: List[Tuple[int, float]] = []
         self.val_losses: List[Tuple[int, float]] = []
 
         self.base_artifact_dir = os.path.abspath(os.path.join(self.cfg.results_dir, self.model_name))
         self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        
-        # Load data
-        if data_dir is not None:
-            data, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir)
-        else:
-            if data_path is None:
-                raise ValueError("Either data_path or data_dir must be provided")
-            data, bins_df, bin_index, sample_index, split_indices = load(
-                data_path, self.cfg, fixed_split_indices=fixed_split_indices
-            )
+
+        data, bins_df, bin_index, sample_index, split_indices = load(
+            effective_data_path,
+            self.cfg,
+            save_data=False,
+            fixed_split_indices=fixed_split_indices,
+        )
+
         self.data = data
         self.bin_index = bin_index
         self.sample_index = sample_index
         self.split_indices = split_indices
-        
-        # Build neighbours graph and latent solver
+
         self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
         self.neighbour_graph.build()
-        
-        latent_solver = LatentSolver(self.cfg, self.neighbour_graph)
+
+        latent_solver = LatentSolver(
+            self.cfg,
+            self.neighbour_graph,
+        )
         latent_solver.build_V_and_H(data["train"]["X"], bin_index, method="nw")
-        
-        # Build model
+
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
         self.input_dim = input_dim
@@ -191,15 +194,19 @@ class Trainer:
         # _expand_mlp_for_latent() will expand the first layer after Phase 1.
         # Otherwise, build the full input_dim + latent_dim MLP from the start.
         mlp_input_dim = input_dim + self.latent_dim
-        mlp_model = MLPModel(mlp_input_dim, hidden_dims=[128, 128, 128, 128], dropout=self.cfg.dropout).to(self.device)
-        
+        mlp_model = MLPModel(
+            mlp_input_dim,
+            hidden_dims=[128, 128, 128, 128],
+            dropout=self.cfg.dropout,
+        ).to(self.device)
+
         self.model = Model(
-            mlp_model, 
-            latent_solver, 
+            mlp_model,
+            latent_solver,
             n_bins=len(bin_index),
+            device=self.device,
             latent_dim=self.latent_dim,
             latent_init_std=self.latent_init_std,
-            device=self.device
         )
         
         # Pre-compute H as a torch sparse tensor for smoothness regularization in train_epoch
@@ -215,56 +222,74 @@ class Trainer:
             {"params": self.model.mlp.parameters(), "lr": cfg.lr, "weight_decay": cfg.weight_decay},
             {"params": [self.model.latent_embedding.weight], "lr": cfg.latent_lr, "weight_decay": 0.0},
         ])
-        # LR scheduler — total steps = epochs (one scheduler step per epoch)
-        total_steps = self.cfg.epochs
-        warmup_steps = max(1, int(0.1 * total_steps))
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
-        )
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=1e-6
-        )
-        self.scheduler = torch.optim.lr_scheduler.SequentialLR(
-            self.optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps]
-        )
-        
-        # Loss configuration
-        self.loss_type = loss_type or "cross_entropy"
+
+        self.loss_type: Literal["cross_entropy", "logistic"] = effective_loss_type
         self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
         self.criterion = Loss(task=self.loss_type)
-        
-        # Build datasets
-        log.debug(f"\n   Building datasets...")
+
         train = MBDataset(data["train"], bin_index, sample_index, loss_mode=self.loss_mode)
         val = MBDataset(data["val"], bin_index, sample_index, loss_mode=self.loss_mode)
         test = MBDataset(data["test"], bin_index, sample_index, loss_mode=self.loss_mode)
-
-        # Always build an ordered bin-mode dataset for latent solving and aligned diagnostics.
-        # This guarantees that (inputs, targets, bin_idx, sample_idx) share a single, consistent row order.
         train_bin_ordered = MBDataset(data["train"], bin_index, sample_index, loss_mode="bin")
-        
-        # Initialize data loaders
-        # For sample mode, use custom collate function to handle variable-length samples
+
         batch_size = cfg.batch_size_sample if self.loss_mode == "sample" else cfg.batch_size_bin
         collate_fn = collate_samples if self.loss_mode == "sample" else None
-        self.train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-        self.val_loader = DataLoader(val, batch_size=1, shuffle=False, collate_fn=collate_fn)
-        self.test_loader = DataLoader(test, batch_size=1, shuffle=False, collate_fn=collate_fn)
-        
-        # Non-shuffled loader for stable evaluation/tracking (sample-mode ordering may not match row ordering)
-        self.train_loader_ordered = DataLoader(train, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+        # Safer loader defaults across platforms: multiprocessing + pinned memory can
+        # be unstable on macOS/MPS in some environments.
+        num_workers = int(getattr(self.cfg, "num_workers", 0 if sys.platform == "darwin" else 8))
+        pin_memory = bool(getattr(self.cfg, "pin_memory", self.device.type == "cuda"))
 
-        # Canonical ordered loader for latent solving (row-aligned with its own targets)
+        self.train_loader = DataLoader(
+            train,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            drop_last=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        self.val_loader = DataLoader(
+            val,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        self.test_loader = DataLoader(
+            test,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
         self.train_loader_bin_ordered = DataLoader(
             train_bin_ordered,
             batch_size=self.cfg.batch_size_bin,
             shuffle=False,
             collate_fn=None,
         )
-        
-        # Latent importance diagnostics (populated during run())
-        # Each entry: dict with keys epoch, weight_norm_ratio, embedding_std,
-        #             ablation_delta (only every diag_ablation_interval epochs)
+
+        total_steps = self.cfg.epochs * len(self.train_loader)
+        warmup_steps = max(1, int(0.1 * total_steps))
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer,
+            start_factor=1e-3,
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=max(1, total_steps - warmup_steps),
+            eta_min=1e-6,
+        )
+        self.scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
+        )
+        # ablation_delta (only every diag_ablation_interval epochs)
         self.latent_diagnostics: List[Dict[str, Any]] = []
 
         if self.resume:
@@ -300,8 +325,7 @@ class Trainer:
         latest_path = self._checkpoint_path("latest.pt")
         torch.save(payload, latest_path)
 
-        checkpoint_every = int(getattr(self.cfg, "checkpoint_every", 5))
-        if (epoch + 1) % checkpoint_every == 0:
+        if (epoch + 1) % self.cfg.checkpoint_every == 0:
             periodic_name = f"epoch_{epoch + 1:04d}.pt"
             torch.save(payload, self._checkpoint_path(periodic_name))
 
@@ -331,6 +355,14 @@ class Trainer:
             return
 
         checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        saved_cfg = checkpoint.get("config", {})
+        for key in ["latent_dim", "loss_type"]:
+            if key in saved_cfg and getattr(self.cfg, key) != saved_cfg[key]:
+                raise ValueError(
+                    f"Checkpoint/config mismatch for '{key}': "
+                    f"checkpoint={saved_cfg[key]} current={getattr(self.cfg, key)}"
+                )
+
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -355,59 +387,6 @@ class Trainer:
 
         log.info(f"Resumed from checkpoint: {ckpt_path} (epoch {self.current_epoch})")
 
-    # ------------------------------------------------------------------
-    # Diagnostic helpers
-    # ------------------------------------------------------------------
-
-    @torch.no_grad()
-    def _compute_latent_weight_ratio(self) -> float:
-        """
-        Compute the per-column weight activity ratio of latent vs feature inputs
-        in the MLP first layer.
-
-        Returns latent_col_mean_norm / feat_col_mean_norm, where:
-            feat_col_mean_norm  = ||W[:, :input_dim]||_F  / input_dim
-            latent_col_mean_norm= ||W[:, input_dim:]||_F  / latent_dim
-
-        A ratio < 1 means latent columns are weaker than feature columns on
-        average; approaching 0 signals the MLP is ignoring the latent input.
-        """
-        W = self.model.mlp.net[0].weight.data  # [hidden0, input_dim + latent_dim]
-        W_feat   = W[:, :self.input_dim]
-        W_latent = W[:, self.input_dim:]
-        feat_col_mean   = W_feat.norm(p='fro').item()   / self.input_dim
-        latent_col_mean = W_latent.norm(p='fro').item() / self.latent_dim
-        return latent_col_mean / (feat_col_mean + 1e-12)
-
-    @torch.no_grad()
-    def _compute_ablation_delta(self) -> float:
-        """
-        Compute the increase in validation loss when the latent embedding is zeroed.
-        A small delta (≈ 0) means the MLP is not using the latent at all.
-        """
-        # Save embeddings
-        saved = self.model.latent_embedding.weight.data.clone()
-        # Zero out
-        self.model.latent_embedding.weight.data.zero_()
-        loss_no_latent = self.validate(split="val")
-        # Restore
-        self.model.latent_embedding.weight.data.copy_(saved)
-        loss_with_latent = self.validate(split="val")
-        return loss_no_latent - loss_with_latent
-
-    def _collect_diagnostics(self, epoch: int, run_ablation: bool = False) -> Dict[str, Any]:
-        """Collect one snapshot of latent importance diagnostics."""
-        diag: Dict[str, Any] = {
-            "epoch": epoch,
-            "weight_norm_ratio": self._compute_latent_weight_ratio(),
-            "embedding_std": float(self.model.latent_embedding.weight.data.std()),
-            "ablation_delta": None,
-        }
-        if run_ablation:
-            diag["ablation_delta"] = self._compute_ablation_delta()
-        return diag
-
-    # ------------------------------------------------------------------
     def train_epoch(self) -> float:
         """Train for one epoch. Returns average CE loss (regularization excluded)."""
         self.model.train()
@@ -418,22 +397,14 @@ class Trainer:
             inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
 
             if self.loss_mode == "sample":
-                # Sample mode: inputs [B, max_bins, features], bin_idx [B, max_bins]
-                # Forward pass on all bins at once
                 B, max_bins, n_feat = inputs.shape
-                inputs_flat = inputs.view(B * max_bins, n_feat)  # [B*max_bins, features]
-                bin_idx_flat = bin_idx.view(B * max_bins)        # [B*max_bins]
-                
-                outputs_flat = self.model(inputs_flat, bin_idx_flat)  # [B*max_bins]
-                outputs = outputs_flat.view(B, max_bins)              # [B, max_bins]
-                
-                # Apply mask: set padded positions to large negative (will become ~0 after softmax)
-                outputs = outputs.masked_fill(mask == 0, float('-inf'))
-                
-                # Loss expects [B, max_bins] logits, [B, max_bins] target probs, and mask
+                inputs_flat = inputs.view(B * max_bins, n_feat)
+                bin_idx_flat = bin_idx.view(B * max_bins)
+                outputs_flat = self.model(inputs_flat, bin_idx_flat)
+                outputs = outputs_flat.view(B, max_bins)
+                outputs = outputs.masked_fill(mask == 0, float("-inf"))
                 loss = self.criterion(outputs, targets, mask)
             else:
-                # Bin mode: standard forward pass
                 outputs = self.model(inputs, bin_idx)
                 loss = self.criterion(outputs, targets)
 
@@ -453,6 +424,8 @@ class Trainer:
                 )
 
             self.optimizer.step()
+            self.scheduler.step()
+            self.global_step += 1
 
             batch_size = targets.size(0)
             running_loss += loss.item() * batch_size  # track CE loss only
@@ -465,29 +438,23 @@ class Trainer:
     @torch.no_grad()
     def validate(self, split: Literal["train", "val", "test"]) -> float:
         data_loader = (
-            self.val_loader if split == "val" else 
-            self.test_loader if split == "test" else 
-            self.train_loader
+            self.train_loader if split == "train" else
+            self.val_loader if split == "val" else
+            self.test_loader
         )
-        if data_loader is None:
-            raise ValueError(f"Unknown split {split}")
-        
+
         self.model.eval()
         running_loss = 0.0
         n_samples = 0
-
         for batch in data_loader:
             inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
-            
             if self.loss_mode == "sample":
                 B, max_bins, n_feat = inputs.shape
                 inputs_flat = inputs.view(B * max_bins, n_feat)
                 bin_idx_flat = bin_idx.view(B * max_bins)
-                
                 outputs_flat = self.model(inputs_flat, bin_idx_flat)
                 outputs = outputs_flat.view(B, max_bins)
-                outputs = outputs.masked_fill(mask == 0, float('-inf'))
-                
+                outputs = outputs.masked_fill(mask == 0, float("-inf"))
                 loss = self.criterion(outputs, targets, mask)
             else:
                 outputs = self.model(inputs, bin_idx)
@@ -497,35 +464,25 @@ class Trainer:
             running_loss += loss.item() * batch_size
             n_samples += batch_size
 
-        val_loss = running_loss / max(1, n_samples)
-        return val_loss
+        return float(running_loss / max(1, n_samples))
+
 
     @torch.no_grad()
-    def compute_metrics(self, split: str) -> Dict[str, float]:
-        preds, targets, sample_labels, _ = self.get_predictions(split=split)  # type: ignore[arg-type]
-        return compute_extended_metrics(y_true=targets, y_pred=preds, sample_labels=sample_labels)
-
-    @torch.no_grad()
-    def get_predictions(self, split: Literal["train", "val", "test"] = "test") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Get predictions and targets for a given split.
-        Returns:
-            Tuple of (predictions, targets, sample_labels, bin_labels) as flat 1D arrays.
-            - predictions:   float32 (N,) — predicted probabilities/values
-            - targets:       float32 (N,) — true relative abundances
-            - sample_labels: (N,) str    — sample ID for each entry (from self.sample_index)
-            - bin_labels:    (N,) str    — BIN URI for each entry (from self.bin_index)
-            where N = total valid (sample, BIN) pairs across the requested split.
-        """
+    def get_predictions(
+        self,
+        split: Literal["train", "val", "test"] = "test",
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         data_loader = (
             self.train_loader if split == "train" else
             self.val_loader if split == "val" else
             self.test_loader
         )
         self.model.eval()
-        # Accumulate per-sample lists
-        sample_pred: Dict[int, list] = {}
-        sample_true: Dict[int, list] = {}
-        sample_bins: Dict[int, list] = {}  # integer bin indices (from self.bin_index)
+
+        sample_pred: Dict[int, List[float]] = {}
+        sample_true: Dict[int, List[float]] = {}
+        sample_bins: Dict[int, List[int]] = {}
+
         for batch in data_loader:
             if self.loss_mode == "sample":
                 inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
@@ -538,119 +495,149 @@ class Trainer:
                         valid_mask = mask[b].bool()
                     else:
                         valid_mask = torch.ones(inputs.shape[1], dtype=torch.bool, device=inputs.device)
-                    
                     inputs_flat = inputs[b][valid_mask]
                     bin_idx_flat = bin_idx[b][valid_mask]
-                    outputs = self.model(inputs_flat, bin_idx_flat)
-                    outputs = outputs.unsqueeze(0)  # [1, n_bins]
+                    outputs = self.model(inputs_flat, bin_idx_flat).unsqueeze(0)
                     probs = F.softmax(outputs, dim=-1).squeeze(0).cpu().numpy()
                     y_true = targets[b][valid_mask].cpu().numpy()
                     sample_pred.setdefault(s_idx, []).extend(probs.tolist())
                     sample_true.setdefault(s_idx, []).extend(y_true.tolist())
                     sample_bins.setdefault(s_idx, []).extend(bin_idx_flat.cpu().numpy().tolist())
             else:
-                # Bin mode: batch is a dict (from DataLoader, no collate_fn)
                 inputs = batch["input"].to(self.device)
                 targets = batch["target"].to(self.device)
                 bin_idx = batch["bin_idx"].to(self.device)
                 sample_idx = batch["sample_idx"].to(self.device)
-                # If batch_size=1, make sure dims are right
+
                 if len(inputs.shape) == 1:
                     inputs = inputs.unsqueeze(0)
                     targets = targets.unsqueeze(0)
                     bin_idx = bin_idx.unsqueeze(0)
                     sample_idx = sample_idx.unsqueeze(0)
+
                 for i in range(inputs.shape[0]):
                     s_idx = sample_idx[i].item() if hasattr(sample_idx[i], 'item') else int(sample_idx[i])
                     b_idx = int(bin_idx[i].item() if hasattr(bin_idx[i], 'item') else bin_idx[i])
                     input_i = inputs[i].unsqueeze(0)
                     bin_idx_i = bin_idx[i].unsqueeze(0)
                     output = self.model(input_i, bin_idx_i)
-                    prob = torch.sigmoid(output).cpu().numpy().item()
-                    y_true = targets[i].cpu().numpy().item()
+                    prob = float(torch.sigmoid(output).cpu().numpy().item())
+                    y_true = float(targets[i].cpu().numpy().item())
                     sample_pred.setdefault(s_idx, []).append(prob)
                     sample_true.setdefault(s_idx, []).append(y_true)
                     sample_bins.setdefault(s_idx, []).append(b_idx)
-        
-        # Normalize predictions per sample if using logistic loss
+
         if self.loss_type == "logistic":
-            for s_idx in sample_pred:
-                preds = np.array(sample_pred[s_idx])
-                pred_sum = preds.sum()
+            for s_idx, preds in sample_pred.items():
+                pred_arr = np.array(preds)
+                pred_sum = pred_arr.sum()
                 if pred_sum > 0:
-                    sample_pred[s_idx] = (preds / pred_sum).tolist()
-        
-        # Invert index dicts to recover string labels
+                    sample_pred[s_idx] = (pred_arr / pred_sum).tolist()
+
         idx_to_sample = {v: k for k, v in self.sample_index.items()}
         idx_to_bin = {v: k for k, v in self.bin_index.items()}
-        # Flatten into 1D arrays, ordered by sample_idx
-        preds_flat, trues_flat, s_labels, b_labels = [], [], [], []
+
+        preds_flat, trues_flat, sample_labels, bin_labels = [], [], [], []
         for s_idx in sorted(sample_pred.keys()):
             n = len(sample_pred[s_idx])
             preds_flat.extend(sample_pred[s_idx])
             trues_flat.extend(sample_true[s_idx])
-            s_labels.extend([idx_to_sample[s_idx]] * n)
-            b_labels.extend([idx_to_bin[int(b)] for b in sample_bins[s_idx]])
+            sample_labels.extend([idx_to_sample[s_idx]] * n)
+            bin_labels.extend([idx_to_bin[int(b)] for b in sample_bins[s_idx]])
+
         return (
             np.array(preds_flat, dtype=np.float32),
             np.array(trues_flat, dtype=np.float32),
-            np.array(s_labels),
-            np.array(b_labels),
+            np.array(sample_labels),
+            np.array(bin_labels),
         )
+
+    def compute_metrics(self, split: Literal["train", "val", "test"]) -> Dict[str, float]:
+        preds, targets, sample_labels, _ = self.get_predictions(split=split)
+        return compute_extended_metrics(y_true=targets, y_pred=preds, sample_labels=sample_labels)
+
+    def _metric_key(self, metric_name: str) -> str:
+        return (
+            metric_name.lower()
+            .replace(" ", "_")
+            .replace("(", "")
+            .replace(")", "")
+            .replace("²", "2")
+            .replace("+", "plus")
+            .replace("-", "_")
+            .replace("/", "_")
+        )
+
+    def _plot_training_progress(self) -> None:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+
+        epoch_nums = [e for e, _ in self.train_losses]
+        train_vals = [l for _, l in self.train_losses]
+        val_vals = [l for _, l in self.val_losses]
+
+        ax.plot(epoch_nums, train_vals, "b-", linewidth=2, alpha=0.8, label="Train Loss")
+        ax.plot(epoch_nums, val_vals, "r-", linewidth=2, alpha=0.8, label="Validation Loss")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_title("Training Progress")
+        ax.grid(True, alpha=0.3)
+        ax.legend(frameon=False)
+
+        root = os.path.dirname(os.path.abspath(__file__))
+        fig_dir = os.path.join(root, "figures")
+        os.makedirs(fig_dir, exist_ok=True)
+        save_path = os.path.join(fig_dir, f"training_progress_{self.model_name}_{self.run_id}.png")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
 
     def run(self, use_wandb: bool = True) -> Dict[str, Any]:
         """Run joint MLP+latent training."""
 
+        log.info(
+            f"Starting training for model={self.model_name}, epochs={self.cfg.epochs}, resume={self.resume}"
+        )
         pbar = tqdm(range(self.start_epoch, self.cfg.epochs), desc="Training", leave=True)
         for epoch in pbar:
             self.current_epoch = epoch
+            epoch_start = time.perf_counter()
+
             self.train_epoch()
+
+            train_eval_start = time.perf_counter()
             train_loss = self.validate(split="train")
+            train_eval_s = time.perf_counter() - train_eval_start
+
+            val_eval_start = time.perf_counter()
             val_loss = self.validate(split="val")
-            self.global_step += len(self.train_loader)
+            val_eval_s = time.perf_counter() - val_eval_start
 
             self.train_losses.append((epoch, train_loss))
             self.val_losses.append((epoch, val_loss))
 
-            # Collect latent importance diagnostics every epoch (ablation periodically)
-            run_ablation = (
-                self.cfg.diag_ablation_interval > 0
-                and epoch % self.cfg.diag_ablation_interval == 0
-            )
-            diag = self._collect_diagnostics(epoch, run_ablation=run_ablation)
-            self.latent_diagnostics.append(diag)
-
+            metric_start = time.perf_counter()
             val_metrics = self.compute_metrics(split="val")
+            metric_s = time.perf_counter() - metric_start
             self.last_val_metrics = val_metrics
 
             if use_wandb and WANDB_AVAILABLE:
-                wandb.log({
+                payload = {
                     "train/epoch": epoch,
                     "train/loss": train_loss,
                     "val/loss": val_loss,
                     "train/global_step": self.global_step,
-                    "latent_weight_ratio": diag["weight_norm_ratio"],
-                    "latent_embedding_std": diag["embedding_std"],
-                    **{f"val/metrics/{k}": v for k, v in val_metrics.items()},
-                    **({"ablation_delta": diag["ablation_delta"]}
-                       if diag["ablation_delta"] is not None else {}),
-                })
-
-            self.scheduler.step()
+                }
+                for metric_name, metric_value in val_metrics.items():
+                    payload[f"val/metrics/{self._metric_key(metric_name)}"] = metric_value
+                wandb.log(payload)
 
             if epoch % 10 == 0:
                 pbar.set_postfix({
                     "train": f"{train_loss:.6f}",
                     "val": f"{val_loss:.6f}",
-                    "latent_ratio": f"{diag['weight_norm_ratio']:.3f}",
-                    "emb_std": f"{diag['embedding_std']:.4f}",
                 })
                 log.info(
-                    f"Epoch {epoch}: train={train_loss:.6f}, val={val_loss:.6f}, "
-                    f"latent_ratio={diag['weight_norm_ratio']:.4f}, "
-                    f"emb_std={diag['embedding_std']:.6f}"
-                    + (f", ablation_delta={diag['ablation_delta']:.6f}"
-                       if diag["ablation_delta"] is not None else "")
+                    f"Epoch {epoch}: train={train_loss:.6f}, val={val_loss:.6f}"
                 )
 
             improved = val_loss < self.best_val_loss
@@ -659,20 +646,35 @@ class Trainer:
 
             self._save_checkpoint(epoch=epoch, val_loss=val_loss, val_metrics=val_metrics, best=improved)
 
-        self._plot_training_progress()
-        self._plot_latent_importance()
+            epoch_total_s = time.perf_counter() - epoch_start
 
-        # Load best checkpoint before final evaluation
+            if use_wandb and WANDB_AVAILABLE:
+                wandb.log(
+                    {
+                        "timing/epoch/total_s": float(epoch_total_s),
+                        "timing/epoch/train_eval_s": float(train_eval_s),
+                        "timing/epoch/val_eval_s": float(val_eval_s),
+                        "timing/epoch/metrics_s": float(metric_s),
+                    },
+                    step=self.global_step,
+                )
+
+            log.info(
+                f"Epoch {epoch + 1}/{self.cfg.epochs}: "
+                f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}, "
+                f"best_val={self.best_val_loss:.6f}, epoch_s={epoch_total_s:.2f}"
+            )
+
         best_ckpt = self._checkpoint_path("best.pt")
         if os.path.exists(best_ckpt):
             checkpoint = torch.load(best_ckpt, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint["model_state_dict"])
-            log.debug(f"Loaded best checkpoint from {best_ckpt} for final evaluation")
 
+        self._plot_training_progress()
         test_loss = self.validate(split="test")
         test_metrics = self.compute_metrics(split="test")
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
-        latent_embeddings = self.model.get_latent()  # [n_bins, latent_dim]
+        latent_vector = self.model.get_latent()  # [n_bins, latent_dim]
         return {
             "model": self.model_name,
             "run_id": self.run_id,
@@ -682,18 +684,11 @@ class Trainer:
             "targets": targets,
             "sample_labels": sample_labels,
             "bin_labels": bin_labels,
-            "latent_embeddings": latent_embeddings,
+            "latent_vector": latent_vector,
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "val_metrics": self.last_val_metrics,
             "test_metrics": test_metrics,
-            "latent_diagnostics": self.latent_diagnostics,
-            # Provide timeline-compatible format for the visualisation script:
-            # (phase, cycle, step, loss) — here all are in a single "joint" phase
-            "timeline_train_losses": [("joint", 0, e, l) for e, l in self.train_losses],
-            "timeline_val_losses": [("joint", 0, e, l) for e, l in self.val_losses],
-            "cycle_train_losses": [],
-            "cycle_val_losses": [],
         }
 
     def _plot_latent_importance(self) -> None:
@@ -752,38 +747,65 @@ class Trainer:
         log.info(f"Latent importance plot saved to: {save_path}")
         plt.close()
 
-    def _plot_training_progress(self) -> None:
-        """Plot training and validation losses over epochs."""
-        import matplotlib.pyplot as plt
+    # ------------------------------------------------------------------
+    # Diagnostic helpers
+    # ------------------------------------------------------------------
 
-        fig, ax = plt.subplots(figsize=(10, 5))
+    @torch.no_grad()
+    def _compute_latent_weight_ratio(self) -> float:
+        """
+        Compute the per-column weight activity ratio of latent vs feature inputs
+        in the MLP first layer.
 
-        epochs = [e for e, _ in self.train_losses]
-        train_vals = [l for _, l in self.train_losses]
-        val_vals = [l for _, l in self.val_losses]
+        Returns latent_col_mean_norm / feat_col_mean_norm, where:
+            feat_col_mean_norm  = ||W[:, :input_dim]||_F  / input_dim
+            latent_col_mean_norm= ||W[:, input_dim:]||_F  / latent_dim
 
-        ax.plot(epochs, train_vals, 'b-', alpha=0.8, linewidth=1.5, label='Train Loss (CE)')
-        ax.plot(epochs, val_vals, 'r-', alpha=0.8, linewidth=1.5, label='Val Loss (CE)')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.set_title('Joint Training Progress: MLP + Latent')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        A ratio < 1 means latent columns are weaker than feature columns on
+        average; approaching 0 signals the MLP is ignoring the latent input.
+        """
+        W = self.model.mlp.net[0].weight.data  # [hidden0, input_dim + latent_dim]
+        W_feat   = W[:, :self.input_dim]
+        W_latent = W[:, self.input_dim:]
+        feat_col_mean   = W_feat.norm(p='fro').item()   / self.input_dim
+        latent_col_mean = W_latent.norm(p='fro').item() / self.latent_dim
+        return latent_col_mean / (feat_col_mean + 1e-12)
 
-        plt.tight_layout()
-        
-        # Save figure
-        root = os.path.dirname(os.path.abspath(__file__))
-        save_path = os.path.join(root, "figures", "training_progress.png")
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        log.info(f"Training progress plot saved to: {save_path}")
-        plt.close()
+    @torch.no_grad()
+    def _compute_ablation_delta(self) -> float:
+        """
+        Compute the increase in validation loss when the latent embedding is zeroed.
+        A small delta (≈ 0) means the MLP is not using the latent at all.
+        """
+        # Save embeddings
+        saved = self.model.latent_embedding.weight.data.clone()
+        # Zero out
+        self.model.latent_embedding.weight.data.zero_()
+        loss_no_latent = self.validate(split="val")
+        # Restore
+        self.model.latent_embedding.weight.data.copy_(saved)
+        loss_with_latent = self.validate(split="val")
+        return loss_no_latent - loss_with_latent
+
+    def _collect_diagnostics(self, epoch: int, run_ablation: bool = False) -> Dict[str, Any]:
+        """Collect one snapshot of latent importance diagnostics."""
+        diag: Dict[str, Any] = {
+            "epoch": epoch,
+            "weight_norm_ratio": self._compute_latent_weight_ratio(),
+            "embedding_std": float(self.model.latent_embedding.weight.data.std()),
+            "ablation_delta": None,
+        }
+        if run_ablation:
+            diag["ablation_delta"] = self._compute_ablation_delta()
+        return diag
+
+    # ------------------------------------------------------------------
+
 
     def _to_device(
-        self, batch: Dict[str, torch.Tensor]
+        self,
+        batch: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """Move batch tensors to device. Returns mask only for sample mode."""
         inputs = batch["input"].to(self.device)
         targets = batch["target"].to(self.device)
         bin_idx = batch["bin_idx"].to(self.device)
@@ -795,91 +817,41 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Metabarcoding training script")
-    group_ = parser.add_mutually_exclusive_group(required=False)
-    group_.add_argument("--data_path", type=str, default=None,
-                        help="Path to raw data CSV file (e.g. data/ecuador_training_data.csv)")
-    group_.add_argument("--data_dir", type=str, default=None,
-                        help="Path to directory containing processed CSV files (X_*.csv, y_*.csv, taxonomic_data.csv)")
-    parser.add_argument("--loss_type", type=str, choices=["cross_entropy", "logistic"], 
-                        default="cross_entropy", help="Type of loss function to use")
-    parser.add_argument("--model", type=str, default="latent_as_input",
-                        help="Model variant name stored in output results")
-    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser = argparse.ArgumentParser(description="Metabarcoding training entrypoint")
+    parser.add_argument("--model", type=str, required=True, help="Name of the model variant being trained")
+    parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
-    parser.add_argument("--no_wandb", action="store_true", help="Disable Weights & Biases logging")
     args = parser.parse_args()
-    
-    # Set some generic configurations
+
     set_seed()
-    cfg = Config()
-    root_dir = os.path.dirname(os.path.abspath(__file__))
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    # Initialize Weights & Biases (optional)
-    use_wandb = WANDB_AVAILABLE and not args.no_wandb
-    if not WANDB_AVAILABLE:
-        log.warning("wandb is not installed; continuing without wandb logging")
-    else:
-        run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
-        wandb.init(
-            project="metabarcoding",
-            name=f"{args.model}_{run_id}",
-            config={"model": args.model, **asdict(cfg)},
-            tags=["cross-entropy", "ecuador", "mlp+latent"],
-            dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wandb")
-        )
-
-    # Create Trainer and run
-    # Default behavior: if neither is provided, fall back to raw CSV in data/
-    data_path = args.data_path
-    data_dir = args.data_dir
-    if data_path is None and data_dir is None:
-        data_path = "data/ecuador_training_data.csv"
+    cfg = Config()
 
     run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = os.path.abspath(os.path.join(cfg.results_dir, args.model))
     os.makedirs(run_dir, exist_ok=True)
 
-    trainer = Trainer(
-        cfg,
-        data_path=data_path,
-        data_dir=data_dir,
-        loss_type=args.loss_type,
-        model_name=args.model,
-        run_id=run_id,
-        resume=args.resume,
-    )
+    use_wandb = WANDB_AVAILABLE
+    if not WANDB_AVAILABLE:
+        log.warning("wandb is not installed; continuing without wandb logging")
+    else:
+        wandb.init(
+            project="metabarcoding",
+            name=f"{args.model}_{run_id}",
+            config={"model": args.model, **asdict(cfg)},
+            dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wandb"),
+        )
 
-    log.debug(f"\n   Starting training...")
+    trainer = Trainer(cfg=cfg, model_name=args.model, run_id=run_id, resume=args.resume)
     results = trainer.run(use_wandb=use_wandb)
-    results["model"] = args.model
 
-    # Save results to pickle for downstream visualization
-    pkl_path = os.path.join(run_dir, f"results_{args.model}_{run_id}.pkl")
+    pkl_name = f"results_{args.model}_{run_id}.pkl"
+    pkl_path = os.path.join(run_dir, pkl_name)
     with open(pkl_path, "wb") as fh:
         pickle.dump(results, fh)
     log.info(f"Results saved to: {pkl_path}")
 
-    # Evaluate on test set
-    log.debug(f"\n   Final evaluation...")
-
-    test_loss = trainer.validate(split="test")
-    log.info(f"Test loss: {test_loss:.6f}")
-
-    log.info("\n" + "="*50)
-    log.info("METRICS")
-    log.info("="*50)
-    for split_name in ["val", "test"]: # FIXME : + train
-        loss_ = trainer.validate(split=split_name)  # type: ignore
-        metrics = trainer.compute_metrics(split_name)        
-        if use_wandb:
-            wandb.log({
-                f"final_{split_name}_loss": loss_,
-                **{f"{split_name}_{k}": v for k, v in metrics.items()}
-            })
-
-    # Finish wandb run
     if use_wandb:
         wandb.finish()

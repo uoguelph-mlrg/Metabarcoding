@@ -6,17 +6,19 @@ import torch
 
 @dataclass
 class Config:
-    # Data path
-    data_path: str = "data/ecuador_training_data.csv"    # Path to raw data CSV file (e.g. data/ecuador_training_data.csv)
-    results_dir: str = "../results" # Directory to save results (e.g. results/results_2023-01-01_12-00.pkl)
+    # Run configuration
+    data_path: str = "data/data_merged.csv"    # Path to raw data CSV file
+    results_dir: str = "../results"                      # Directory where run artifacts are saved
+    loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
+    checkpoint_every: int = 5                             # Save periodic checkpoint every N epochs
     
     # Train / val / test split
     train_frac: float = 0.8
     val_frac: float = 0.1
 
     # Neighbour graph
-    use_taxonomy: bool = True           # set to True to use taxonomic distances
-    use_embedding: bool = False         # set to True to use DNA embedding-based neighbors
+    use_taxonomy: bool = False           # set to True to use taxonomic distances
+    use_embedding: bool = True         # set to True to use DNA embedding-based neighbors
     neighbor_mode: str = "knn"          # "threshold" for distance-based, "knn" for K-nearest neighbors
     K: int = 10                         # number of neighbors (used when neighbor_mode="knn")
     dist_thres: int = 4                 # max taxonomic distance (used when neighbor_mode="threshold")
@@ -25,7 +27,7 @@ class Config:
 
     # DNA embedding settings (used when use_embedding=True)
     embedding_path: Optional[str] = None       # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = None    # path to TSV with 'bin_uri' and 'seq' columns
+    barcode_data_path: Optional[str] = "../../../data/data_merged.csv"    # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"        # distance metric: "cosine" or "euclidean"
 
 
@@ -46,7 +48,7 @@ class Config:
     cg_maxiter: int = 2000              # conjugate gradient max iterations
     
     # Architecture - New parameters for multiplicative gating
-    embed_dim: int = 4                 # Embedding dimension d for vector latent
+    embed_dim: int = 10                 # Embedding dimension d for vector latent
     gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid"  # Gating function type (sigmoid is primary)
     gating_alpha: float = 0.5           # Scaling factor for scaled_exp gating (in (0,1])
     gating_kappa: float = 0.5           # Scaling factor for tanh gating
@@ -57,10 +59,11 @@ class Config:
     # Training - per-batch alternation: for each batch, solve D analytically then take one MLP+Z gradient step
     device: str = "cpu"  # Force CPU to avoid MPS issues with nn.Embedding
     batch_size_bin: int = 1024          # Batch size (in number of observations not samples)
-    batch_size_sample: int = 8         # Batch size in number of samples
+    batch_size_sample: int = 8          # Batch size in number of samples
     lr: float = 5e-4                    # Learning rate for MLP parameters
     weight_decay: float = 1e-5          # Weight decay for MLP parameters
     max_cycles: int = 500               # Max alternation cycles
+    epochs: int = 200                   # Epochs per training phase
     latent_warmup_frac: float = 0.2     # Fraction of max_cycles over which the proximal weight decays from ρ₀ → 0
     latent_prox_scale: float = 50.0     # ρ₀ = latent_prox_scale × latent_l2_reg at cycle 0 (proximal damping strength)
     dropout: float = 0.15               # Dropout rate in MLP
