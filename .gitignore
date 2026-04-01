@@ -3,7 +3,9 @@
 *.pt
 *.pkl
 *.log
+*.npz
 **/wandb/*
-**/figures*/*
-**/results/*
-**/data/*
+**/data/*.*sv
+third_party/
+Metabarcoding/analysis/data_curation/results/
+**/__pycache__

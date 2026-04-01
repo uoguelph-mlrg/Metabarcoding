@@ -1,0 +1,105 @@
+================================================================================
+BASELINE MODELS SUMMARY REPORT
+Generated: 2026-03-17 18:37:17
+================================================================================
+
+RANKING BY RMSE (lower is better):
+------------------------------------------------------------
+ 1. latent_mlp                     RMSE=0.0024  R²=0.7825
+ 2. gradient_boosting              RMSE=0.0048  R²=0.5081
+ 3. two_stage                      RMSE=0.0050  R²=0.4668
+ 4. random_forest                  RMSE=0.0050  R²=0.4599
+ 5. decision_tree                  RMSE=0.0053  R²=0.4025
+ 6. quantile_rf                    RMSE=0.0055  R²=0.3633
+ 7. log_transform                  RMSE=0.0057  R²=0.3074
+ 8. knn                            RMSE=0.0060  R²=0.2249
+ 9. ridge_high_reg                 RMSE=0.0062  R²=0.1743
+10. ridge                          RMSE=0.0062  R²=0.1743
+11. linear_regression              RMSE=0.0062  R²=0.1743
+12. zero_inflated_ridge            RMSE=0.0065  R²=0.1108
+13. mean                           RMSE=0.0069  R²=-0.0006
+14. elasticnet                     RMSE=0.0069  R²=-0.0006
+15. tweedie                        RMSE=0.0069  R²=-0.0006
+16. zero                           RMSE=0.0070  R²=-0.0420
+
+
+DETAILED METRICS FOR TOP 5 MODELS:
+------------------------------------------------------------
+
+latent_mlp:
+  Standard Metrics:
+    RMSE:        0.0024
+    MAE:         0.0007
+    R²:          0.7825
+  Zero-Inflation Metrics:
+    MSE (zeros):    0.000002
+    MSE (non-zeros):0.000011
+    Zero Recall:    13.49%
+  Sample-Level Metrics:
+    Sample R² (mean):   0.0000 ± 0.0000
+    Sample RMSE (mean): 0.0000 ± 0.0000
+    Sample MAE (mean):  0.0000 ± 0.0000
+
+gradient_boosting:
+  Standard Metrics:
+    RMSE:        0.0048
+    MAE:         0.0011
+    R²:          0.5081
+  Zero-Inflation Metrics:
+    MSE (zeros):    0.000002
+    MSE (non-zeros):0.000063
+    Zero Recall:    10.64%
+  Sample-Level Metrics:
+    Sample R² (mean):   0.4414 ± 0.2001
+    Sample RMSE (mean): 0.0048 ± 0.0028
+    Sample MAE (mean):  0.0012 ± 0.0005
+
+two_stage:
+  Standard Metrics:
+    RMSE:        0.0050
+    MAE:         0.0011
+    R²:          0.4668
+  Zero-Inflation Metrics:
+    MSE (zeros):    0.000002
+    MSE (non-zeros):0.000070
+    Zero Recall:    2.39%
+  Sample-Level Metrics:
+    Sample R² (mean):   0.4253 ± 0.2019
+    Sample RMSE (mean): 0.0050 ± 0.0031
+    Sample MAE (mean):  0.0012 ± 0.0005
+
+random_forest:
+  Standard Metrics:
+    RMSE:        0.0050
+    MAE:         0.0011
+    R²:          0.4599
+  Zero-Inflation Metrics:
+    MSE (zeros):    0.000002
+    MSE (non-zeros):0.000071
+    Zero Recall:    0.23%
+  Sample-Level Metrics:
+    Sample R² (mean):   0.4406 ± 0.1776
+    Sample RMSE (mean): 0.0050 ± 0.0032
+    Sample MAE (mean):  0.0012 ± 0.0005
+
+decision_tree:
+  Standard Metrics:
+    RMSE:        0.0053
+    MAE:         0.0012
+    R²:          0.4025
+  Zero-Inflation Metrics:
+    MSE (zeros):    0.000002
+    MSE (non-zeros):0.000078
+    Zero Recall:    0.26%
+  Sample-Level Metrics:
+    Sample R² (mean):   0.2794 ± 0.2936
+    Sample RMSE (mean): 0.0054 ± 0.0030
+    Sample MAE (mean):  0.0013 ± 0.0005
+
+
+ZERO-INFLATION ANALYSIS:
+------------------------------------------------------------
+Best for predicting zeros: zero (MSE_zeros=0.000000)
+Best for non-zeros: latent_mlp (MSE_nonzeros=0.000011)
+
+================================================================================
