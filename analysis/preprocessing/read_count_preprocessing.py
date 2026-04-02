@@ -120,7 +120,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=["normalized", "logarithm"],
+        default=["original", "normalized", "logarithm"],
         choices=["original", "normalized", "logarithm"],
         help="Preprocessing variants to train (default: normalized logarithm)",
     )
