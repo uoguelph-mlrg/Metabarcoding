@@ -51,7 +51,7 @@ class Model(nn.Module):
 
         # Latent embedding Z: (n_bins, latent_dim) in Euclidean space
         # Updated in Phase A, frozen during Phase B
-        self.latent_embedding = nn.Embedding(n_bins, latent_dim)
+        self.latent_embedding = nn.Embedding(n_bins, latent_dim, device=device)
         # Initialize with zeros to match baseline (Issue #5)
         # Note: latent_init_std kept in signature for compatibility but not used if 0.0
         if latent_init_std > 0.0:

@@ -92,9 +92,9 @@ def run_comparison(
 		use_wandb=use_wandb,
 		wandb_module=wandb,
 		analysis_name="latent_as_input",
-		variant_name="latent_as_input",
+		variant_name="in-only",
 		run_group=run_group,
-		tags=["latent_as_input", "variant_only"],
+		tags=["latent_as_input", "variant_only", "in-only-latent"],
 	):
 		local_trainer = LocalTrainer(
 			local_cfg,
@@ -102,7 +102,7 @@ def run_comparison(
 			data_dir=data_dir,
 		)
 		local_results = local_trainer.run(use_wandb=use_wandb)
-		results["latent_as_input"] = local_results
+		results["in-only"] = local_results
 
 	return results
 
@@ -162,7 +162,7 @@ if __name__ == "__main__":
 	# Save results
 
 	output_dir = make_output_dir(__file__, args.output_dir)
-	results_path = save_variant_result(output_dir, "latent_as_input", "latent_as_input", results["latent_as_input"])
+	results_path = save_variant_result(output_dir, "latent_as_input", "in-only", results["in-only"])
 	print(f"[INFO] Saving results to: {os.path.abspath(results_path)}")
 
 	log.info(f"\n{'='*70}")
