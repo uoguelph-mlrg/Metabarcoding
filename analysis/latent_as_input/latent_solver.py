@@ -320,13 +320,30 @@ class LatentSolver:
 
             return loss, grad_bins
 
+        cache_x: Optional[np.ndarray] = None
+        cache_f: Optional[float] = None
+        cache_g: Optional[np.ndarray] = None
+
+        def _eval_cached(D_flat: np.ndarray) -> tuple[float, np.ndarray]:
+            nonlocal cache_x, cache_f, cache_g
+            if cache_x is not None and np.array_equal(D_flat, cache_x):
+                if cache_f is None or cache_g is None:
+                    raise RuntimeError("Invalid objective cache state")
+                return cache_f, cache_g
+
+            f_val, g_val = fun_and_jac(D_flat)
+            cache_x = D_flat.copy()
+            cache_f = float(f_val)
+            cache_g = g_val.copy()
+            return cache_f, cache_g
+
         def fun(D_flat: np.ndarray) -> float:
-            f, _ = fun_and_jac(D_flat)
-            return f
+            f_val, _ = _eval_cached(D_flat)
+            return f_val
 
         def jac(D_flat: np.ndarray) -> np.ndarray:
-            _, g = fun_and_jac(D_flat)
-            return g
+            _, g_val = _eval_cached(D_flat)
+            return g_val
 
         res = minimize(
             fun=fun,
@@ -336,6 +353,8 @@ class LatentSolver:
             options={
                 "maxiter": int(self.cfg.latent_convergence_maxiter),
                 "ftol": float(self.cfg.latent_convergence_tol),
+                "gtol": float(self.cfg.latent_convergence_gtol),
+                "maxfun": int(self.cfg.latent_convergence_maxfun),
             },
         )
 

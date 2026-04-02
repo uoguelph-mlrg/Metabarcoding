@@ -40,8 +40,10 @@ class Config:
 
     # Legacy parameters (kept for compatibility & reference but not used in gradient-based solver)
     latent_l2_reg: float = 1e-3             # L2 norm regularization on D (parameter r)
-    latent_convergence_tol: float = 1e-5    # Stopping tolerance for latent L-BFGS solves
-    latent_convergence_maxiter: int = 300   # Max iterations for latent L-BFGS solves
+    latent_convergence_tol: float = 1e-4    # Function tolerance for latent L-BFGS solves
+    latent_convergence_gtol: float = 1e-3   # Gradient tolerance for latent L-BFGS solves
+    latent_convergence_maxiter: int = 30    # Max iterations for latent L-BFGS solves
+    latent_convergence_maxfun: int = 120    # Max function evaluations for latent L-BFGS solves
 
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent

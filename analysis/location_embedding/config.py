@@ -35,8 +35,10 @@ class Config:
     latent_present_only: bool = False   # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
     latent_l2_reg: float = 1e-3         # L2 norm regularization on D (parameter r)
     
-    latent_convergence_tol: float = 1e-5    # Stopping tolerance for latent L-BFGS solves
-    latent_convergence_maxiter: int = 300   # Max iterations for latent L-BFGS solves
+    latent_convergence_tol: float = 1e-4    # Function tolerance for latent L-BFGS solves
+    latent_convergence_gtol: float = 1e-3   # Gradient tolerance for latent L-BFGS solves
+    latent_convergence_maxiter: int = 30    # Max iterations for latent L-BFGS solves
+    latent_convergence_maxfun: int = 120    # Max function evaluations for latent L-BFGS solves
     
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent
@@ -62,7 +64,7 @@ class Config:
     epochs: int = 200                   # Epochs per training phase
     dropout: float = 0.15               # Dropout rate in MLP
     grad_clip: Optional[float] = 1.0    # Gradient clipping value (None to disable)
-    patience: Optional[int] = 25        # Patience for early stopping in number of cycles 
+    patience: Optional[int] = None        # Patience for early stopping in number of cycles 
 
     # Location embedding settings
     use_location_embedding: bool = False

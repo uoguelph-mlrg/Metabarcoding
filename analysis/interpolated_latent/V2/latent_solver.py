@@ -433,6 +433,8 @@ class LatentSolver:
             options={
                 "maxiter": int(self.cfg.latent_convergence_maxiter),
                 "ftol": float(self.cfg.latent_convergence_tol),
+                "gtol": float(self.cfg.latent_convergence_gtol),
+                "maxfun": int(self.cfg.latent_convergence_maxfun),
             },
         )
 
@@ -555,7 +557,12 @@ class LatentSolver:
 
         res = minimize(
             fun=fun, x0=x0_use.ravel(), jac=jac, method="L-BFGS-B",
-            options={"maxiter": int(self.cfg.latent_convergence_maxiter), "ftol": float(self.cfg.latent_convergence_tol)},
+            options={
+                "maxiter": int(self.cfg.latent_convergence_maxiter),
+                "ftol": float(self.cfg.latent_convergence_tol),
+                "gtol": float(self.cfg.latent_convergence_gtol),
+                "maxfun": int(self.cfg.latent_convergence_maxfun),
+            },
         )
         if not res.success:
             log.warning(f"L-BFGS did not converge: {res.message}")
@@ -682,12 +689,39 @@ class LatentSolver:
 
             return loss, grad_H.ravel()
 
-        def fun(H_flat): f, _ = fun_and_jac(H_flat); return f
-        def jac(H_flat): _, g = fun_and_jac(H_flat); return g
+        cache_x: Optional[np.ndarray] = None
+        cache_f: Optional[float] = None
+        cache_g: Optional[np.ndarray] = None
+
+        def _eval_cached(H_flat: np.ndarray) -> tuple[float, np.ndarray]:
+            nonlocal cache_x, cache_f, cache_g
+            if cache_x is not None and np.array_equal(H_flat, cache_x):
+                if cache_f is None or cache_g is None:
+                    raise RuntimeError("Invalid objective cache state")
+                return cache_f, cache_g
+
+            f_val, g_val = fun_and_jac(H_flat)
+            cache_x = H_flat.copy()
+            cache_f = float(f_val)
+            cache_g = g_val.copy()
+            return cache_f, cache_g
+
+        def fun(H_flat: np.ndarray) -> float:
+            f_val, _ = _eval_cached(H_flat)
+            return f_val
+
+        def jac(H_flat: np.ndarray) -> np.ndarray:
+            _, g_val = _eval_cached(H_flat)
+            return g_val
 
         res = minimize(
             fun=fun, x0=x0_use.ravel(), jac=jac, method="L-BFGS-B",
-            options={"maxiter": int(self.cfg.latent_convergence_maxiter), "ftol": float(self.cfg.latent_convergence_tol)},
+            options={
+                "maxiter": int(self.cfg.latent_convergence_maxiter),
+                "ftol": float(self.cfg.latent_convergence_tol),
+                "gtol": float(self.cfg.latent_convergence_gtol),
+                "maxfun": int(self.cfg.latent_convergence_maxfun),
+            },
         )
         if not res.success:
             log.warning(f"L-BFGS did not converge: {res.message}")
