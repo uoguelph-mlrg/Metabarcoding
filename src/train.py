@@ -25,6 +25,7 @@ except ImportError:
 from config import Config, set_seed
 from dataset import MBDataset, collate_samples
 from latent_solver import LatentSolver
+from pytorch_latent_solver import TorchLatentSolver
 from loss import Loss
 from mlp import MLPModel
 from model import Model
@@ -154,6 +155,7 @@ class Trainer:
         self.best_val_loss = float("inf")
         self.last_val_metrics: Dict[str, float] = {}
         self.latent_solve_calls = 0
+        self._torch_latent_state_initialized = False
 
         self.train_losses: List[Tuple[int, float]] = []
         self.val_losses: List[Tuple[int, float]] = []
@@ -177,12 +179,20 @@ class Trainer:
         self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
         self.neighbour_graph.build()
 
-        latent_solver = LatentSolver(
-            self.cfg,
-            self.neighbour_graph,
-            embed_dim=self.cfg.embed_dim,
-            gating_fn=self.cfg.gating_fn,
-        )
+        if self.cfg.latent_solver_backend == "torch":
+            latent_solver = TorchLatentSolver(
+                self.cfg,
+                self.neighbour_graph,
+                embed_dim=self.cfg.embed_dim,
+                gating_fn=self.cfg.gating_fn,
+            )
+        else:
+            latent_solver = LatentSolver(
+                self.cfg,
+                self.neighbour_graph,
+                embed_dim=self.cfg.embed_dim,
+                gating_fn=self.cfg.gating_fn,
+            )
         latent_solver.build_V_and_H(data["train"]["X"], bin_index, method="nw")
 
         self.device = torch.device(self.cfg.device)
@@ -449,38 +459,51 @@ class Trainer:
 
         return float(running_loss / max(1, n_samples))
 
-    def solve_latent(self, prox_weight: float = 0.0) -> np.ndarray:
+    def solve_latent(self, batch: Dict[str, torch.Tensor], prox_weight: float = 0.0) -> np.ndarray:
         self.model.eval()
-        intrinsic_list: List[np.ndarray] = []
-        y_list: List[np.ndarray] = []
-        bin_list: List[np.ndarray] = []
-        sample_list: List[np.ndarray] = []
         feature_t0 = time.perf_counter()
 
         with torch.no_grad():
-            for batch in self.train_loader_bin_ordered:
-                x = batch["input"].to(self.device)
-                y = batch["target"].cpu().numpy()
-                bin_idx = batch["bin_idx"].cpu().numpy()
-                sample_idx = batch["sample_idx"].cpu().numpy()
+            inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
 
-                intrinsic = self.model.mlp(x).detach().cpu().numpy()
+            if self.loss_mode == "sample":
+                bsz, max_bins, n_feat = inputs.shape
+                inputs_flat = inputs.view(bsz * max_bins, n_feat)
+                intrinsic_flat = self.model.mlp(inputs_flat).view(bsz, max_bins, self.cfg.embed_dim)
+
+                sample_grid = sample_idx.unsqueeze(1).expand(-1, max_bins)
+                valid = mask.bool() if mask is not None else torch.ones_like(bin_idx, dtype=torch.bool)
+
+                intrinsic_vec = intrinsic_flat[valid].detach().cpu().numpy()
                 if self.cfg.embed_dim == 1:
-                    intrinsic = intrinsic.reshape(-1)
-
-                intrinsic_list.append(intrinsic)
-                y_list.append(y.reshape(-1))
-                bin_list.append(bin_idx.reshape(-1))
-                sample_list.append(sample_idx.reshape(-1))
+                    intrinsic_vec = intrinsic_vec.reshape(-1)
+                y_vec = targets[valid].detach().cpu().numpy().reshape(-1)
+                bin_ids = bin_idx[valid].detach().cpu().numpy().reshape(-1).astype(np.int64)
+                sample_ids = sample_grid[valid].detach().cpu().numpy().reshape(-1).astype(np.int64)
+            else:
+                intrinsic = self.model.mlp(inputs)
+                if self.cfg.embed_dim == 1:
+                    intrinsic = intrinsic.squeeze(-1)
+                intrinsic_vec = intrinsic.detach().cpu().numpy()
+                y_vec = targets.detach().cpu().numpy().reshape(-1)
+                bin_ids = bin_idx.detach().cpu().numpy().reshape(-1).astype(np.int64)
+                sample_ids = sample_idx.detach().cpu().numpy().reshape(-1).astype(np.int64)
 
         feature_s = time.perf_counter() - feature_t0
 
         concat_t0 = time.perf_counter()
-        intrinsic_vec = np.concatenate(intrinsic_list, axis=0)
-        y_vec = np.concatenate(y_list, axis=0)
-        bin_ids = np.concatenate(bin_list, axis=0).astype(np.int64)
-        sample_ids = np.concatenate(sample_list, axis=0).astype(np.int64)
-        x0_latent = self.model.latent_vec.detach().cpu().numpy()
+        x0_latent: Optional[np.ndarray] = None
+        x_anchor_latent: Optional[np.ndarray] = None
+
+        # Torch latent solver is stateful: initialize once from model latent, then reuse internal state.
+        if self.cfg.latent_solver_backend == "torch":
+            if not self._torch_latent_state_initialized:
+                x0_latent = self.model.latent_vec.detach().cpu().numpy()
+                self._torch_latent_state_initialized = True
+        else:
+            x0_latent = self.model.latent_vec.detach().cpu().numpy()
+            x_anchor_latent = x0_latent
+
         concat_s = time.perf_counter() - concat_t0
 
         solve_t0 = time.perf_counter()
@@ -493,7 +516,7 @@ class Trainer:
             loss_type=self.loss_type,
             x0=x0_latent,
             prox_weight=prox_weight,
-            x_anchor=x0_latent,
+            x_anchor=x_anchor_latent,
         )
         solve_s = time.perf_counter() - solve_t0
 
@@ -649,7 +672,7 @@ class Trainer:
                 batch_start = time.perf_counter()
 
                 latent_start = time.perf_counter()
-                latent_vec = self.solve_latent(prox_weight=prox_weight)
+                latent_vec = self.solve_latent(batch=batch, prox_weight=prox_weight)
                 latent_s = time.perf_counter() - latent_start
 
                 loss_value, timings = self._train_batch(batch)

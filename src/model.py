@@ -1,9 +1,8 @@
-from typing import Union, Optional, Literal
+from typing import Any, Union, Optional, Literal
 import numpy as np
 import torch
 import torch.nn as nn
 from mlp import MLPModel
-from latent_solver import LatentSolver
 from gating_functions import make_gating_function
 
 class Model(nn.Module):
@@ -27,7 +26,7 @@ class Model(nn.Module):
     def __init__(
         self,
         mlp: nn.Module,
-        latent_solver: LatentSolver,
+        latent_solver: Any,
         n_bins: int,
         device: torch.device,
         embed_dim: int = 1,

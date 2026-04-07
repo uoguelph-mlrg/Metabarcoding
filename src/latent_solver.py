@@ -58,10 +58,10 @@ class LatentSolver:
         self._solve_calls: int = 0
 
     def build_V_and_H(
-        self, 
-        X: pd.DataFrame, 
-        bin_index: Dict[Any, int], 
-        method: str = "nw"
+        self,
+        X: pd.DataFrame,
+        bin_index: Dict[Any, int],
+        method: str = "nw",
     ) -> None:
         """
         Build V (observation-to-bin indicator) and H (neighbor smoothing) matrices.
@@ -80,18 +80,18 @@ class LatentSolver:
         
         V = sparse.csr_matrix((vals_V, (rows_V, cols_V)), shape=(N_obs, self.n_bins))
         self.V = V
-        
+
         # Step 2: Build H (neighbor smoothing matrix)
         rows_H = []
         cols_H = []
         vals_H = []
-        
+
         for b in tqdm(range(self.n_bins), desc="Building H matrix", unit="bin", leave=False):
             if method == "nw":
                 neigh, w = self.ng.nw_weights_for_node(b)
             else:
                 neigh, w = self.ng.llr_coeffs_for_node(b)
-            
+
             if len(neigh) == 0:
                 # No neighbors: identity smoothing
                 log.warning(f"Bin {b} has no neighbors; using identity smoothing")

@@ -27,7 +27,7 @@ class Loss:
     def __init__(self, task: Literal["cross_entropy", "logistic"] = "cross_entropy"):
         self.task = task
         if task == "cross_entropy":
-            # We'll implement custom cross-entropy for soft targets
+            # No additional criterion needed, will compute directly in cross_entropy_soft_targets
             pass
         elif task == "logistic":
             self.criterion = nn.BCEWithLogitsLoss()

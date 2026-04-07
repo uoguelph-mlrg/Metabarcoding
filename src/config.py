@@ -43,6 +43,12 @@ class Config:
     latent_convergence_maxiter: int = 30    # Max iterations for latent L-BFGS solves
     latent_convergence_maxfun: int = 120    # Max function evaluations for latent L-BFGS solves
     latent_profile_log_interval: int = 50   # Log latent-solver timing every N solves
+    latent_solver_backend: Literal["numpy", "torch"] = "torch"
+    latent_adam_steps: int = 3
+    latent_adam_lr: float = 1e-2
+    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"
+    latent_k_hop_threshold: int = 2
+    latent_k_hop_knn: int = 64
     
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent
