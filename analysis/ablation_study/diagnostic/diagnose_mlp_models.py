@@ -18,8 +18,8 @@ def main():
     print("DIAGNOSING MLP MODEL DATA")
     print("=" * 70)
     
-    data_path = os.path.join(os.path.dirname(__file__), '../../data/ecuador_training_data.csv')
     cfg = Config()
+    cfg.data_path = os.path.join(os.path.dirname(__file__), '../../data/ecuador_training_data.csv')
     set_seed(14)
     
     # Load data WITHOUT taxonomy
@@ -28,7 +28,7 @@ def main():
     print("=" * 70)
     
     data_no_tax, _, bin_index, sample_index, _, split_indices = load_data_with_taxonomy(
-        data_path, cfg, include_taxonomy=False
+        cfg.data_path, cfg, include_taxonomy=False
     )
     
     X_train_no_tax = data_no_tax["train"]["X"]
@@ -48,7 +48,7 @@ def main():
     
     set_seed(14)
     data_with_tax, taxonomy_df, _, _, encoders, _ = load_data_with_taxonomy(
-        data_path, cfg, include_taxonomy=True, fixed_split_indices=split_indices
+        cfg.data_path, cfg, include_taxonomy=True, fixed_split_indices=split_indices
     )
     
     X_train_with_tax = data_with_tax["train"]["X"]

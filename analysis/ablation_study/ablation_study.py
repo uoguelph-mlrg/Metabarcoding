@@ -12,8 +12,7 @@ All models use cross-entropy loss for fair comparison.
 Results are saved to pickle for visualization.
 
 Usage:
-    python ablation_study.py --data_path ../../data/data_merged.csv
-    python ablation_study.py --data_path ../../data/data_merged.csv --no_wandb
+    python ablation_study.py 
 """
 from __future__ import annotations
 
@@ -60,7 +59,6 @@ TAXONOMY_COLS = ["phylum", "class", "order", "family", "subfamily", "genus", "sp
 
 
 def load_data_with_taxonomy(
-    data_path: str, 
     config: Config,
     include_taxonomy: bool = False,
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
@@ -69,7 +67,6 @@ def load_data_with_taxonomy(
     Load data with optional taxonomic features encoded as integers.
     
     Args:
-        data_path: Path to the CSV data file
         config: Configuration object
         include_taxonomy: Whether to include taxonomy features
         fixed_split_indices: If provided, use these sample indices for splits
@@ -78,7 +75,7 @@ def load_data_with_taxonomy(
     Returns:
         Tuple of (splits, taxonomy_data, bin_index, sample_index, taxonomy_encoders, split_indices)
     """
-    df = pd.read_csv(data_path)
+    df = pd.read_csv(config.data_path)
     df = df.rename(columns={"sample-eventid": "sample_id"})
     
     # Parse date feature
@@ -651,7 +648,6 @@ def compute_regression_metrics(preds: np.ndarray, targets: np.ndarray) -> Dict[s
 # ============================================================================
 
 def run_ablation_study(
-    data_path: str, 
     cfg: Config, 
     use_wandb: bool = True,
     max_epochs: int = 100,
@@ -678,13 +674,12 @@ def run_ablation_study(
     
     # Create splits using the SAME preprocessing as the latent model (utils.load)
     # We only use this call to determine split indices deterministically.
-    _, _, _, _, split_indices = load(data_path, cfg, save_data=False)
+    _, _, _, _, split_indices = load(cfg.data_path, cfg, save_data=False)
     
     # ========================================================================
     # Step 2: Build non-taxonomy data once for all ablation variants
     # ========================================================================
     data_no_tax, bins_df, bin_index, sample_index, _, _ = load_data_with_taxonomy(
-        data_path,
         cfg,
         include_taxonomy=False,
         fixed_split_indices=split_indices,
@@ -809,8 +804,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Ablation Study: MLP variants vs MLP + Latent"
     )
-    parser.add_argument("--data_path", type=str, required=True,
-                        help="Path to data CSV file")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable verbose logging")
     parser.add_argument("--no_wandb", action="store_true",
@@ -833,7 +826,6 @@ if __name__ == "__main__":
     
     # Run ablation study
     results = run_ablation_study(
-        args.data_path,
         cfg,
         use_wandb=use_wandb,
         max_epochs=args.max_epochs,

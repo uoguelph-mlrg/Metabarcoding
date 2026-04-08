@@ -433,9 +433,8 @@ class LatentMLPModel(BaselineModel):
     the same test set is used for fair comparison.
     """
 
-    def __init__(self, data_path: str, fixed_split_indices: Optional[Dict] = None):
+    def __init__(self, fixed_split_indices: Optional[Dict] = None):
         super().__init__(name="Latent MLP")
-        self.data_path = os.path.abspath(data_path)
         self.fixed_split_indices = fixed_split_indices
         # (sample_id, bin_uri) -> predicted relative abundance
         self._pred_lookup: Dict[tuple, float] = {}
@@ -456,7 +455,6 @@ class LatentMLPModel(BaselineModel):
         cfg = Config()
         trainer = Trainer(
             cfg,
-            data_path=self.data_path,
             fixed_split_indices=self.fixed_split_indices,
         )
         trainer.run(use_wandb=False)

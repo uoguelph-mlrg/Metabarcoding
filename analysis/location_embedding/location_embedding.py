@@ -12,11 +12,8 @@ All models use the same training data and random seed for fair comparison.
 Results are saved to pickle for analysis and visualization.
 
 Usage:
-    python location_embedding.py --data_path ../../data/data_merged.csv
-    python location_embedding.py --data_dir ../../data --no_wandb
-    python location_embedding.py --data_dir ../../data \\
-        --satclip_ckpt_path /path/to/satclip.pth \\
-        --range_db_path /path/to/range_db.npz
+    python location_embedding.py
+    python location_embedding.py --satclip_ckpt_path /path/to/satclip.pth --range_db_path /path/to/range_db.npz
 """
 from __future__ import annotations
 
@@ -91,14 +88,12 @@ def _make_cfg(
 # ---------------------------------------------------------------------------
 # Removed: TrainerWithEmbeddings subclass
 # Config-driven approach: set fields on Config, pass to BaseTrainer directly.
-# BaseTrainer.__init__ calls load(data_path, self.cfg, ...) which reads the
+# BaseTrainer.__init__ calls load(self.cfg, ...) which reads the
 # location embedding fields off the config object via the local utils.py.
 # ---------------------------------------------------------------------------
 
 
 def run_comparison(
-    data_path: Optional[str],
-    data_dir: Optional[str],
     use_wandb: bool = True,
     satclip_ckpt_path: Optional[str] = None,
     range_db_path: Optional[str] = None,
@@ -117,8 +112,6 @@ def run_comparison(
     Train location-embedding variants (no baseline retraining) and return results.
     
     Args:
-        data_path: Path to CSV data file
-        data_dir: Path to directory with processed CSVs
         use_wandb: Whether to log to Weights & Biases
         satclip_ckpt_path: Optional path to SatCLIP checkpoint
         range_db_path: Optional RANGE database (.npz), required for RANGE/RANGE+
@@ -136,18 +129,6 @@ def run_comparison(
 
     root_dir = os.path.dirname(os.path.abspath(__file__))
     
-    # =========================================================================
-    # DATA PATH
-    # =========================================================================
-    if data_path is None and data_dir is None:
-        data_path = os.path.abspath(
-            os.path.join(root_dir, "..", "..", "data", "data_merged.csv")
-        )
-        log.info(f"No data path provided. Using default: {data_path}")
-
-    # =========================================================================
-    # LOCATION EMBEDDING VARIANTS
-    # =========================================================================
     if embedders is None:
         embedders = ["satclip", "geoclip", "range", "alphaearth"]
     
@@ -179,8 +160,6 @@ def run_comparison(
             location_embedder_batch_size=location_embedder_batch_size,
             **model_kwargs,
         )
-        if data_path is not None:
-            cfg.data_path = data_path
 
         try:
             with variant_wandb_run(
@@ -192,11 +171,7 @@ def run_comparison(
                 tags=["location_embedding", embedder_name, "variant_only"],
                 config={"embedder": embedder_name, **cfg.__dict__},
             ):
-                trainer = BaseTrainer(
-                    cfg,
-                    data_path=data_path,
-                    data_dir=data_dir,
-                )
+                trainer = BaseTrainer(cfg)
                 embedder_results = trainer.run(use_wandb=use_wandb)
                 required_keys = ("predictions", "targets", "sample_labels", "bin_labels")
                 missing = [k for k in required_keys if k not in embedder_results]
@@ -230,20 +205,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Model Comparison: Baseline vs Location Embedding Variants"
     )
-    group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument(
-        "--data_path",
-        type=str,
-        default=None,
-        help="Path to raw data CSV file (e.g. ../../data/data_merged.csv)",
-    )
-    group.add_argument(
-        "--data_dir",
-        type=str,
-        default=None,
-        help="Path to directory containing processed CSV files (X_*.csv, y_*.csv)",
-    )
-    
     # Location embedder parameters
     parser.add_argument(
         "--satclip_ckpt_path",
@@ -329,15 +290,6 @@ if __name__ == "__main__":
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    # Decide data source
-    data_path = args.data_path
-    data_dir = args.data_dir
-    if data_path is None and data_dir is None:
-        data_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "data", "data_merged.csv")
-        )
-        log.info(f"No --data_path or --data_dir provided. Using default: {data_path}")
-
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     run_group = make_run_group("location_embedding")
     if not use_wandb and not WANDB_AVAILABLE:
@@ -345,8 +297,6 @@ if __name__ == "__main__":
 
     # Run comparison
     results, failures = run_comparison(
-        data_path=data_path,
-        data_dir=data_dir,
         use_wandb=use_wandb,
         satclip_ckpt_path=args.satclip_ckpt_path,
         range_db_path=args.range_db_path,

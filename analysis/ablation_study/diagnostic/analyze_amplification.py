@@ -33,7 +33,7 @@ def analyze_amplification():
     cfg = Config()
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    data_path = os.path.join(script_dir, "../../data/ecuador_training_data.csv")
+    cfg.data_path = os.path.join(script_dir, "../../data/ecuador_training_data.csv")
     
     print("="*70)
     print("REFINED ANALYSIS: Latent as Bin-Specific Amplification Factor")
@@ -41,7 +41,7 @@ def analyze_amplification():
     
     # Create trainer with the UPDATED architecture [128, 64]
     print("\n1. Creating Trainer (now with [128, 64] hidden dims)...")
-    trainer = Trainer(cfg, data_path)
+    trainer = Trainer(cfg)
     
     print(f"\n2. Model Architecture Comparison:")
     print(f"   MLP + Latent:")

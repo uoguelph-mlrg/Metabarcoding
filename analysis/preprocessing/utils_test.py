@@ -45,7 +45,6 @@ TAXONOMY_FEATURES = [
 ]
 
 def load(
-    data_path: str, 
     config: Config, 
     save_data: bool = True,
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
@@ -55,7 +54,6 @@ def load(
     Load and preprocess the CSV data.
 
     Args:
-        data_path: Path to CSV data file
         config: Configuration object with train_frac, val_frac
         save_data: Whether to save split CSVs to disk
         fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing
@@ -71,7 +69,7 @@ def load(
         - sample_index: mapping sample_id -> row index
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
     """
-    df = pd.read_csv(data_path)
+    df = pd.read_csv(config.data_path)
 
     # Rename columns to match expected format
     df = df.rename(columns={
@@ -203,9 +201,9 @@ def load(
     
     # Save the data splits in the `data` folder
     if save_data:
-        data_dir = os.path.dirname(data_path)
+        data_dir = os.path.dirname(config.data_path)
         # Create subdirectory for this preprocessing method
-        save_dir = os.path.join(data_dir, read_count_preprocessing)
+        save_dir = os.path.join(data_dir, config.read_count_preprocessing)
         os.makedirs(save_dir, exist_ok=True)
 
         for X, y, split in [(X_train,y_train,"train"), (X_val,y_val,"val"), (X_test,y_test,"test")]:
@@ -305,8 +303,6 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Generate datasets with different read count preprocessing")
-    parser.add_argument("--data_path", type=str, default="../../data/data_merged.csv",
-                       help="Path to raw data CSV")
     parser.add_argument("--seed", type=int, default=14, help="Random seed")
     args = parser.parse_args()
     
@@ -329,7 +325,6 @@ if __name__ == "__main__":
     # First pass: generate the split indices
     log.info("\nGenerating split indices...")
     _, _, _, _, split_indices = load(
-        args.data_path, 
         cfg, 
         save_data=False,
         read_count_preprocessing="original"
@@ -342,7 +337,6 @@ if __name__ == "__main__":
         log.info(f"{'='*70}")
         
         _ = load(
-            args.data_path,
             cfg,
             save_data=True,
             fixed_split_indices=split_indices,

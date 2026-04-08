@@ -10,8 +10,7 @@ All models use the same softplus gating function to isolate the effect of dimens
 Each variant is saved to its own pickle file for later comparison.
 
 Usage:
-    python dimensionality_increase.py --data_path ../../data/data_merged.csv
-    python dimensionality_increase.py --data_path ../../data/data_merged.csv --no_wandb
+    python dimensionality_increase.py
 """
 from __future__ import annotations
 
@@ -56,7 +55,6 @@ except ImportError:
 
 
 def run_comparison(
-    data_path: str,
     use_wandb: bool = True,
     dimensions: Optional[List[int]] = None,
     run_group: Optional[str] = None,
@@ -65,7 +63,6 @@ def run_comparison(
     Train selected dimensionality variants.
     
     Args:
-        data_path: Path to the training data CSV
         use_wandb: Whether to log to Weights & Biases
         dimensions: List of embedding dimensions to test. If None, tests [2, 5, 10, 20, 50]
     
@@ -102,7 +99,7 @@ def run_comparison(
             tags=["dimensionality_analysis", variant, "variant_only"],
             config={"embed_dim": cfg.embed_dim, "gating_fn": cfg.gating_fn},
         ):
-            trainer = train_module.Trainer(cfg, data_path)
+            trainer = train_module.Trainer(cfg)
             log.info(f"Model type: {type(trainer.model).__name__}")
             log.info(f"Gating function: {trainer.model.gating_fn}")
             
@@ -126,8 +123,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Latent Dimensionality Analysis: Testing Impact of Embedding/Output Dimensions"
     )
-    parser.add_argument("--data_path", type=str, required=True, 
-                        help="Path to data CSV file")
     parser.add_argument("--verbose", "-v", action="store_true", 
                         help="Enable verbose logging")
     parser.add_argument("--no_wandb", action="store_true", 
@@ -147,7 +142,6 @@ if __name__ == "__main__":
     
     # Run comparison
     results = run_comparison(
-        args.data_path,
         use_wandb=use_wandb,
         dimensions=args.dimensions,
         run_group=run_group,

@@ -30,8 +30,6 @@ COLORS_JSON_OVERRIDE=""
 declare -a TARGETS=()
 declare -a DEFAULT_TARGETS=(
   "BarcodeBERT"
-  "interpolated_latent/V1"
-  "interpolated_latent/V2"
   "interpolated_latent/V3"
   "interpolated_latent/V4"
   "location_embedding"
@@ -60,7 +58,6 @@ Options:
   --all                    Submit all default targets
   --baseline-train         Train baseline model once (from Metabarcoding/)
   --list-targets           Print supported targets and exit
-  --data-path PATH         Override Data CSV path (default: PROJECT_ROOT/data/data_merged.csv)
   --baseline-results PATH  Path to one reusable baseline pickle from src/train.py
   --baseline-key KEY       Model key to use for baseline in merged visualization (default: baseline)
   --no-baseline            Do not include baseline in visualization input
@@ -79,8 +76,6 @@ Options:
 
 Supported targets (first batch):
   BarcodeBERT
-  interpolated_latent/V1
-  interpolated_latent/V2
   interpolated_latent/V3
   interpolated_latent/V4
   location_embedding
@@ -112,11 +107,6 @@ while [[ $# -gt 0 ]]; do
     --list-targets)
       LIST_TARGETS="1"
       shift
-      ;;
-    --data-path)
-      DATA_PATH="$2"
-      DATA_PATH_SET="1"
-      shift 2
       ;;
     --baseline-results)
       BASELINE_RESULTS="$2"
@@ -194,8 +184,6 @@ fi
 if [[ "$LIST_TARGETS" == "1" ]]; then
   cat <<'EOF'
 BarcodeBERT
-interpolated_latent/V1
-interpolated_latent/V2
 interpolated_latent/V3
 interpolated_latent/V4
 location_embedding
@@ -265,26 +253,6 @@ resolve_target() {
       FIGURES_DIR='figures/BarcodeBERT'
       DEFAULT_LABELS_JSON='{"baseline":"Taxonomy","barcode_bert":"BarcodeBERT"}'
       DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","barcode_bert":"#9b59b6"}'
-      DEFAULT_TIME="8:00:00"
-      ;;
-    interpolated_latent/V1)
-      TARGET_DIR="interpolated_latent/V1"
-      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __OPTIONAL_DATA_ARG__'
-      RESULTS_PATTERNS='interpolated_latent/V1/results/interpolated_latent_v1_*.pkl'
-      FIGURES_DIR='figures/interpolated_latent/V1'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#1f6feb","interpolated_latent":"#d97706"}'
-      DEFAULT_TIME="8:00:00"
-      ;;
-    interpolated_latent/V2)
-      TARGET_DIR="interpolated_latent/V2"
-      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __OPTIONAL_DATA_ARG__'
-      RESULTS_PATTERNS='interpolated_latent/V2/results/interpolated_latent_v2_*.pkl'
-      FIGURES_DIR='figures/interpolated_latent/V2'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#1f6feb","interpolated_latent":"#d97706"}'
       DEFAULT_TIME="8:00:00"
       ;;
     interpolated_latent/V3)

@@ -56,8 +56,9 @@ def main():
     cfg = Config()
     cfg.max_epochs = 100
     cfg.no_wandb = True
+    cfg.data_path = str(data_path)
     
-    trainer = Trainer(cfg, str(data_path))
+    trainer = Trainer(cfg)
     trainer.run(use_wandb=False)
     
     # Get latent factors from the model's latent_vec parameter

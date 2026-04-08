@@ -163,6 +163,7 @@ class Trainer:
         self.global_step = 0
         self.best_val_loss = float("inf")
         self.last_val_metrics: Dict[str, float] = {}
+        self._latent_state_initialized = False
 
         self.train_losses: List[Tuple[int, float]] = []
         self.val_losses: List[Tuple[int, float]] = []
@@ -190,7 +191,7 @@ class Trainer:
             self.cfg,
             self.neighbour_graph,
         )
-        latent_solver.build_V_and_H(data["train"]["X"], bin_index, method="nw")
+        latent_solver.build_interpolation_matrix(data["train"]["X"], bin_index, method="nw")
 
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
@@ -483,7 +484,15 @@ class Trainer:
         bin_ids = np.concatenate(bin_list, axis=0).astype(np.int64)
         sample_ids = np.concatenate(sample_list, axis=0).astype(np.int64)
 
-        x0_latent = self.model.latent_vec.detach().cpu().numpy()
+        x0_latent: Optional[np.ndarray] = None
+        x_anchor_latent: Optional[np.ndarray] = None
+
+        if not self._latent_state_initialized:
+            x0_latent = self.model.latent_vec.detach().cpu().numpy()
+            self._latent_state_initialized = True
+        elif prox_weight > 0.0:
+            x_anchor_latent = self.model.latent_vec.detach().cpu().numpy()
+
         latent_vec = self.model.latent_solver.solve(
             y=y_vec,
             intrinsic_vec=intrinsic_vec,
@@ -492,7 +501,7 @@ class Trainer:
             loss_type=self.loss_type,
             x0=x0_latent,
             prox_weight=prox_weight,
-            x_anchor=x0_latent,
+            x_anchor=x_anchor_latent,
         )
         self.model.set_latent_vec(latent_vec)
         return latent_vec

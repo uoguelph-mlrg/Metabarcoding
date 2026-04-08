@@ -1,13 +1,16 @@
 from dataclasses import dataclass
 from math import e
 from typing import Optional, Literal
+import os
 import numpy as np
 import torch
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 @dataclass
 class Config:
     # Run configuration
-    data_path: str = "data/data_merged.csv"    # Path to raw data CSV file
+    data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")    # Path to raw data CSV file
     results_dir: str = "../results"                      # Directory where run artifacts are saved
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
     checkpoint_every: int = 5                             # Save periodic checkpoint every N epochs
@@ -27,7 +30,7 @@ class Config:
 
     # DNA embedding settings (used when use_embedding=True)
     embedding_path: Optional[str] = None       # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = "../../../data/data_merged.csv"    # path to TSV with 'bin_uri' and 'seq' columns
+    barcode_data_path: Optional[str] = None    # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"        # distance metric: "cosine" or "euclidean"
 
     # Latent solver - regularization settings
@@ -39,6 +42,11 @@ class Config:
     latent_convergence_gtol: float = 1e-3   # Gradient tolerance for latent L-BFGS solves
     latent_convergence_maxiter: int = 30    # Max iterations for latent L-BFGS solves
     latent_convergence_maxfun: int = 120    # Max function evaluations for latent L-BFGS solves
+    latent_adam_steps: int = 15
+    latent_adam_lr: float = 1e-2
+    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"
+    latent_k_hop_threshold: int = 2
+    latent_hop_knn_cap: int = 64
     
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent
@@ -64,7 +72,7 @@ class Config:
     epochs: int = 200                   # Epochs per training phase
     dropout: float = 0.15               # Dropout rate in MLP
     grad_clip: Optional[float] = 1.0    # Gradient clipping value (None to disable)
-    patience: Optional[int] = None        # Patience for early stopping in number of cycles 
+    patience: Optional[int] = None      # Patience for early stopping in number of cycles 
 
     # Location embedding settings
     use_location_embedding: bool = False

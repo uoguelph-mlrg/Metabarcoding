@@ -5,8 +5,7 @@ This script trains only loss-function variants (no baseline retraining).
 Each variant is saved to its own pickle file for later comparison.
 
 Usage:
-    python loss_comparison.py --data_path ../../data/data_merged.csv
-    python loss_comparison.py --data_path ../../data/data_merged.csv --variants logistic --no_wandb
+    python loss_comparison.py --variants logistic --no_wandb
 """
 from __future__ import annotations
 
@@ -42,7 +41,6 @@ except ImportError:
 
 
 def run_comparison(
-    data_path: str,
     cfg: Config,
     variants: List[str],
     use_wandb: bool = True,
@@ -52,7 +50,6 @@ def run_comparison(
     Train selected loss variants.
     
     Args:
-        data_path: Path to the training data CSV
         cfg: Configuration object
         use_wandb: Whether to log to Weights & Biases
     
@@ -76,7 +73,7 @@ def run_comparison(
             tags=["loss_comparison", variant, "variant_only"],
             config={**cfg.__dict__, "variant": variant},
         ):
-            trainer = Trainer(cfg, data_path)
+            trainer = Trainer(cfg)
             results[variant] = trainer.run(use_wandb=use_wandb)
     
     return results
@@ -94,8 +91,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train loss-function variants without retraining baseline"
     )
-    parser.add_argument("--data_path", type=str, required=True, 
-                        help="Path to data CSV file")
     parser.add_argument("--verbose", "-v", action="store_true", 
                         help="Enable verbose logging")
     parser.add_argument("--no_wandb", action="store_true", 
@@ -131,7 +126,6 @@ if __name__ == "__main__":
     
     # Run comparison
     results = run_comparison(
-        args.data_path,
         cfg,
         variants=args.variants,
         use_wandb=use_wandb,

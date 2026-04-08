@@ -39,6 +39,7 @@ class Config:
     latent_init_std: float = 0.0        # Initialize Z with zeros
     latent_lr: float = 2e-2             # Learning rate for Z embedding (input side, Phase B)
     latent_norm_reg: float = 0.0        # Disabled for latent-as-input Z loss (kept for compatibility)
+    latent_z_norm_reg_factor: float = 1.0  # Scale factor for per-element Z norm regularization
     latent_smooth_reg: float = 1e-4     # Smoothness regularization on Z (Phase B)
     latent_present_only: bool = False   # If True, only fit latent on observations where y > 0
 
@@ -48,6 +49,12 @@ class Config:
     latent_convergence_gtol: float = 1e-3   # Gradient tolerance for latent L-BFGS solves
     latent_convergence_maxiter: int = 30    # Max iterations for latent L-BFGS solves
     latent_convergence_maxfun: int = 120    # Max function evaluations for latent L-BFGS solves
+    latent_device: Optional[str] = None
+    latent_adam_steps: int = 3
+    latent_adam_lr: float = 1e-2
+    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"
+    latent_k_hop_threshold: int = 2
+    latent_hop_knn_cap: int = 64
     
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent

@@ -16,14 +16,14 @@ def final_diagnostic():
     cfg = Config()
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    data_path = os.path.join(script_dir, "../../data/ecuador_training_data.csv")
+    cfg.data_path = os.path.join(script_dir, "../../data/ecuador_training_data.csv")
     
     print("="*70)
     print("FINAL DIAGNOSTIC: Why Latent Hurts Correlation")
     print("="*70)
     
     # Create trainer and train MLP
-    trainer = Trainer(cfg, data_path)
+    trainer = Trainer(cfg)
     for _ in range(50):
         trainer.train_epoch()
     

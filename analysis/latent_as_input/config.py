@@ -44,6 +44,12 @@ class Config:
     latent_convergence_gtol: float = 1e-3   # Gradient tolerance for latent L-BFGS solves
     latent_convergence_maxiter: int = 30    # Max iterations for latent L-BFGS solves
     latent_convergence_maxfun: int = 120    # Max function evaluations for latent L-BFGS solves
+    latent_device: Optional[str] = None
+    latent_adam_steps: int = 3
+    latent_adam_lr: float = 1e-2
+    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"
+    latent_k_hop_threshold: int = 2
+    latent_hop_knn_cap: int = 64
 
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent
@@ -64,6 +70,8 @@ class Config:
     lr: float = 5e-4                    # Learning rate for MLP parameters
     weight_decay: float = 1e-5          # Weight decay for MLP parameters
     epochs: int = 200                   # Epochs per training phase
+    latent_warmup_frac: float = 0.2     # Fraction of epochs over which proximal damping decays from ρ0 → 0
+    latent_prox_scale: float = 50.0     # ρ0 = latent_prox_scale × latent_l2_reg at epoch 0
     dropout: float = 0.15               # Dropout rate in MLP
     grad_clip: Optional[float] = 1.0    # Gradient clipping value (None to disable)
 

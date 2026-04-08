@@ -16,14 +16,14 @@ def diagnose_latent_solver():
     cfg = Config()
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    data_path = os.path.join(script_dir, "../../data/ecuador_training_data.csv")
+    cfg.data_path = os.path.join(script_dir, "../../data/ecuador_training_data.csv")
     
     print("="*70)
     print("DEEP DIAGNOSTIC: Latent Solver Analysis")
     print("="*70)
     
     # Create trainer
-    trainer = Trainer(cfg, data_path)
+    trainer = Trainer(cfg)
     
     # Train MLP only for a bit
     print("\n1. Training MLP for 50 epochs...")

@@ -6,8 +6,7 @@ Trains the model twice using cross-entropy loss:
 2. latent_present_only=False – latent is updated on all observations (present + absent)
 
 Usage:
-    python latent_present_only_comparison.py --data_dir ../../data
-    python latent_present_only_comparison.py --data_path ../../data/ecuador_training_data.csv --no_wandb
+    python latent_present_only_comparison.py
 """
 from __future__ import annotations
 
@@ -44,8 +43,6 @@ SEED = 42
 
 def run_comparison(
     cfg: Config,
-    data_path: str | None,
-    data_dir: str | None,
     use_wandb: bool,
 ) -> Dict[str, Any]:
     results = {}
@@ -60,7 +57,7 @@ def run_comparison(
         run_cfg.latent_present_only = variant["latent_present_only"]
 
         set_seed(SEED)
-        trainer = Trainer(run_cfg, data_path=data_path, data_dir=data_dir)
+        trainer = Trainer(run_cfg)
 
         if use_wandb and WANDB_AVAILABLE:
             wandb.init(
@@ -95,10 +92,6 @@ def save_results(results: Dict[str, Any], output_dir: str) -> str:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Latent present-only vs all-BINs comparison")
     group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument("--data_path", type=str, default=None,
-                       help="Path to raw data CSV  (e.g. ../../data/ecuador_training_data.csv)")
-    group.add_argument("--data_dir", type=str, default=None,
-                       help="Path to directory with processed CSV files (X_*.csv, y_*.csv, …)")
     parser.add_argument("--output_dir", type=str,
                         default=os.path.join(os.path.dirname(__file__), "results"),
                         help="Directory in which to save results pickle")
@@ -109,16 +102,10 @@ if __name__ == "__main__":
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    # Fall back to raw CSV if neither option is provided
-    data_path = args.data_path
-    data_dir  = args.data_dir
-    if data_path is None and data_dir is None:
-        data_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "ecuador_training_data.csv")
-
     cfg = Config()
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
 
-    results = run_comparison(cfg, data_path=data_path, data_dir=data_dir, use_wandb=use_wandb)
+    results = run_comparison(cfg, use_wandb=use_wandb)
 
     out_path = save_results(results, args.output_dir)
 

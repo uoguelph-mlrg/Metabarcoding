@@ -1,12 +1,21 @@
 from typing import Any, Dict, Optional, Literal
+import os
+import sys
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn.functional as F
 from scipy import sparse
 from scipy.sparse.linalg import cg, LinearOperator
 from scipy.optimize import minimize
-from neighbor_graph import NeighbourGraph
-from config import Config
-from gating_functions import make_gating_function
+
+_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+from neighbor_graph import NeighbourGraph  # type: ignore[import-not-found]
+from config import Config  # type: ignore[import-not-found]
+from gating_functions import make_gating_function  # type: ignore[import-not-found]
 from tqdm import tqdm
 import logging as log
 
@@ -57,8 +66,54 @@ class LatentSolver:
         self.A: Optional[sparse.csc_matrix] = None    # precomputed LHS (V@H_smooth)^T(V@H_smooth) + reg
         self.S: Optional[sparse.csc_matrix] = None    # (I - H_smooth)^T (I - H_smooth)
         self.VH: Optional[sparse.csr_matrix] = None   # V @ H_smooth, used for RHS in CG solve
+        self._latent_state: Optional[np.ndarray] = None
+        self._latent_param: Optional[torch.nn.Parameter] = None
+        self._optimizer: Optional[torch.optim.Optimizer] = None
 
-    def build_V_and_H(
+        latent_device = getattr(self.cfg, "latent_device", None)
+        if latent_device is not None:
+            self.device = torch.device(latent_device)
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
+
+    def _expected_latent_shape(self) -> tuple[int, ...]:
+        if self.embed_dim > 1:
+            return (self.n_bins, self.embed_dim)
+        return (self.n_bins,)
+
+    def _zeros_latent(self) -> np.ndarray:
+        return np.zeros(self._expected_latent_shape(), dtype=np.float64)
+
+    def is_state_initialized(self) -> bool:
+        return self._latent_param is not None and self._optimizer is not None
+
+    def reset_state(self) -> None:
+        self._latent_param = None
+        self._optimizer = None
+        self._latent_state = None
+
+    def export_state(self) -> Dict[str, np.ndarray | Dict[str, Any]]:
+        if self._latent_param is None:
+            raise RuntimeError("Latent state not initialized")
+        return {
+            "latent": self._latent_param.detach().cpu().numpy().copy(),
+            "optimizer": self._optimizer.state_dict() if self._optimizer is not None else {},
+        }
+
+    def load_state(self, latent: np.ndarray, optimizer_state: Optional[Dict[str, Any]] = None) -> None:
+        latent_arr = np.asarray(latent, dtype=np.float64)
+        if latent_arr.shape != self._expected_latent_shape():
+            raise ValueError(f"latent has shape {latent_arr.shape}, expected {self._expected_latent_shape()}")
+        self._latent_state = latent_arr.copy()
+        latent_t = torch.as_tensor(self._latent_state, dtype=torch.float32, device=self.device)
+        self._latent_param = torch.nn.Parameter(latent_t.clone())
+        self._optimizer = torch.optim.Adam([self._latent_param], lr=float(getattr(self.cfg, "latent_adam_lr", 1e-2)))
+        if optimizer_state is not None and self._optimizer is not None:
+            self._optimizer.load_state_dict(optimizer_state)
+
+    def build_interpolation_matrix(
         self, 
         X: pd.DataFrame, 
         bin_index: Dict[Any, int], 
@@ -168,8 +223,35 @@ class LatentSolver:
         Returns:
             latent: shape (n_bins,) for scalar mode, (n_bins, embed_dim) for vector mode
         """
+        backend = str(getattr(self.cfg, "latent_solver_backend", "torch")).lower()
+        if backend == "torch":
+            return self._solve_torch_adam(
+                y=y,
+                intrinsic_vec=intrinsic_vec,
+                final_weights=final_weights,
+                bin_ids=bin_ids,
+                sample_ids=sample_ids,
+                loss_type=loss_type,
+                x0=x0,
+                prox_weight=prox_weight,
+                x_anchor=x_anchor,
+                use_interpolated_latent=use_interpolated_latent,
+                interpolated_bin_mask=interpolated_bin_mask,
+                interpolated_obs_mask=interpolated_obs_mask,
+            )
+
+        if x0 is not None:
+            x0_use = np.asarray(x0, dtype=np.float64)
+        elif self._latent_state is not None:
+            x0_use = self._latent_state.copy()
+        else:
+            x0_use = self._zeros_latent()
+
+        if x0_use.shape != self._expected_latent_shape():
+            raise ValueError(f"x0 has shape {x0_use.shape}, expected {self._expected_latent_shape()}")
+
         # Default anchor to warm-start if not explicitly provided
-        anchor = x_anchor if x_anchor is not None else x0
+        anchor = x_anchor if x_anchor is not None else x0_use
         mixed_mask = self._normalize_interpolated_bin_mask(interpolated_bin_mask)
         obs_mask = self._normalize_interpolated_obs_mask(interpolated_obs_mask, y.shape[0])
 
@@ -179,9 +261,9 @@ class LatentSolver:
             if bin_ids is None:
                 raise ValueError("bin_ids are required for embed_dim > 1")
             if loss_type == "logistic":
-                return self._solve_logistic_vector(
+                latent = self._solve_logistic_vector(
                     y=y, intrinsic_vec=intrinsic_vec, final_weights=final_weights,
-                    bin_ids=bin_ids, x0=x0, prox_weight=prox_weight, x_anchor=anchor,
+                    bin_ids=bin_ids, x0=x0_use, prox_weight=prox_weight, x_anchor=anchor,
                     use_interpolated_latent=use_interpolated_latent,
                     interpolated_bin_mask=mixed_mask,
                     interpolated_obs_mask=obs_mask,
@@ -189,9 +271,9 @@ class LatentSolver:
             else:
                 if sample_ids is None:
                     raise ValueError("sample_ids are required for cross_entropy latent solving")
-                return self._solve_cross_entropy_lbfgs_vector(
+                latent = self._solve_cross_entropy_lbfgs_vector(
                     y=y, intrinsic_vec=intrinsic_vec, final_weights=final_weights,
-                    bin_ids=bin_ids, sample_ids=sample_ids, x0=x0,
+                    bin_ids=bin_ids, sample_ids=sample_ids, x0=x0_use,
                     prox_weight=prox_weight, x_anchor=anchor,
                     use_interpolated_latent=use_interpolated_latent,
                     interpolated_bin_mask=mixed_mask,
@@ -199,8 +281,8 @@ class LatentSolver:
                 )
         else:
             if loss_type == "logistic":
-                return self._solve_logistic(
-                    y=y, intrinsic_vec=intrinsic_vec, x0=x0,
+                latent = self._solve_logistic(
+                    y=y, intrinsic_vec=intrinsic_vec, x0=x0_use,
                     prox_weight=prox_weight, x_anchor=anchor,
                     use_interpolated_latent=use_interpolated_latent,
                     interpolated_bin_mask=mixed_mask,
@@ -209,18 +291,165 @@ class LatentSolver:
             else:
                 if bin_ids is None or sample_ids is None:
                     raise ValueError("bin_ids and sample_ids are required for cross_entropy latent solving")
-                return self._solve_cross_entropy_lbfgs(
+                latent = self._solve_cross_entropy_lbfgs(
                     y=y,
                     intrinsic_vec=intrinsic_vec,
                     bin_ids=bin_ids,
                     sample_ids=sample_ids,
-                    x0=x0,
+                    x0=x0_use,
                     prox_weight=prox_weight,
                     x_anchor=anchor,
                     use_interpolated_latent=use_interpolated_latent,
                     interpolated_bin_mask=mixed_mask,
                     interpolated_obs_mask=obs_mask,
                 )
+
+        self._latent_state = np.asarray(latent, dtype=np.float64).copy()
+        return self._latent_state.copy()
+
+    def _ensure_torch_state(self, x0: np.ndarray) -> None:
+        if self._latent_param is not None and self._optimizer is not None:
+            return
+        x0_arr = np.asarray(x0, dtype=np.float32)
+        if self.embed_dim == 1 and x0_arr.ndim == 1:
+            x0_arr = x0_arr[:, None]
+        latent_t = torch.as_tensor(x0_arr, dtype=torch.float32, device=self.device)
+        self._latent_param = torch.nn.Parameter(latent_t.clone())
+        self._optimizer = torch.optim.Adam([self._latent_param], lr=float(getattr(self.cfg, "latent_adam_lr", 1e-2)))
+
+    def _csr_to_torch(self, mat: sparse.csr_matrix) -> torch.Tensor:
+        crow = torch.as_tensor(mat.indptr.astype(np.int64), dtype=torch.int64, device=self.device)
+        col = torch.as_tensor(mat.indices.astype(np.int64), dtype=torch.int64, device=self.device)
+        val = torch.as_tensor(mat.data.astype(np.float32), dtype=torch.float32, device=self.device)
+        return torch.sparse_csr_tensor(crow, col, val, size=mat.shape, dtype=torch.float32, device=self.device)
+
+    def _solve_torch_adam(
+        self,
+        y: np.ndarray,
+        intrinsic_vec: np.ndarray,
+        final_weights: Optional[np.ndarray],
+        bin_ids: Optional[np.ndarray],
+        sample_ids: Optional[np.ndarray],
+        loss_type: Literal["cross_entropy", "logistic"],
+        x0: Optional[np.ndarray],
+        prox_weight: float,
+        x_anchor: Optional[np.ndarray],
+        use_interpolated_latent: bool,
+        interpolated_bin_mask: Optional[np.ndarray],
+        interpolated_obs_mask: Optional[np.ndarray],
+    ) -> np.ndarray:
+        if bin_ids is None:
+            raise ValueError("bin_ids are required for latent solving")
+        if self.I_minus_H_smooth is None:
+            raise RuntimeError("Matrices not built; call build_interpolation_matrix first")
+
+        if x0 is not None:
+            x0_use = np.asarray(x0, dtype=np.float32).reshape(self._expected_latent_shape())
+        elif self._latent_param is not None:
+            existing = self._latent_param.detach().cpu().numpy()
+            x0_use = existing.reshape(-1) if self.embed_dim == 1 else existing
+        else:
+            x0_use = self._zeros_latent().astype(np.float32)
+
+        self._ensure_torch_state(x0_use)
+        if self._latent_param is None or self._optimizer is None:
+            raise RuntimeError("Torch latent state was not initialized")
+
+        anchor = x0_use if x_anchor is None else np.asarray(x_anchor, dtype=np.float32).reshape(self._expected_latent_shape())
+        if self.embed_dim == 1 and anchor.ndim == 1:
+            anchor = anchor[:, None]
+        anchor_t = torch.as_tensor(anchor, dtype=torch.float32, device=self.device)
+
+        bin_ids_np = np.asarray(bin_ids, dtype=np.int64).reshape(-1)
+        bin_ids_t = torch.as_tensor(bin_ids_np, dtype=torch.long, device=self.device)
+        y_t = torch.as_tensor(np.asarray(y, dtype=np.float32).reshape(-1), dtype=torch.float32, device=self.device)
+        intrinsic_t = torch.as_tensor(np.asarray(intrinsic_vec, dtype=np.float32), dtype=torch.float32, device=self.device)
+        if intrinsic_t.ndim == 1:
+            intrinsic_t = intrinsic_t.unsqueeze(-1)
+
+        sample_ids_t: Optional[torch.Tensor] = None
+        if sample_ids is not None:
+            sample_ids_t = torch.as_tensor(np.asarray(sample_ids, dtype=np.int64).reshape(-1), dtype=torch.long, device=self.device)
+        obs_mask_t: Optional[torch.Tensor] = None
+        if interpolated_obs_mask is not None:
+            obs_mask_t = torch.as_tensor(np.asarray(interpolated_obs_mask, dtype=bool).reshape(-1), dtype=torch.bool, device=self.device)
+
+        mix = self._build_latent_mixing_matrix(use_interpolated_latent=use_interpolated_latent, interpolated_bin_mask=interpolated_bin_mask)
+        mix_t = self._csr_to_torch(mix.tocsr())
+        smooth_t = self._csr_to_torch(self.I_minus_H_smooth.tocsr())
+
+        w_t: Optional[torch.Tensor] = None
+        if self.embed_dim > 1:
+            if final_weights is None:
+                raise ValueError("final_weights are required for embed_dim > 1")
+            w_t = torch.as_tensor(np.asarray(final_weights, dtype=np.float32).reshape(-1), dtype=torch.float32, device=self.device)
+
+        steps = max(1, int(getattr(self.cfg, "latent_adam_steps", 3)))
+        for _ in range(steps):
+            self._optimizer.zero_grad(set_to_none=True)
+            latent_raw = self._latent_param
+            latent_mix = torch.sparse.mm(mix_t, latent_raw)
+            latent_obs_mix = latent_mix[bin_ids_t]
+            latent_obs_raw = latent_raw[bin_ids_t]
+            if obs_mask_t is not None:
+                latent_obs = torch.where(obs_mask_t.unsqueeze(-1), latent_obs_mix, latent_obs_raw)
+            elif use_interpolated_latent or interpolated_bin_mask is not None:
+                latent_obs = latent_obs_mix
+            else:
+                latent_obs = latent_obs_raw
+
+            if self.embed_dim == 1:
+                logits = intrinsic_t.squeeze(-1) + latent_obs.squeeze(-1)
+            else:
+                if w_t is None:
+                    raise ValueError("final_weights are required for embed_dim > 1")
+                gated = self.gating.gate_torch(latent_obs)
+                logits = torch.sum((intrinsic_t * gated) * w_t.unsqueeze(0), dim=1)
+
+            if loss_type == "cross_entropy":
+                if sample_ids_t is None:
+                    raise ValueError("sample_ids are required for cross_entropy latent solving")
+                unique_s, inv = torch.unique(sample_ids_t, sorted=False, return_inverse=True)
+                n_samples = max(1, int(unique_s.numel()))
+                max_per = torch.full((n_samples,), -torch.inf, dtype=logits.dtype, device=logits.device)
+                max_per.scatter_reduce_(0, inv, logits, reduce="amax", include_self=True)
+                logits_shift = logits - max_per[inv]
+                exp_logits = torch.exp(logits_shift)
+                denom = torch.zeros((n_samples,), dtype=logits.dtype, device=logits.device)
+                denom.index_add_(0, inv, exp_logits)
+                denom = denom + 1e-12
+                logsumexp = torch.log(denom) + max_per
+                data_loss = -(y_t * (logits - logsumexp[inv])).sum()
+                scale = float(n_samples)
+            else:
+                data_loss = F.binary_cross_entropy_with_logits(logits, y_t, reduction="sum")
+                scale = float(max(1, y_t.numel()))
+
+            reg_loss = torch.tensor(0.0, dtype=logits.dtype, device=logits.device)
+            l2 = float(getattr(self.cfg, "latent_l2_reg", 0.0))
+            if l2 > 0:
+                reg_loss = reg_loss + 0.5 * l2 * torch.sum(latent_raw * latent_raw)
+
+            smooth = float(getattr(self.cfg, "latent_smooth_reg", 0.0))
+            if smooth > 0:
+                diff = torch.sparse.mm(smooth_t, latent_raw)
+                reg_loss = reg_loss + 0.5 * smooth * torch.sum(diff * diff)
+
+            if prox_weight > 0.0:
+                d_prox = latent_raw - anchor_t
+                reg_loss = reg_loss + 0.5 * float(prox_weight) * torch.sum(d_prox * d_prox)
+
+            loss = (data_loss + reg_loss) / scale
+            loss.backward()
+            self._optimizer.step()
+
+        out = self._latent_param.detach().cpu().numpy()
+        if self.embed_dim == 1:
+            out_flat = out.reshape(-1)
+            self._latent_state = out_flat.copy()
+            return out_flat
+        self._latent_state = out.copy()
+        return out
 
     def _normalize_interpolated_obs_mask(
         self,
@@ -261,7 +490,7 @@ class LatentSolver:
         - mixed mode:         M[b,:] = H_smooth[b,:] if mask[b] else e_b^T
         """
         if self.H_smooth is None:
-            raise RuntimeError("H_smooth not built; call build_V_and_H first")
+            raise RuntimeError("H_smooth not built; call build_interpolation_matrix first")
 
         if interpolated_bin_mask is None:
             if use_interpolated_latent:
@@ -300,7 +529,7 @@ class LatentSolver:
             anchoring the output-space solution near x_anchor.
         """
         if self.V is None or self.A is None or self.H_smooth is None or self.I_minus_H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_V_and_H first")
+            raise RuntimeError("Matrices not built; call build_interpolation_matrix first")
 
         # Ensure y is a numpy array
         y = np.asarray(y)
@@ -435,7 +664,7 @@ class LatentSolver:
         Gradient chain rule: dL_data/dD = H_smooth^T @ (dL_data / d(H_smooth D))
         """
         if self.I_minus_H_smooth is None or self.H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_V_and_H first")
+            raise RuntimeError("Matrices not built; call build_interpolation_matrix first")
         if self.cfg.latent_present_only:
             # present-only filtering breaks the meaning of a within-sample distribution unless renormalized
             log.warning("latent_present_only=True is ignored for cross_entropy latent solving")
@@ -602,7 +831,7 @@ class LatentSolver:
         Gradient chain rule: dL_data/dH = H_smooth^T @ (dL_data / d(H_smooth H))
         """
         if self.V is None or self.H_smooth is None or self.I_minus_H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_V_and_H first")
+            raise RuntimeError("Matrices not built; call build_interpolation_matrix first")
 
         y = np.asarray(y, dtype=np.float64).reshape(-1)
         intrinsic_vec = np.asarray(intrinsic_vec, dtype=np.float64)  # (N_obs, d)
@@ -742,7 +971,7 @@ class LatentSolver:
         Gradient chain rule: dL_data/dH = H_smooth^T @ (dL_data / d(H_smooth H))
         """
         if self.I_minus_H_smooth is None or self.H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_V_and_H first")
+            raise RuntimeError("Matrices not built; call build_interpolation_matrix first")
         if self.cfg.latent_present_only:
             log.warning("latent_present_only=True is ignored for cross_entropy latent solving")
 
@@ -872,7 +1101,9 @@ class LatentSolver:
             cache_x = H_flat.copy()
             cache_f = float(f_val)
             cache_g = g_val.copy()
-            return cache_f, cache_g
+            if cache_g is None:
+                raise RuntimeError("Invalid objective cache gradient")
+            return float(cache_f), cache_g
 
         def fun(H_flat: np.ndarray) -> float:
             f_val, _ = _eval_cached(H_flat)

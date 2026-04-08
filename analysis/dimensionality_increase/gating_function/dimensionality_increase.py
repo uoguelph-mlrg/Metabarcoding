@@ -14,8 +14,7 @@ This script trains only gating-function variants (no baseline retraining):
 Each variant is saved to its own pickle file for later comparison.
 
 Usage:
-    python dimensionality_increase.py --data_path ../../data/data_merged.csv
-    python dimensionality_increase.py --data_path ../../data/data_merged.csv --no_wandb
+    python dimensionality_increase.py
 """
 from __future__ import annotations
 
@@ -60,7 +59,6 @@ except ImportError:
 
 
 def run_comparison(
-    data_path: str,
     use_wandb: bool = True,
     gating_functions: Optional[List[str]] = None,
     run_group: Optional[str] = None,
@@ -69,7 +67,6 @@ def run_comparison(
     Train selected gating-function variants.
     
     Args:
-        data_path: Path to the training data CSV
         use_wandb: Whether to log to Weights & Biases
         gating_functions: List of gating functions to test. If None, tests all.
     
@@ -105,7 +102,7 @@ def run_comparison(
             tags=["gating_comparison", gating_fn, "variant_only"],
             config={"embed_dim": cfg.embed_dim, "gating_fn": cfg.gating_fn},
         ):
-            trainer = train_module.Trainer(cfg, data_path)
+            trainer = train_module.Trainer(cfg)
             log.info(f"Model type: {type(trainer.model).__name__}")
             log.info(f"Gating function: {trainer.model.gating_fn}")
             
@@ -128,8 +125,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train gating-function variants without retraining baseline"
     )
-    parser.add_argument("--data_path", type=str, required=True, 
-                        help="Path to data CSV file")
     parser.add_argument("--verbose", "-v", action="store_true", 
                         help="Enable verbose logging")
     parser.add_argument("--no_wandb", action="store_true", 
@@ -149,7 +144,6 @@ if __name__ == "__main__":
     
     # Run comparison
     results = run_comparison(
-        args.data_path,
         use_wandb=use_wandb,
         gating_functions=args.gating_functions,
         run_group=run_group,

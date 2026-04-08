@@ -147,10 +147,11 @@ def _fit_r2_intercept(x: np.ndarray, y: np.ndarray) -> Tuple[Optional[float], Op
         return None, None
 
     slope, intercept = np.polyfit(x_arr, y_arr, 1)
-    corr = np.corrcoef(x_arr, y_arr)[0, 1]
-
-    r2 = float(corr ** 2) if np.isfinite(corr) else None
     i0 = float(intercept) if np.isfinite(intercept) else None
+    
+    ss_res = np.sum((y_arr - (slope * x_arr + intercept)) ** 2)
+    ss_tot = np.sum((y_arr - np.mean(y_arr)) ** 2)
+    r2 = float(1 - ss_res / (ss_tot + 1e-10)) if np.isfinite(ss_tot) else None
     return r2, i0
 
 
@@ -409,7 +410,7 @@ def compute_extended_metrics(
         "Absolute Relative Error": absolute_relative_error,
         "R² (Shannon diversity)": shannon_r2,
         "Shannon intercept": shannon_intercept,
-        "Spearman ρ (macro)": spearman_macro,
+        "Spearman Rho (macro)": spearman_macro,
         "R²": r2,
         "R² (log + 1)": r2_log,
         "RMSE (zeros)": rmse_zeros,
@@ -449,8 +450,8 @@ def plot_metrics_comparison(
 
     metrics_to_plot = [
         "MAE (macro)", "MAE (micro)", "Absolute Relative Error", "KL Divergence", 
-        "MAE (zeros)", "MAE (non-zeros)", "Spearman ρ (macro)",
-        "R² (Shannon diversity)", "Shannon intercept", "R²", "R² (log + 1)"
+        "MAE (zeros)", "MAE (non-zeros)", "Spearman Rho (macro)",
+        "R² (Shannon diversity)", "Shannon intercept", "R² (log + 1)"
     ]
     n_metrics = len(metrics_to_plot)
 
@@ -524,10 +525,9 @@ def plot_metrics_comparison(
             "KL Divergence": compute_95ci_bootstrap(kl_div_per_s),
             "MAE (zeros)": compute_95ci_bootstrap(abs_err[zero_m]),
             "MAE (non-zeros)": compute_95ci_bootstrap(abs_err[nonzero_m]),
-            "Spearman ρ (macro)": spearman_ci,
+            "Spearman Rho (macro)": spearman_ci,
             "R² (Shannon diversity)": shannon_r2_ci,
             "Shannon intercept": shannon_intercept_ci,
-            "R²": None,
             "R² (log + 1)": None,
         }
         
@@ -1529,13 +1529,13 @@ def plot_summary_table(
 
     metrics = [
         "MAE (macro)", "MAE (micro)", "Absolute Relative Error", "KL Divergence", 
-        "MAE (zeros)", "MAE (non-zeros)", "Spearman ρ (macro)",
-        "R² (Shannon diversity)", "Shannon intercept", "R²", "R² (log + 1)"
+        "MAE (zeros)", "MAE (non-zeros)", "Spearman Rho (macro)",
+        "R² (Shannon diversity)", "Shannon intercept", "R² (log + 1)"
     ]
     best_is_high = {
         "MAE (macro)": False, "MAE (micro)": False, "Absolute Relative Error": False, "KL Divergence": False,
-        "MAE (zeros)": False, "MAE (non-zeros)": False, "Spearman ρ (macro)": True,
-        "R² (Shannon diversity)": True, "R²": True, "R² (log + 1)": True,
+        "MAE (zeros)": False, "MAE (non-zeros)": False, "Spearman Rho (macro)": True,
+        "R² (Shannon diversity)": True, "Shannon intercept": False, "R² (log + 1)": True,
     }
 
     data = [{"Model": get_label(model, labels), **{m: ext[model][m] for m in metrics}} for model in models]
@@ -1699,7 +1699,7 @@ def print_comparison(
         ("Absolute Relative Error", "min"),
         ("R² (Shannon diversity)", "max"),
         ("Shannon intercept", "absmin"),
-        ("Spearman ρ (macro)", "max"),
+        ("Spearman Rho (macro)", "max"),
         ("R²", "max"),
         ("R² (log + 1)", "max"),
         ("KL Divergence", "min"),

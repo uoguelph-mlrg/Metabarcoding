@@ -183,7 +183,7 @@ class Trainer:
             self.cfg,
             self.neighbour_graph,
         )
-        latent_solver.build_V_and_H(data["train"]["X"], bin_index, method="nw")
+        latent_solver.build_interpolation_matrix(data["train"]["X"], bin_index, method="nw")
 
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]

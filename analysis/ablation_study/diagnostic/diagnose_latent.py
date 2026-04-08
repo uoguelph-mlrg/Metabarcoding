@@ -23,7 +23,8 @@ def diagnose():
     
     # Use absolute path
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    data_path = os.path.join(script_dir, "../../data/ecuador_training_data.csv")
+    cfg.data_path = os.path.join(script_dir, "../../data/ecuador_training_data.csv")
+    cfg.loss_type = "logistic"  # Use logistic loss for better interpretability in diagnostics
     
     print("="*70)
     print("DIAGNOSTIC: Understanding MLP + Latent Performance")
@@ -31,7 +32,7 @@ def diagnose():
     
     # Create trainer with logistic loss
     print("\n1. Creating Trainer with logistic loss...")
-    trainer = Trainer(cfg, data_path, loss_type="logistic")
+    trainer = Trainer(cfg)
     
     print(f"\n2. Model Architecture:")
     print(f"   MLP input dim: {trainer.data['train']['X'].shape[1]}")

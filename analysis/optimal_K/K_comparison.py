@@ -5,8 +5,7 @@ This script trains only selected K-value variants (no baseline retraining).
 Each variant is saved to its own pickle file for later comparison.
 
 Usage:
-    python K_comparison.py --data_path ../../data/data_merged.csv
-    python K_comparison.py --data_path ../../data/data_merged.csv --k_values 972 --no_wandb
+    python K_comparison.py --k_values 972 --no_wandb
 """
 from __future__ import annotations
 
@@ -42,7 +41,6 @@ except ImportError:
 
 
 def run_comparison(
-    data_path: str,
     cfg: Config,
     k_values: List[int],
     use_wandb: bool = True,
@@ -51,8 +49,8 @@ def run_comparison(
     """
     Train selected K-value variants.
     Args:
-        data_path: Path to the training data CSV
         cfg: Configuration object
+        k_values: List of K values to train as variants
         use_wandb: Whether to log to Weights & Biases
     Returns:
         Dictionary keyed by variant name
@@ -78,7 +76,7 @@ def run_comparison(
             tags=["K_comparison", variant_name, "variant_only"],
             config={**cfg.__dict__, "K": int(k), "variant": variant_name},
         ):
-            trainer_k = Trainer(cfg_k, data_path)
+            trainer_k = Trainer(cfg_k)
             results[variant_name] = trainer_k.run(use_wandb=use_wandb)
 
     return results
@@ -96,8 +94,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train K-value variants without retraining baseline"
     )
-    parser.add_argument("--data_path", type=str, required=True, 
-                        help="Path to data CSV file")
     parser.add_argument("--verbose", "-v", action="store_true", 
                         help="Enable verbose logging")
     parser.add_argument("--no_wandb", action="store_true", 
@@ -133,7 +129,6 @@ if __name__ == "__main__":
     
     # Run comparison
     results = run_comparison(
-        args.data_path,
         cfg,
         k_values=args.k_values,
         use_wandb=use_wandb,

@@ -42,7 +42,6 @@ TAXONOMY_FEATURES = [
 ]
 
 def load(
-    data_path: str, 
     config: Config, 
     save_data: bool = True,
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None
@@ -51,7 +50,6 @@ def load(
     Load and preprocess the CSV data.
 
     Args:
-        data_path: Path to CSV data file
         config: Configuration object with train_frac, val_frac
         save_data: Whether to save split CSVs to disk
         fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing
@@ -65,7 +63,7 @@ def load(
         - sample_index: mapping sample_id -> row index
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
     """
-    df = pd.read_csv(data_path)
+    df = pd.read_csv(config.data_path)
 
     # Rename columns to match expected format
     df = df.rename(columns={
@@ -233,15 +231,6 @@ def load(
     log.info(f"  Train: {len(train_sample_idx)} samples ({100 * config.train_frac:.0f}%)")
     log.info(f"  Val: {len(val_sample_idx)} samples ({100 * config.val_frac:.0f}%)")
     log.info(f"  Test: {len(test_sample_idx)} samples ({100 * (1 - config.train_frac - config.val_frac):.0f}%)")
-    
-    # Save the data splits in the `data` folder
-    if save_data:
-        data_path = os.path.dirname(data_path)
-
-        for X, y, split in [(X_train,y_train,"train"), (X_val,y_val,"val"), (X_test,y_test,"test")]:
-            X.to_csv(f"{data_path}/X_{split}.csv")
-            pd.Series(y).to_csv(f"{data_path}/y_{split}.csv", index=False)
-        taxonomic_data.to_csv(f"{data_path}/taxonomic_data.csv", index=False)
 
     return {
         "train": {"X": X_train, "y": y_train, "y_prob": y_train},

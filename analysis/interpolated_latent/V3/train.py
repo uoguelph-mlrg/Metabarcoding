@@ -129,8 +129,6 @@ class Trainer:
     def __init__(
         self,
         cfg: Config,
-        data_path: Optional[str] = None,
-        data_dir: Optional[str] = None,
         model_name: str = "interpolated_latent_v3",
         run_id: Optional[str] = None,
         resume: bool = False,
@@ -145,6 +143,7 @@ class Trainer:
         self.global_step = 0
         self.best_val_loss = float("inf")
         self.last_val_metrics: Dict[str, float] = {}
+        self._latent_state_initialized = False
 
         self.base_artifact_dir = os.path.abspath(os.path.join(self.cfg.results_dir, self.model_name))
         self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
@@ -173,7 +172,7 @@ class Trainer:
             embed_dim=self.cfg.embed_dim,
             gating_fn=self.cfg.gating_fn,
         )
-        latent_solver.build_V_and_H(data["train"]["X"], bin_index, method="nw")
+        latent_solver.build_interpolation_matrix(data["train"]["X"], bin_index, method="nw")
         
         # Build model
         self.device = torch.device(self.cfg.device)
@@ -541,7 +540,15 @@ class Trainer:
         sample_ids = np.concatenate(sample_list, axis=0).astype(np.int64)
         obs_interp_mask = np.isin(sample_ids, selected_sample_ids) if selected_sample_ids is not None else None
 
-        x0_latent = self.model.latent_vec.detach().cpu().numpy()
+        x0_latent: Optional[np.ndarray] = None
+        x_anchor_latent: Optional[np.ndarray] = None
+
+        if not self._latent_state_initialized:
+            x0_latent = self.model.latent_vec.detach().cpu().numpy()
+            self._latent_state_initialized = True
+        elif prox_weight > 0.0:
+            x_anchor_latent = self.model.latent_vec.detach().cpu().numpy()
+
         if self.cfg.embed_dim > 1:
             latent_vec = self.model.latent_solver.solve(
                 y=y_vec,
@@ -552,7 +559,7 @@ class Trainer:
                 loss_type="cross_entropy" if self.loss_type == "cross_entropy" else "logistic",
                 x0=x0_latent,
                 prox_weight=prox_weight,
-                x_anchor=x0_latent,
+                x_anchor=x_anchor_latent,
                 interpolated_obs_mask=obs_interp_mask,
             )
         else:
@@ -564,7 +571,7 @@ class Trainer:
                 loss_type="cross_entropy" if self.loss_type == "cross_entropy" else "logistic",
                 x0=x0_latent,
                 prox_weight=prox_weight,
-                x_anchor=x0_latent,
+                x_anchor=x_anchor_latent,
                 interpolated_obs_mask=obs_interp_mask,
             )
         self.model.set_latent(latent_vec)
