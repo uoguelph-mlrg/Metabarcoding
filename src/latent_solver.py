@@ -1,39 +1,44 @@
-from typing import Any, Dict, Optional, Literal
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Literal, Optional, Tuple, cast
+
+import logging as log
 import numpy as np
 import pandas as pd
+import time
+import torch
+import torch.nn.functional as F
 from scipy import sparse
-from scipy.sparse.linalg import cg, LinearOperator
-from scipy.optimize import minimize
-from neighbor_graph import NeighbourGraph
+from tqdm import tqdm
+
 from config import Config
 from gating_functions import make_gating_function
-from tqdm import tqdm
-import logging as log
-import time
+from neighbor_graph import NeighbourGraph
 
 GatingFnName = Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"]
 
+
+@dataclass
+class ActiveSetMap:
+    global_ids: np.ndarray
+
+
 class LatentSolver:
     """
-    Build sparse matrices and solve the latent vector optimization.
+    PyTorch latent solver with active-subgraph updates.
 
-    Scalar mode (embed_dim == 1):
-        min_D (1/2) sum_{s,b} (y_{s,b} - m(s,b) - d_b)^2 + (r/2)||D||^2 + (λ/2)||(I-H_smooth)D||^2
-        Solution via linear system + CG (logistic) or L-BFGS (cross-entropy).
-
-    Vector mode (embed_dim > 1):
-        min_H BCE(y, ŷ) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
-        where ŷ = sigmoid(w^T (m(x) ⊙ g(h[bin])))
-        Solution via L-BFGS.
-
-    Where:
-    - V: observation-to-bin indicator matrix (N_obs × n_bins)
-    - H_smooth: neighbor smoothing matrix (n_bins × n_bins), H_smooth[b,:] = NW weights for bin b
-    - r: L2 regularization strength (latent_l2_reg)
-    - λ: smoothness regularization strength (latent_smooth_reg)
+    Keeps the same objective used in NumPy code, but solves only on a local active
+    set A (batch bins + graph neighbors) with strict block updates.
     """
 
-    def __init__(self, cfg: Config, neighbour_graph: NeighbourGraph, embed_dim: int = 1, gating_fn: GatingFnName = "exp"):
+    def __init__(
+        self,
+        cfg: Config,
+        neighbour_graph: NeighbourGraph,
+        embed_dim: int = 1,
+        gating_fn: GatingFnName = "sigmoid",
+    ) -> None:
         self.cfg = cfg
         self.ng = neighbour_graph
         self.n_bins = neighbour_graph.n_bins
@@ -47,44 +52,24 @@ class LatentSolver:
                 epsilon=cfg.gating_epsilon,
             )
 
-        # cached sparse matrices (both modes)
-        self.V: Optional[sparse.csr_matrix] = None         # observation-to-bin indicator
-        self.H_smooth: Optional[sparse.csr_matrix] = None  # neighbor smoothing matrix
-        self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None  # (I - H_smooth)
+        self.device = torch.device(self.cfg.device) if str(self.cfg.device.lower()) != "mps" else torch.device("cpu") # Use CPU for latent solver if MPS due to sparse CSR stability issues, otherwise use configured device
 
-        # scalar-mode precomputed matrices (embed_dim == 1 only)
-        self.A: Optional[sparse.csc_matrix] = None   # precomputed LHS matrix
-        self.S: Optional[sparse.csc_matrix] = None   # (I - H_smooth)^T (I - H_smooth)
-        self._solve_calls: int = 0
+        self.H_smooth: Optional[sparse.csr_matrix] = None               # Smoothness operator matrix built from neighbor graph; H_smooth @ h gives neighbor-interpolated latent
+        self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None       # Precompute I - H_smooth for efficient regularization; (I - H_smooth) @ h gives difference between latent and neighbor interpolation used for smoothness regularization
+        self._I_minus_H_smooth_csc: Optional[sparse.csc_matrix] = None  # CSC format of I - H_smooth for efficient column slicing when building row closure
+        self._graph_neighbors: Optional[List[np.ndarray]] = None        # List of neighbor arrays for each node, used to build active set on each solve call
 
-    def build_V_and_H(
+    def build_interpolation_matrix(
         self,
-        X: pd.DataFrame,
-        bin_index: Dict[Any, int],
         method: str = "nw",
     ) -> None:
         """
-        Build V (observation-to-bin indicator) and H (neighbor smoothing) matrices.
-        
-        V: (N_obs x n_bins) where V[i, b] = 1 if observation i is for bin b
-        H: (n_bins x n_bins) where H[b, :] contains NW weights for neighbors of bin b
-        """        
-        N_obs = len(X)
-        
-        # Step 1: Build V (observation-to-bin indicator matrix)
-        bin_indices = X.index.get_level_values("bin_uri").map(bin_index).to_numpy(dtype=np.int32)
-        
-        rows_V = np.arange(N_obs, dtype=np.int32)
-        cols_V = bin_indices
-        vals_V = np.ones(N_obs, dtype=np.float64)
-        
-        V = sparse.csr_matrix((vals_V, (rows_V, cols_V)), shape=(N_obs, self.n_bins))
-        self.V = V
-
-        # Step 2: Build H (neighbor smoothing matrix)
-        rows_H = []
-        cols_H = []
-        vals_H = []
+        Build the H_smooth matrix from the neighbor graph using either Nadaraya-Watson or LLR weights, precompute I - H_smooth for efficient smoothness regularization, and build neighbor lists for active set construction.
+        The matrix H_smooth is defined such that H_smooth @ h gives the latent interpolated from neighbors, and (I - H_smooth) @ h gives the difference from neighbors used for smoothness regularization.
+        """
+        rows_H: List[int] = []
+        cols_H: List[int] = []
+        vals_H: List[float] = []
 
         for b in tqdm(range(self.n_bins), desc="Building H matrix", unit="bin", leave=False):
             if method == "nw":
@@ -93,38 +78,61 @@ class LatentSolver:
                 neigh, w = self.ng.llr_coeffs_for_node(b)
 
             if len(neigh) == 0:
-                # No neighbors: identity smoothing
-                log.warning(f"Bin {b} has no neighbors; using identity smoothing")
                 rows_H.append(b)
                 cols_H.append(b)
                 vals_H.append(1.0)
-            else:
-                for j, wj in zip(neigh, w):
-                    rows_H.append(b)
-                    cols_H.append(j)
-                    vals_H.append(wj)
-        
-        H_smooth = sparse.csr_matrix((
-            np.array(vals_H), (np.array(rows_H, dtype=np.int32), np.array(cols_H, dtype=np.int32))
-        ), shape=(self.n_bins, self.n_bins)
+                continue
+
+            for j, wj in zip(neigh, w):
+                rows_H.append(int(b))
+                cols_H.append(int(j))
+                vals_H.append(float(wj))
+
+        H_smooth = sparse.csr_matrix(
+            (
+                np.asarray(vals_H, dtype=np.float64),
+                (np.asarray(rows_H, dtype=np.int32), np.asarray(cols_H, dtype=np.int32)),
+            ),
+            shape=(self.n_bins, self.n_bins),
         )
         self.H_smooth = H_smooth
+        self.I_minus_H_smooth = sparse.csr_matrix(sparse.identity(self.n_bins, format="csr") - H_smooth)
+        self._I_minus_H_smooth_csc = sparse.csc_matrix(self.I_minus_H_smooth)
+        self._graph_neighbors = self._build_graph_active_neighbors()
 
-        I = sparse.identity(self.n_bins, format="csr")
-        I_minus_H_smooth = I - H_smooth
-        self.I_minus_H_smooth = sparse.csr_matrix(I_minus_H_smooth)
+        log.info(
+            "Torch latent solver: H_smooth=%s, embed_dim=%d, device=%s",
+            H_smooth.shape,
+            self.embed_dim,
+            self.device,
+        )
 
-        if self.embed_dim == 1:
-            # Step 3 (scalar only): Precompute A = V^T V + r*I + λ*(I - H_smooth)^T (I - H_smooth)
-            VtV = (V.T @ V).tocsc()
-            smoothness_term = (I_minus_H_smooth.T @ I_minus_H_smooth).tocsc()
-            l2_term = I.tocsc()
-            self.A = VtV + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
-            self.S = smoothness_term
-        
-        log.info(f"Latent solver: V={V.shape}, H_smooth={H_smooth.shape}, embed_dim={self.embed_dim}, "
-                 f"L2={self.cfg.latent_l2_reg}, smooth={self.cfg.latent_smooth_reg}")
+    def _csr_to_torch(self, mat: sparse.csr_matrix) -> torch.Tensor:
+        crow = torch.as_tensor(mat.indptr.astype(np.int64), device=self.device)
+        col = torch.as_tensor(mat.indices.astype(np.int64), device=self.device)
+        vals = torch.as_tensor(mat.data.astype(np.float32), device=self.device)
+        return torch.sparse_csr_tensor(
+            crow,
+            col,
+            vals,
+            size=mat.shape,
+            dtype=torch.float32,
+            device=self.device,
+        )
 
+    def _build_row_set(self, active_ids: np.ndarray) -> np.ndarray:
+        """
+        Build the set of row indices needed for the current solve, which includes all active bins 
+        plus any bins that share a smoothness constraint with the active bins (i.e., any bin that is
+        a neighbor of an active bin in the graph, since smoothness regularization couples neighbors)
+        """
+        if self._I_minus_H_smooth_csc is None:
+            raise RuntimeError("I_minus_H_smooth CSC is not initialized")
+
+        csc = cast(sparse.csc_matrix, self._I_minus_H_smooth_csc)
+        dep_rows = csc[:, active_ids].indices.astype(np.int64, copy=False)
+        row_ids = np.unique(np.concatenate([active_ids.astype(np.int64, copy=False), dep_rows]))
+        return row_ids
 
     def solve(
         self,
@@ -133,579 +141,298 @@ class LatentSolver:
         final_weights: Optional[np.ndarray] = None,
         bin_ids: Optional[np.ndarray] = None,
         sample_ids: Optional[np.ndarray] = None,
-        loss_type: Literal["cross_entropy", "logistic"] = "logistic",
-        x0: Optional[np.ndarray] = None,
+        loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy",
         prox_weight: float = 0.0,
         x_anchor: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
+        latent_lr: Optional[float] = None,
+    ) -> Tuple[np.ndarray, Dict[str, float]]:
         """
+        Solve for the latent variable h using PyTorch optimization on the active set of bins 
+        corresponding to the current batch, with optional proximal regularization towards an 
+        anchor point. The optimization is performed using Adam with gradients computed from 
+        the specified loss type, and only updates the latent variables for the active bins 
+        while keeping others fixed.
+        
         Args:
-            y: target probabilities (N_obs,) in [0, 1]
-            intrinsic_vec: MLP predictions — shape (N_obs,) for scalar mode,
-                           (N_obs, embed_dim) for vector mode
-            final_weights: final linear layer weights w ∈ R^d (required for embed_dim > 1)
-            bin_ids: bin index per observation (N_obs,)
-            sample_ids: sample index per observation (N_obs,), required for cross_entropy
-            loss_type: "logistic" (sigmoid loss) or "cross_entropy" (softmax loss)
-            x0: warm-start initial latent
-            prox_weight: proximal regularization weight ρ ≥ 0.  Adds (ρ/2)||D - x_anchor||²
-                         to the objective, anchoring the update near the current latent.
-                         Annealed to zero over the warmup phase (standard damped/proximal EM).
-            x_anchor: anchor point in model-space (same shape as x0).  Defaults to x0.
+            y (np.ndarray): Observed target values for the current batch (shape [batch_size,]).
+            intrinsic_vec (np.ndarray): Intrinsic predictions obtained from the MLP for the current batch (shape [batch_size, embed_dim] or [batch_size,]).
+            final_weights (Optional[np.ndarray], optional): Weights for the final linear layer (shape [embed_dim,]) used in the loss computation when embed_dim > 1. Required if embed_dim > 1. Defaults to None.
+            bin_ids (Optional[np.ndarray], optional): BIN indices corresponding to each observation in the current batch (shape [batch_size,]). Required for mapping observations to latent variables. Defaults to None.
+            sample_ids (Optional[np.ndarray], optional): Sample indices corresponding to each observation in the current batch (shape [batch_size,]). Used for sample-level loss modes. Defaults to None.
+            loss_type (Literal[&quot;cross_entropy&quot;, &quot;logistic&quot;], optional): Type of loss function to use. Defaults to "cross_entropy".
+            prox_weight (float, optional): Weight for proximal regularization towards x_anchor. If > 0, adds a term prox_weight * ||h - x_anchor||^2 to the loss. Defaults to 0.0.
+            x_anchor (Optional[np.ndarray], optional): Anchor values for the latent variables, obtained from the previous iteration (shape [n_bins, embed_dim]). Defaults to None.
+            latent_lr (Optional[float], optional): Learning rate to use for the freshly initialized Adam optimizer. Defaults to cfg.latent_adam_lr.
 
         Returns:
-            latent: shape (n_bins,) for scalar mode, (n_bins, embed_dim) for vector mode
+            Tuple[np.ndarray, Dict[str, float]]: A tuple containing:
+                - The optimized latent variable h as a numpy array of shape [n_bins, embed_dim] (or [n_bins,] if embed_dim=1).
+                - A dictionary of timing information for different parts of the optimization process.
         """
-        # Default anchor to warm-start if not explicitly provided
-        anchor = x_anchor if x_anchor is not None else x0
+        if self.I_minus_H_smooth is None:
+            raise RuntimeError("Matrices not built; call build_interpolation_matrix first")
+        if bin_ids is None:
+            raise ValueError("bin_ids are required for torch latent solving")
 
-        if self.embed_dim > 1:
-            if final_weights is None:
-                raise ValueError("final_weights are required for embed_dim > 1")
-            if bin_ids is None:
-                raise ValueError("bin_ids are required for embed_dim > 1")
-            if loss_type == "logistic":
-                return self._solve_logistic_vector(
-                    y=y, intrinsic_vec=intrinsic_vec, final_weights=final_weights,
-                    bin_ids=bin_ids, x0=x0, prox_weight=prox_weight, x_anchor=anchor,
-                )
-            else:
-                if sample_ids is None:
-                    raise ValueError("sample_ids are required for cross_entropy latent solving")
-                return self._solve_cross_entropy_lbfgs_vector(
-                    y=y, intrinsic_vec=intrinsic_vec, final_weights=final_weights,
-                    bin_ids=bin_ids, sample_ids=sample_ids, x0=x0,
-                    prox_weight=prox_weight, x_anchor=anchor,
-                )
-        else:
-            if loss_type == "logistic":
-                return self._solve_logistic(
-                    y=y, intrinsic_vec=intrinsic_vec, x0=x0,
-                    prox_weight=prox_weight, x_anchor=anchor,
-                )
-            else:
-                if bin_ids is None or sample_ids is None:
-                    raise ValueError("bin_ids and sample_ids are required for cross_entropy latent solving")
-                return self._solve_cross_entropy_lbfgs(
-                    y=y,
-                    intrinsic_vec=intrinsic_vec,
-                    bin_ids=bin_ids,
-                    sample_ids=sample_ids,
-                    x0=x0,
-                    prox_weight=prox_weight,
-                    x_anchor=anchor,
-                )
+        if self.embed_dim > 1 and final_weights is None:
+            raise ValueError("final_weights are required for embed_dim > 1")
 
-    def _solve_logistic(self, y: np.ndarray, intrinsic_vec: np.ndarray, x0: Optional[np.ndarray] = None, prox_weight: float = 0.0, x_anchor: Optional[np.ndarray] = None) -> np.ndarray:
-        """
-        Scalar logistic/sigmoid latent solve via linear system + CG:
-            (V^T V + rI + λ(I-H_smooth)^T(I-H_smooth)) D = V^T (logit(y) - m)
+        latent_shape = (self.n_bins, self.embed_dim)
+        if x_anchor is None:
+            raise ValueError("x_anchor is required for latent solving")
 
-        With proximal regularization (ρ > 0):
-            System becomes (A + ρI) D = b + ρ * (anchor / latent_lr),
-            anchoring the output-space solution near x_anchor.
-        """
-        if self.V is None or self.A is None or self.H_smooth is None or self.I_minus_H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_V_and_H first")
-
-        # Ensure y is a numpy array
-        y = np.asarray(y)
-        intrinsic_vec = np.asarray(intrinsic_vec)
-
-        # Handle present-only mode: filter to observations where y > 0
-        if self.cfg.latent_present_only:
-            present_mask = y > 0
-            y_filtered = y[present_mask]
-            intrinsic_filtered = intrinsic_vec[present_mask]
-            V_filtered = self.V[present_mask, :]
-            
-            log.debug(f"Present-only: {present_mask.sum()}/{len(y)} obs ({100*present_mask.mean():.1f}%)")
-            
-            # Recompute A matrix with filtered V
-            VtV = (V_filtered.T @ V_filtered).tocsc()
-            I = sparse.identity(self.n_bins, format="csr")
-            I_minus_H_smooth = self.I_minus_H_smooth
-            smoothness_term = (I_minus_H_smooth.T @ I_minus_H_smooth).tocsc()
-            l2_term = I.tocsc()
-            A_filtered = VtV + self.cfg.latent_l2_reg * l2_term + self.cfg.latent_smooth_reg * smoothness_term
-            
-            y_use = y_filtered
-            intrinsic_use = intrinsic_filtered
-            V_use = V_filtered
-            A_use = A_filtered
-        else:
-            y_use = y
-            intrinsic_use = intrinsic_vec
-            V_use = self.V
-            A_use = self.A
-
-        # Clip y to avoid log(0) and convert to logits
-        y_clipped = np.clip(y_use, 1e-7, 1 - 1e-7)
-        y_logit = np.log(y_clipped / (1 - y_clipped))  # logit transform
+        lr = float(self.cfg.latent_adam_lr if latent_lr is None else latent_lr)
         
-        # Compute residual in logit space: D should satisfy intrinsic + D ≈ logit(y)
-        # So residual = logit(y) - intrinsic
-        residual = y_logit - intrinsic_use
-        
-        # Compute b = V^T residual
-        b = V_use.T.dot(residual)
-
-        # Solve A D = b using conjugate gradient
-        if x0 is None:
-            x0_use = np.zeros(self.n_bins, dtype=float)
-        else:
-            x0_use = np.asarray(x0, dtype=float).reshape(-1)
-            if x0_use.shape[0] != self.n_bins:
-                raise ValueError(f"x0 has shape {x0_use.shape}, expected ({self.n_bins},)")
-
-        # Proximal regularization: adds (ρ/2)||D*latent_lr - anchor||² to the objective.
-        # In solver space (D before latent_lr scaling): (A + ρI) D = b + ρ * (anchor / latent_lr).
-        if prox_weight > 0 and x_anchor is not None:
-            lr = max(float(self.cfg.latent_lr), 1e-8)
-            anchor_solver = np.asarray(x_anchor, dtype=float).reshape(-1) / lr
-            def _matvec(v, _A=A_use, _p=prox_weight): return _A.dot(v) + _p * v
-            A_eff = LinearOperator(A_use.shape, matvec=_matvec, dtype=float)
-            b_eff = b + prox_weight * anchor_solver
-        else:
-            A_eff, b_eff = A_use, b
-
-        # Rescale latent learning rate
-        D, info = cg(
-            A_eff,
-            b_eff,
-            x0=x0_use,
-            atol=self.cfg.latent_convergence_tol,
-            maxiter=self.cfg.latent_convergence_maxiter
-        )
-        D = D * self.cfg.latent_lr  # Rescale the solution by the latent learning rate to keep magnitudes stable across different regularization strengths
-        
-        if info != 0:
-            log.warning(f"CG did not converge (info={info})")
-        
-        # Log summary statistics (only at debug level)
-        log.debug(f"Latent D: mean={D.mean():.3f}, std={D.std():.3f}, range=[{D.min():.3f}, {D.max():.3f}]")
-        
-        return D
-
-    def _solve_cross_entropy_lbfgs(
-        self,
-        y: np.ndarray,
-        intrinsic_vec: np.ndarray,
-        bin_ids: np.ndarray,
-        sample_ids: np.ndarray,
-        x0: Optional[np.ndarray] = None,
-        prox_weight: float = 0.0,
-        x_anchor: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        """
-        Cross-entropy latent solve (softmax over bins within each sample) with L-BFGS.
-
-        We minimize:
-            sum_s CE(y_s, softmax(m_s + D_bins)) + (r/2)||D||^2 + (λ/2)|| (I-H)D ||^2
-
-        This matches the model's cross-entropy training mode.
-        """
-        if self.I_minus_H_smooth is None or self.H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_V_and_H first")
-        if self.cfg.latent_present_only:
-            # present-only filtering breaks the meaning of a within-sample distribution unless renormalized
-            log.warning("latent_present_only=True is ignored for cross_entropy latent solving")
-
-        y = np.asarray(y, dtype=np.float64).reshape(-1)
-        intrinsic_vec = np.asarray(intrinsic_vec, dtype=np.float64).reshape(-1)
-        bin_ids = np.asarray(bin_ids, dtype=np.int64).reshape(-1)
-        sample_ids = np.asarray(sample_ids, dtype=np.int64).reshape(-1)
-
-        if not (len(y) == len(intrinsic_vec) == len(bin_ids) == len(sample_ids)):
-            raise ValueError("y, intrinsic_vec, bin_ids, sample_ids must have the same length")
-
-        # Build per-sample segments (stable, no Python dict iteration order issues)
-        order = np.argsort(sample_ids, kind="mergesort")
-        y_s = y[order]
-        m_s = intrinsic_vec[order]
-        b_s = bin_ids[order]
-        s_s = sample_ids[order]
-
-        # Segment boundaries for each sample id
-        unique_s, starts = np.unique(s_s, return_index=True)
-        ends = np.append(starts[1:], len(s_s))
-        n_samples = len(unique_s)
-
-        r = float(self.cfg.latent_l2_reg)
-        lam = float(self.cfg.latent_smooth_reg)
-        I_minus_H_smooth = self.I_minus_H_smooth  # csr
-
-        # Warm start
-        if x0 is None:
-            x0_use = np.zeros(self.n_bins, dtype=np.float64)
-        else:
-            x0_use = np.asarray(x0, dtype=np.float64).reshape(-1)
-            if x0_use.shape[0] != self.n_bins:
-                raise ValueError(f"x0 has shape {x0_use.shape}, expected ({self.n_bins},)")
-
-        # Proximal anchor in parameter space (no latent_lr scaling for L-BFGS solvers)
-        x_anchor_flat = np.asarray(x_anchor, dtype=np.float64).reshape(-1) if (prox_weight > 0 and x_anchor is not None) else None
-
-        def fun_and_jac(D_flat: np.ndarray) -> tuple[float, np.ndarray]:
-            D_flat = D_flat.astype(np.float64, copy=False)
-
-            # z_i = m_i + d_{bin(i)} in the sorted-by-sample order
-            z = m_s + D_flat[b_s]
-
-            # Gradient accumulator in observation space, then scatter-add into bins
-            grad_bins = np.zeros(self.n_bins, dtype=np.float64)
-            loss = 0.0
-
-            for st, en in zip(starts, ends):
-                z_seg = z[st:en]
-                y_seg = y_s[st:en]
-
-                # stable logsumexp
-                z_max = float(np.max(z_seg)) if len(z_seg) > 0 else 0.0
-                exp = np.exp(z_seg - z_max)
-                denom = float(exp.sum()) + 1e-300
-                p = exp / denom
-
-                # CE with soft targets: -sum(y * log_softmax(z))
-                # log_softmax = z - logsumexp(z)
-                logsumexp = z_max + np.log(denom)
-                loss += float(-(y_seg * (z_seg - logsumexp)).sum())
-
-                # grad wrt z is (p - y)
-                g_z = (p - y_seg)
-                np.add.at(grad_bins, b_s[st:en], g_z)
-
-            # Regularization
-            if r > 0:
-                loss += 0.5 * r * float(D_flat @ D_flat)
-                grad_bins += r * D_flat
-
-            if lam > 0:
-                diff = I_minus_H_smooth.dot(D_flat)  # (I-H_smooth)D
-                loss += 0.5 * lam * float(diff @ diff)
-                grad_bins += lam * I_minus_H_smooth.T.dot(diff)
-
-            # Proximal term: (ρ/2)||D - anchor||²  — anchors update near previous latent
-            if prox_weight > 0 and x_anchor_flat is not None:
-                d_prox = D_flat - x_anchor_flat
-                loss += 0.5 * prox_weight * float(d_prox @ d_prox)
-                grad_bins += prox_weight * d_prox
-
-            # Match training scale (average over samples) to keep magnitudes stable
-            if n_samples > 0:
-                loss /= n_samples
-                grad_bins /= n_samples
-
-            return loss, grad_bins
-
-        def fun(D_flat: np.ndarray) -> float:
-            f, _ = fun_and_jac(D_flat)
-            return f
-
-        def jac(D_flat: np.ndarray) -> np.ndarray:
-            _, g = fun_and_jac(D_flat)
-            return g
-
-        res = minimize(
-            fun=fun,
-            x0=x0_use,
-            jac=jac,
-            method="L-BFGS-B",
-            options={
-                "maxiter": int(self.cfg.latent_convergence_maxiter),
-                "ftol": float(self.cfg.latent_convergence_tol),
-                "gtol": float(self.cfg.latent_convergence_gtol),
-                "maxfun": int(self.cfg.latent_convergence_maxfun),
-            },
-        )
-
-        if not res.success:
-            log.warning(f"L-BFGS did not converge: {res.message}")
-
-        D = np.asarray(res.x, dtype=np.float64)
-        log.debug(f"Latent D (CE): mean={D.mean():.3f}, std={D.std():.3f}, range=[{D.min():.3f}, {D.max():.3f}]")
-        return D
-
-    # ------------------------------------------------------------------
-    # Vector-mode solvers (embed_dim > 1)
-    # ------------------------------------------------------------------
-
-    def _solve_logistic_vector(
-        self,
-        y: np.ndarray,
-        intrinsic_vec: np.ndarray,
-        final_weights: np.ndarray,
-        bin_ids: np.ndarray,
-        x0: Optional[np.ndarray] = None,
-        prox_weight: float = 0.0,
-        x_anchor: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        """
-        Vector logistic/sigmoid latent solve via L-BFGS with multiplicative gating.
-
-        Model: ŷ_i = sigmoid(w^T (m_i ⊙ g(h[bin_i])))
-        Objective: BCE(y, ŷ) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
-        """
-        if self.V is None or self.H_smooth is None or self.I_minus_H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_V_and_H first")
-
-        y = np.asarray(y, dtype=np.float64).reshape(-1)
-        intrinsic_vec = np.asarray(intrinsic_vec, dtype=np.float64)  # (N_obs, d)
-        final_weights = np.asarray(final_weights, dtype=np.float64).reshape(-1)  # (d,)
-        bin_ids = np.asarray(bin_ids, dtype=np.int64).reshape(-1)
-
-        if intrinsic_vec.shape != (len(y), self.embed_dim):
-            raise ValueError(f"intrinsic_vec has shape {intrinsic_vec.shape}, expected ({len(y)}, {self.embed_dim})")
-        if final_weights.shape[0] != self.embed_dim:
-            raise ValueError(f"final_weights has shape {final_weights.shape}, expected ({self.embed_dim},)")
-
-        if self.cfg.latent_present_only:
-            present_mask = y > 0
-            y_use = y[present_mask]
-            intrinsic_use = intrinsic_vec[present_mask]
-            bin_ids_use = bin_ids[present_mask]
-            log.debug(f"Present-only: {present_mask.sum()}/{len(y)} obs ({100*present_mask.mean():.1f}%)")
-        else:
-            y_use = y
-            intrinsic_use = intrinsic_vec
-            bin_ids_use = bin_ids
-
-        N_obs = len(y_use)
-        r = float(self.cfg.latent_l2_reg)
-        lam = float(self.cfg.latent_smooth_reg)
-
-        if x0 is None:
-            x0_use = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
-        else:
-            x0_use = np.asarray(x0, dtype=np.float64)
-            if x0_use.shape != (self.n_bins, self.embed_dim):
-                raise ValueError(f"x0 has shape {x0_use.shape}, expected ({self.n_bins}, {self.embed_dim})")
-
-        I_minus_H_smooth = self.I_minus_H_smooth  # local var for closure type safety
-        x_anchor_mat = np.asarray(x_anchor, dtype=np.float64).reshape(self.n_bins, self.embed_dim) if (prox_weight > 0 and x_anchor is not None) else None
-
-        def fun_and_jac(H_flat):
-            H_flat = H_flat.astype(np.float64, copy=False)
-            H = H_flat.reshape(self.n_bins, self.embed_dim)
-
-            h_obs = H[bin_ids_use]  # (N_obs, d)
-            m_tilde = intrinsic_use * self.gating.gate_np(h_obs)   # (N_obs, d)
-            logits = m_tilde @ final_weights                        # (N_obs,)
-
-            logits_stable = np.clip(logits, -20, 20)
-            p = 1.0 / (1.0 + np.exp(-logits_stable))
-            p_clip = np.clip(p, 1e-7, 1 - 1e-7)
-            loss = float(-(y_use * np.log(p_clip) + (1 - y_use) * np.log(1 - p_clip)).sum())
-
-            grad_logits = p - y_use                                           # (N_obs,)
-            grad_m_tilde = np.outer(grad_logits, final_weights)               # (N_obs, d)
-            grad_h_obs = intrinsic_use * grad_m_tilde * self.gating.gate_grad_np(h_obs)  # (N_obs, d)
-
-            grad_H = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
-            np.add.at(grad_H, bin_ids_use, grad_h_obs)
-
-            if r > 0:
-                loss += 0.5 * r * float(np.sum(H ** 2))
-                grad_H += r * H
-
-            if lam > 0:
-                diff = I_minus_H_smooth.dot(H)  # (n_bins, d)
-                loss += 0.5 * lam * float(np.sum(diff ** 2))
-                grad_H += lam * (I_minus_H_smooth.T.dot(diff))
-
-            # Proximal term: (ρ/2)||H - anchor||²  — anchors update near previous latent
-            if prox_weight > 0 and x_anchor_mat is not None:
-                d_prox = H - x_anchor_mat
-                loss += 0.5 * prox_weight * float(np.sum(d_prox ** 2))
-                grad_H += prox_weight * d_prox
-
-            if N_obs > 0:
-                loss /= N_obs
-                grad_H /= N_obs
-
-            return loss, grad_H.ravel()
-
-        def fun(H_flat): f, _ = fun_and_jac(H_flat); return f
-        def jac(H_flat): _, g = fun_and_jac(H_flat); return g
-
-        res = minimize(
-            fun=fun, x0=x0_use.ravel(), jac=jac, method="L-BFGS-B",
-            options={
-                "maxiter": int(self.cfg.latent_convergence_maxiter),
-                "ftol": float(self.cfg.latent_convergence_tol),
-                "gtol": float(self.cfg.latent_convergence_gtol),
-                "maxfun": int(self.cfg.latent_convergence_maxfun),
-            },
-        )
-        if not res.success:
-            log.warning(f"L-BFGS did not converge: {res.message}")
-
-        H = res.x.reshape(self.n_bins, self.embed_dim)
-        log.debug(f"Latent H: mean={H.mean():.3f}, std={H.std():.3f}, range=[{H.min():.3f}, {H.max():.3f}]")
-        return H
-
-    def _solve_cross_entropy_lbfgs_vector(
-        self,
-        y: np.ndarray,
-        intrinsic_vec: np.ndarray,
-        final_weights: np.ndarray,
-        bin_ids: np.ndarray,
-        sample_ids: np.ndarray,
-        x0: Optional[np.ndarray] = None,
-        prox_weight: float = 0.0,
-        x_anchor: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        """
-        Vector cross-entropy latent solve (softmax over bins within each sample) via L-BFGS.
-
-        Model: p_i = softmax(w^T (m_i ⊙ g(h[bin_i])))_within_sample
-        Objective: CE(y, p) + (r/2)||H||^2 + (λ/2)||(I-H_smooth)H||^2
-        """
-        if self.I_minus_H_smooth is None or self.H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_V_and_H first")
-        if self.cfg.latent_present_only:
-            log.warning("latent_present_only=True is ignored for cross_entropy latent solving")
-
-        y = np.asarray(y, dtype=np.float64).reshape(-1)
-        intrinsic_vec = np.asarray(intrinsic_vec, dtype=np.float64)  # (N_obs, d)
-        final_weights = np.asarray(final_weights, dtype=np.float64).reshape(-1)  # (d,)
-        bin_ids = np.asarray(bin_ids, dtype=np.int64).reshape(-1)
-        sample_ids = np.asarray(sample_ids, dtype=np.int64).reshape(-1)
-
-        if not (len(y) == len(intrinsic_vec) == len(bin_ids) == len(sample_ids)):
-            raise ValueError("y, intrinsic_vec, bin_ids, sample_ids must have the same length")
-        if intrinsic_vec.shape[1] != self.embed_dim:
-            raise ValueError(f"intrinsic_vec has shape {intrinsic_vec.shape}, expected (*, {self.embed_dim})")
-        if final_weights.shape[0] != self.embed_dim:
-            raise ValueError(f"final_weights has shape {final_weights.shape}, expected ({self.embed_dim},)")
-
-        order = np.argsort(sample_ids, kind="mergesort")
-        y_s = y[order]
-        m_s = intrinsic_vec[order]  # (N_obs, d)
-        b_s = bin_ids[order]
-        s_s = sample_ids[order]
-
-        unique_s, starts = np.unique(s_s, return_index=True)
-        ends = np.append(starts[1:], len(s_s))
-        n_samples = len(unique_s)
-
-        r = float(self.cfg.latent_l2_reg)
-        lam = float(self.cfg.latent_smooth_reg)
-
-        if x0 is None:
-            x0_use = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
-        else:
-            x0_use = np.asarray(x0, dtype=np.float64)
-            if x0_use.shape != (self.n_bins, self.embed_dim):
-                raise ValueError(f"x0 has shape {x0_use.shape}, expected ({self.n_bins}, {self.embed_dim})")
-
-        I_minus_H_smooth = self.I_minus_H_smooth  # local var for closure type safety
-        x_anchor_mat = np.asarray(x_anchor, dtype=np.float64).reshape(self.n_bins, self.embed_dim) if (prox_weight > 0 and x_anchor is not None) else None
-
-        def fun_and_jac(H_flat):
-            H_flat = H_flat.astype(np.float64, copy=False)
-            H = H_flat.reshape(self.n_bins, self.embed_dim)
-
-            h_obs = H[b_s]  # (N_obs, d)
-            gate_obs = self.gating.gate_np(h_obs)  # (N_obs, d)
-            gate_grad_obs = self.gating.gate_grad_np(h_obs)  # (N_obs, d)
-            m_tilde = m_s * gate_obs  # (N_obs, d)
-            logits = m_tilde @ final_weights             # (N_obs,)
-
-            grad_H = np.zeros((self.n_bins, self.embed_dim), dtype=np.float64)
-            loss = 0.0
-
-            for st, en in zip(starts, ends):
-                z_seg = logits[st:en]
-                y_seg = y_s[st:en]
-                b_seg = b_s[st:en]
-
-                z_max = float(np.max(z_seg)) if len(z_seg) > 0 else 0.0
-                exp_z = np.exp(z_seg - z_max)
-                denom = float(exp_z.sum()) + 1e-300
-                p = exp_z / denom
-
-                logsumexp = z_max + np.log(denom)
-                loss += float(-(y_seg * (z_seg - logsumexp)).sum())
-
-                grad_logits_seg = p - y_seg
-                grad_m_tilde_seg = grad_logits_seg[:, None] * final_weights[None, :]   # (seg, d)
-                grad_h_obs_seg = m_s[st:en] * grad_m_tilde_seg * gate_grad_obs[st:en]   # (seg, d)
-                np.add.at(grad_H, b_seg, grad_h_obs_seg)
-
-            if r > 0:
-                loss += 0.5 * r * float(np.sum(H ** 2))
-                grad_H += r * H
-
-            if lam > 0:
-                diff = I_minus_H_smooth.dot(H)  # (n_bins, d)
-                loss += 0.5 * lam * float(np.sum(diff ** 2))
-                grad_H += lam * (I_minus_H_smooth.T.dot(diff))
-
-            # Proximal term: (ρ/2)||H - anchor||²  — anchors update near previous latent
-            if prox_weight > 0 and x_anchor_mat is not None:
-                d_prox = H - x_anchor_mat
-                loss += 0.5 * prox_weight * float(np.sum(d_prox ** 2))
-                grad_H += prox_weight * d_prox
-
-            if n_samples > 0:
-                loss /= n_samples
-                grad_H /= n_samples
-
-            return loss, grad_H.ravel()
-
-        cache_x: Optional[np.ndarray] = None
-        cache_f: Optional[float] = None
-        cache_g: Optional[np.ndarray] = None
-
-        def _eval_cached(H_flat: np.ndarray) -> tuple[float, np.ndarray]:
-            nonlocal cache_x, cache_f, cache_g
-            if cache_x is not None and np.array_equal(H_flat, cache_x):
-                if cache_f is None or cache_g is None:
-                    raise RuntimeError("Invalid objective cache state")
-                return cache_f, cache_g
-
-            f_val, g_val = fun_and_jac(H_flat)
-            cache_x = H_flat.copy()
-            cache_f = float(f_val)
-            cache_g = g_val.copy()
-            return cache_f, cache_g
-
-        def fun(H_flat: np.ndarray) -> float:
-            f_val, _ = _eval_cached(H_flat)
-            return f_val
-
-        def jac(H_flat: np.ndarray) -> np.ndarray:
-            _, g_val = _eval_cached(H_flat)
-            return g_val
-
-        t0 = time.perf_counter()
-        res = minimize(
-            fun=fun, x0=x0_use.ravel(), jac=jac, method="L-BFGS-B",
-            options={
-                "maxiter": int(self.cfg.latent_convergence_maxiter),
-                "ftol": float(self.cfg.latent_convergence_tol),
-                "gtol": float(self.cfg.latent_convergence_gtol),
-                "maxfun": int(self.cfg.latent_convergence_maxfun),
-            },
-        )
-        solve_s = time.perf_counter() - t0
-        if not res.success:
-            log.warning(f"L-BFGS did not converge: {res.message}")
-
-        self._solve_calls += 1
-        log_interval = max(1, int(getattr(self.cfg, "latent_profile_log_interval", 50)))
-        if self._solve_calls % log_interval == 0:
-            log.info(
-                "Latent CE vector solve #%d: %.3fs, nit=%s, nfev=%s, njev=%s, success=%s",
-                self._solve_calls,
-                solve_s,
-                getattr(res, "nit", "n/a"),
-                getattr(res, "nfev", "n/a"),
-                getattr(res, "njev", "n/a"),
-                bool(getattr(res, "success", False)),
+        solve_start = time.perf_counter()
+
+        anchor_np = np.asarray(x_anchor, dtype=np.float32).reshape(latent_shape)
+        batch_bin_ids = np.asarray(bin_ids, dtype=np.int64).reshape(-1)
+        active_map = self._build_active_set(batch_bin_ids)
+
+        y_t = torch.as_tensor(np.asarray(y, dtype=np.float32).reshape(-1), device=self.device)
+        intrinsic_t = torch.as_tensor(np.asarray(intrinsic_vec, dtype=np.float32), device=self.device)
+        if intrinsic_t.ndim == 1:
+            intrinsic_t = intrinsic_t.unsqueeze(-1)
+        if self.embed_dim == 1 and intrinsic_t.shape[1] != 1:
+            intrinsic_t = intrinsic_t.reshape(-1, 1)
+        if intrinsic_t.shape[1] != self.embed_dim:
+            raise ValueError(
+                f"intrinsic_vec has shape {tuple(intrinsic_t.shape)}, expected (*, {self.embed_dim})"
             )
 
-        H = res.x.reshape(self.n_bins, self.embed_dim)
-        log.debug(f"Latent H (CE): mean={H.mean():.3f}, std={H.std():.3f}, range=[{H.min():.3f}, {H.max():.3f}]")
-        return H
+        sample_ids_t = None
+        if sample_ids is not None:
+            sample_ids_t = torch.as_tensor(np.asarray(sample_ids, dtype=np.int64).reshape(-1), dtype=torch.long, device=self.device)
+
+        w_t: Optional[torch.Tensor] = None
+        if self.embed_dim > 1:
+            w_t = torch.as_tensor(np.asarray(final_weights, dtype=np.float32).reshape(-1), device=self.device)
+            if w_t.shape[0] != self.embed_dim:
+                raise ValueError(f"final_weights has shape {tuple(w_t.shape)}, expected ({self.embed_dim},)")
+
+        anchor_t = torch.as_tensor(anchor_np, dtype=torch.float32, device=self.device)
+        active_ids_t = torch.as_tensor(active_map.global_ids, dtype=torch.long, device=self.device)
+        active_anchor = anchor_t[active_ids_t]
+        active_latent = torch.nn.Parameter(active_anchor.clone())
+        optimizer = torch.optim.Adam([active_latent], lr=lr)
+
+        row_ids = self._build_row_set(active_map.global_ids)
+        L_rows, L_RA = self._build_row_and_active_operators(row_ids, active_map.global_ids)
+
+        # Map global bin ids to local active set indices for the current batch; these are used to index into the active latent variable during optimization and must be consistent with the active set construction
+        local_bin_ids = np.searchsorted(active_map.global_ids, batch_bin_ids)
+        if not np.array_equal(active_map.global_ids[local_bin_ids], batch_bin_ids):
+            raise RuntimeError("Active-set searchsorted mapping failed for one or more bin ids")
+        local_bin_ids_t = torch.as_tensor(local_bin_ids, dtype=torch.long, device=self.device)
+
+        steps = int(self.cfg.latent_adam_steps)
+        if steps < 1:
+            steps = 1
+        
+        # Timing for the entire solve
+        setup_done = time.perf_counter() - solve_start
+        timings = {"setup_s": setup_done, "forward_s": [], "backward_s": [], "optim_s": [], "latent_lr": lr}
+
+        for _ in range(steps):
+            t0 = time.perf_counter()
+            optimizer.zero_grad(set_to_none=True)
+            active_update = active_latent - active_anchor
+
+            logits = self._logits_from_latent(active_latent, intrinsic_t, local_bin_ids_t, final_weights_t=w_t)
+
+            if loss_type == "cross_entropy":
+                if sample_ids_t is None:
+                    raise ValueError("sample_ids are required for cross_entropy latent solving")
+                data_loss, scale = self._cross_entropy_loss(y_t, logits, sample_ids_t)
+            elif loss_type == "logistic":
+                data_loss, scale = self._logistic_loss(y_t, logits)
+            else:
+                raise ValueError(f"Unsupported loss_type: {loss_type}")
+
+            loss = data_loss
+
+            # Regularization terms - L2 on H and smoothness via L_A
+            l2_coef = float(self.cfg.latent_l2_reg)
+            if l2_coef > 0:
+                loss = loss + 0.5 * l2_coef * torch.sum(active_latent * active_latent)
+
+            # Smoothness with row closure and frozen-boundary contribution.
+            smooth_coef = float(self.cfg.latent_smooth_reg)
+            if smooth_coef > 0:
+                base = torch.sparse.mm(L_rows, anchor_t)
+                corr = torch.sparse.mm(L_RA, active_update)
+                diff = base + corr
+                loss = loss + 0.5 * smooth_coef * torch.sum(diff * diff)
+
+            if prox_weight > 0:
+                loss = loss + 0.5 * float(prox_weight) * torch.sum(active_update * active_update)
+
+            loss = loss / scale
+            t1 = time.perf_counter()
+            
+            loss.backward()
+            t2 = time.perf_counter()
+            optimizer.step()
+            t3 = time.perf_counter()
+            
+            timings["forward_s"].append(t1 - t0)
+            timings["backward_s"].append(t2 - t1)
+            timings["optim_s"].append(t3 - t2)
+
+        out = anchor_np.copy()
+        out[active_map.global_ids] = active_latent.detach().cpu().numpy()
+        if self.embed_dim == 1:
+            return out.reshape(-1), timings
+        return out, timings
+
+    def _build_row_and_active_operators(
+        self,
+        row_ids: np.ndarray,
+        active_ids: np.ndarray,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Build the sparse operators needed for the smoothness regularization term in the optimization 
+        problem. L_rows is the operator that computes the smoothness differences for all rows in 
+        row_ids (using I - H), and L_RA is the operator that computes the contribution of active 
+        variables to those differences, allowing us to exclude inactive variables from the 
+        optimization problem while still correctly computing the smoothness regularization.
+
+        Args:
+            row_ids (np.ndarray): Row indices corresponding to the smoothness constraints that need to be evaluated for the current active set (includes active bins and any bins that share a smoothness constraint with them).
+            active_ids (np.ndarray): Indices of the active bins for the current optimization block (subset of row_ids that correspond to the bins we are optimizing over).
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Two sparse tensors: 
+                - L_rows: Sparse operator that computes the smoothness differences for all rows in row_ids when multiplied by the full latent variable h (shape [len(row_ids), n_bins]).
+                - L_RA: Sparse operator that computes the contribution of the active variables to those differences, effectively giving us the part of L_rows that corresponds to the active variables (shape [len(row_ids), len(active_ids)]).
+        """
+        if self.I_minus_H_smooth is None:
+            raise RuntimeError("I_minus_H_smooth is not initialized")
+        L_rows_csr = self.I_minus_H_smooth[row_ids, :].tocsr()
+        L_RA_csr = L_rows_csr[:, active_ids].tocsr()
+        return self._csr_to_torch(L_rows_csr), self._csr_to_torch(L_RA_csr)
+
+    def _build_active_set(self, batch_bin_ids: np.ndarray) -> ActiveSetMap:
+        """
+        Build the active set of bins for the current optimization block based on the batch BIN ids 
+        and the neighbor graph. The active set includes all bins in the current batch plus their 
+        neighbors up to a certain number of hops or a KNN-based cap, depending on the configuration. 
+        This function uses a breadth-first search approach to traverse the neighbor graph starting 
+        from the batch bins and adding neighbors until the specified criteria are met.
+
+        Args:
+            batch_bin_ids (np.ndarray): Array of BIN indices corresponding to the current batch (shape [batch_size,]).
+
+        Returns:
+            ActiveSetMap: Data structure containing the global BIN indices of the active set for the current optimization block, which includes the batch bins and their neighbors as determined by the configured criteria.
+        """
+        if self._graph_neighbors is None:
+            raise RuntimeError("Graph neighbors are not initialized")
+
+        mode = str(self.cfg.latent_k_hop_mode)
+        max_hops = max(1, int(self.cfg.latent_k_hop_threshold))
+        knn_cap = max(1, int(self.cfg.latent_hop_knn_cap))
+
+        active = set(int(b) for b in batch_bin_ids.tolist())
+        frontier = set(active)
+
+        if mode == "knn":
+            # Global cap on added neighbors: continue to further hops until we hit it.
+            target_size = len(active) + knn_cap
+            while frontier and len(active) < target_size:
+                next_frontier: set[int] = set()
+                for b in sorted(frontier):
+                    neigh_arr = self._graph_neighbors[int(b)]
+                    for n in neigh_arr:
+                        n_int = int(n)
+                        if n_int in active:
+                            continue
+                        active.add(n_int)
+                        next_frontier.add(n_int)
+                        if len(active) >= target_size:
+                            break
+                    if len(active) >= target_size:
+                        break
+                frontier = next_frontier
+        else:
+            for _ in range(max_hops):
+                next_frontier: set[int] = set()
+                for b in frontier:
+                    neigh_arr = self._graph_neighbors[int(b)]
+                    for n in neigh_arr:
+                        n_int = int(n)
+                        if n_int not in active:
+                            active.add(n_int)
+                            next_frontier.add(n_int)
+                frontier = next_frontier
+                if not frontier:
+                    break
+
+        active_ids = np.fromiter(active, dtype=np.int64)
+        active_ids.sort()
+        return ActiveSetMap(global_ids=active_ids)
+
+    def _build_graph_active_neighbors(self) -> List[np.ndarray]:
+        """
+        Build the list of neighbor arrays for each node from the NeighbourGraph.neighbours 
+        structure, which is used to construct the active set of bins for each optimization block. 
+        Each entry in the list corresponds to a node and contains an array of its neighbors 
+        (defined with KNN or threshold, on taxonomic or embedding-based distances), which 
+        are included in the active set when that node is part of the batch.
+        """
+        neighbors: List[np.ndarray] = []
+        for i in range(self.n_bins):
+            neigh = np.asarray(self.ng.neighbours[i], dtype=np.int64)
+            neighbors.append(neigh)
+
+        log.info("Active graph neighbors initialized from NeighbourGraph.neighbours")
+        return neighbors
+
+    def _logits_from_latent(
+        self,
+        H_active: torch.Tensor,
+        intrinsic_t: torch.Tensor,
+        local_bin_ids_t: torch.Tensor,
+        final_weights_t: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        h_obs = H_active[local_bin_ids_t]
+        if self.embed_dim == 1:
+            return intrinsic_t.squeeze(-1) + h_obs.squeeze(-1)
+
+        if final_weights_t is None:
+            raise ValueError("final_weights_t is required for embed_dim > 1")
+
+        gated = self.gating.gate_torch(h_obs)
+        m_tilde = intrinsic_t * gated
+        return torch.sum(m_tilde * final_weights_t.unsqueeze(0), dim=1)
+
+    def _cross_entropy_loss(
+        self,
+        y_t: torch.Tensor,
+        logits: torch.Tensor,
+        sample_ids_t: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        unique_s, inv = torch.unique(sample_ids_t, sorted=False, return_inverse=True)
+        n_samples = max(1, int(unique_s.numel()))
+
+        max_per = torch.full((n_samples,), -torch.inf, dtype=logits.dtype, device=logits.device)
+        max_per.scatter_reduce_(0, inv, logits, reduce="amax", include_self=True)
+
+        logits_shift = logits - max_per[inv]
+        exp_logits = torch.exp(logits_shift)
+        denom = torch.zeros((n_samples,), dtype=logits.dtype, device=logits.device)
+        denom.index_add_(0, inv, exp_logits)
+        denom = denom + 1e-12
+
+        logsumexp = torch.log(denom) + max_per
+        ce_sum = -(y_t * (logits - logsumexp[inv])).sum()
+        return ce_sum, torch.tensor(float(n_samples), dtype=logits.dtype, device=logits.device)
+
+    def _logistic_loss(
+        self,
+        y_t: torch.Tensor,
+        logits: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        bce_sum = F.binary_cross_entropy_with_logits(logits, y_t, reduction="sum")
+        scale = torch.tensor(float(max(1, y_t.numel())), dtype=logits.dtype, device=logits.device)
+        return bce_sum, scale

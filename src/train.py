@@ -6,11 +6,12 @@ import pickle
 import sys
 import time
 from dataclasses import asdict
-from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging as log
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -24,96 +25,12 @@ except ImportError:
 
 from config import Config, set_seed
 from dataset import MBDataset, collate_samples
-from latent_solver import LatentSolver
-from pytorch_latent_solver import TorchLatentSolver
+from Metabarcoding.src.latent_solver import LatentSolver
 from loss import Loss
 from mlp import MLPModel
 from model import Model
 from neighbor_graph import NeighbourGraph
 from utils import load
-
-
-def compute_extended_metrics(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    sample_labels: Optional[np.ndarray] = None,
-) -> Dict[str, float]:
-    """Compute regression metrics aligned with visualization outputs."""
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    valid = np.isfinite(y_true) & np.isfinite(y_pred)
-    y_true = y_true[valid]
-    y_pred = np.clip(y_pred[valid], 0, 1)
-    eps = 1e-10
-
-    rmse_macro = np.nan
-    mae_macro = np.nan
-    kl_divergence = np.nan
-
-    if sample_labels is not None:
-        sample_labels = np.asarray(sample_labels)
-        sample_labels_v = sample_labels[valid]
-        rmse_per, mae_per, kl_per = [], [], []
-        for sample in np.unique(sample_labels_v):
-            mask = sample_labels_v == sample
-            true_s = y_true[mask]
-            pred_s = y_pred[mask]
-            if len(true_s) == 0:
-                continue
-            rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
-            mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
-            true_s_norm = (true_s + eps) / (true_s + eps).sum()
-            pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
-            kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
-        if rmse_per:
-            rmse_macro = float(np.mean(rmse_per))
-            mae_macro = float(np.mean(mae_per))
-            kl_divergence = float(np.mean(kl_per))
-
-    rmse_micro = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-    mae_micro = float(np.mean(np.abs(y_true - y_pred)))
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    r2 = float(1 - ss_res / (ss_tot + eps))
-
-    y_true_log = np.log(y_true + 1)
-    y_pred_log = np.log(y_pred + 1)
-    ss_res_log = np.sum((y_true_log - y_pred_log) ** 2)
-    ss_tot_log = np.sum((y_true_log - np.mean(y_true_log)) ** 2)
-    r2_log = float(1 - ss_res_log / (ss_tot_log + eps))
-
-    zero_mask = y_true == 0
-    nonzero_mask = y_true > 0
-    rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))) if zero_mask.sum() > 0 else np.nan
-    mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))) if zero_mask.sum() > 0 else np.nan
-    rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2))) if nonzero_mask.sum() > 0 else np.nan
-    mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask]))) if nonzero_mask.sum() > 0 else np.nan
-
-    corr = np.corrcoef(y_true, y_pred)[0, 1] if len(y_true) > 1 else 0.0
-    correlation = 0.0 if np.isnan(corr) else float(corr)
-
-    nz = y_true != 0
-    rel_error = np.zeros_like(y_true, dtype=float)
-    rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
-    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else np.nan
-
-    return {
-        "RMSE (micro)": rmse_micro,
-        "RMSE (macro)": rmse_macro,
-        "MAE (micro)": mae_micro,
-        "MAE (macro)": mae_macro,
-        "Absolute Relative Error": absolute_relative_error,
-        "R²": r2,
-        "R² (log + 1)": r2_log,
-        "RMSE (zeros)": rmse_zeros,
-        "MAE (zeros)": mae_zeros,
-        "RMSE (non-zeros)": rmse_nonzeros,
-        "MAE (non-zeros)": mae_nonzeros,
-        "KL Divergence": kl_divergence,
-        "Correlation": correlation,
-        "n_zeros": float(zero_mask.sum()),
-        "n_nonzeros": float(nonzero_mask.sum()),
-    }
 
 
 class Trainer:
@@ -123,8 +40,6 @@ class Trainer:
     def __init__(
         self,
         cfg: Config,
-        data_path: Optional[str] = None,
-        data_dir: Optional[str] = None,
         model_name: str = "default",
         run_id: Optional[str] = None,
         resume: bool = False,
@@ -135,27 +50,15 @@ class Trainer:
         self.run_id = run_id or time.strftime("%Y-%m-%d_%H-%M-%S")
         self.resume = resume
 
-        if data_dir is not None:
-            log.warning("`data_dir` is deprecated in Trainer and will be ignored. Raw preprocessing is always used.")
-        effective_data_path = os.path.abspath(data_path or self.cfg.data_path)
-
-        if self.cfg.use_embedding:
-            # Keep barcode path aligned with the actual training CSV unless an explicit valid absolute path is provided.
-            barcode_path = self.cfg.barcode_data_path
-            if data_path is not None:
-                self.cfg.barcode_data_path = effective_data_path
-            elif not barcode_path:
-                self.cfg.barcode_data_path = effective_data_path
-            elif not os.path.isabs(barcode_path) or not os.path.exists(barcode_path):
-                self.cfg.barcode_data_path = effective_data_path
+        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and self.cfg.embedding_path is None:
+            self.cfg.barcode_data_path = self.cfg.data_path
 
         self.start_epoch = 0
         self.current_epoch = -1
         self.global_step = 0
         self.best_val_loss = float("inf")
         self.last_val_metrics: Dict[str, float] = {}
-        self.latent_solve_calls = 0
-        self._torch_latent_state_initialized = False
+        self.latent_global_step = 0
 
         self.train_losses: List[Tuple[int, float]] = []
         self.val_losses: List[Tuple[int, float]] = []
@@ -165,7 +68,6 @@ class Trainer:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         data, bins_df, bin_index, sample_index, split_indices = load(
-            effective_data_path,
             self.cfg,
             save_data=False,
             fixed_split_indices=fixed_split_indices,
@@ -179,21 +81,13 @@ class Trainer:
         self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
         self.neighbour_graph.build()
 
-        if self.cfg.latent_solver_backend == "torch":
-            latent_solver = TorchLatentSolver(
-                self.cfg,
-                self.neighbour_graph,
-                embed_dim=self.cfg.embed_dim,
-                gating_fn=self.cfg.gating_fn,
-            )
-        else:
-            latent_solver = LatentSolver(
-                self.cfg,
-                self.neighbour_graph,
-                embed_dim=self.cfg.embed_dim,
-                gating_fn=self.cfg.gating_fn,
-            )
-        latent_solver.build_V_and_H(data["train"]["X"], bin_index, method="nw")
+        latent_solver = LatentSolver(
+            self.cfg,
+            self.neighbour_graph,
+            embed_dim=self.cfg.embed_dim,
+            gating_fn=self.cfg.gating_fn,
+        )
+        latent_solver.build_interpolation_matrix(method="nw")
 
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
@@ -234,9 +128,8 @@ class Trainer:
         train = MBDataset(data["train"], bin_index, sample_index, loss_mode=self.loss_mode)
         val = MBDataset(data["val"], bin_index, sample_index, loss_mode=self.loss_mode)
         test = MBDataset(data["test"], bin_index, sample_index, loss_mode=self.loss_mode)
-        train_bin_ordered = MBDataset(data["train"], bin_index, sample_index, loss_mode="bin")
 
-        batch_size = cfg.batch_size_sample if self.loss_mode == "sample" else cfg.batch_size_bin
+        batch_size = self.cfg.batch_size_sample if self.loss_mode == "sample" else self.cfg.batch_size_bin
         collate_fn = collate_samples if self.loss_mode == "sample" else None
         # Safer loader defaults across platforms: multiprocessing + pinned memory can
         # be unstable on macOS/MPS in some environments.
@@ -268,12 +161,9 @@ class Trainer:
             num_workers=num_workers,
             pin_memory=pin_memory,
         )
-        self.train_loader_bin_ordered = DataLoader(
-            train_bin_ordered,
-            batch_size=self.cfg.batch_size_bin,
-            shuffle=False,
-            collate_fn=None,
-        )
+
+        self._latent_total_steps = max(1, self.cfg.epochs * len(self.train_loader))
+        self._latent_warmup_steps = max(0, int(self.cfg.latent_lr_warmup_frac * self._latent_total_steps))
 
         total_steps = self.cfg.epochs * len(self.train_loader)
         warmup_steps = max(1, int(0.1 * total_steps))
@@ -318,6 +208,7 @@ class Trainer:
             "rng_numpy": np.random.get_state(),
             "rng_torch": torch.get_rng_state(),
             "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "latent_global_step": self.latent_global_step,
             "saved_at": time.strftime("%Y-%m-%d_%H-%M-%S"),
         }
 
@@ -350,6 +241,30 @@ class Trainer:
         ckpts.sort(key=os.path.getmtime, reverse=True)
         return ckpts[0]
 
+    def _latent_lr_for_step(self, step_idx: int) -> float:
+        total_steps = max(1, self._latent_total_steps)
+        base_lr = float(self.cfg.latent_adam_lr)
+        start_factor = float(self.cfg.latent_lr_warmup_start_factor)
+        eta_min = float(self.cfg.latent_lr_eta_min)
+        warmup_steps = min(max(0, int(self._latent_warmup_steps)), total_steps)
+        step_idx = max(0, min(int(step_idx), total_steps - 1))
+
+        if warmup_steps > 0 and step_idx < warmup_steps:
+            if warmup_steps == 1:
+                return max(eta_min, base_lr)
+            progress = step_idx / float(warmup_steps - 1)
+            factor = start_factor + (1.0 - start_factor) * progress
+            return max(eta_min, base_lr * factor)
+
+        cosine_steps = max(1, total_steps - warmup_steps)
+        if cosine_steps == 1:
+            return max(eta_min, base_lr)
+
+        cosine_step = min(step_idx - warmup_steps, cosine_steps - 1)
+        progress = cosine_step / float(cosine_steps - 1)
+        cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
+        return float(eta_min + (base_lr - eta_min) * cosine)
+
     def _resume_from_latest(self) -> None:
         ckpt_path = self._find_latest_checkpoint_path()
         if ckpt_path is None:
@@ -376,6 +291,7 @@ class Trainer:
         self.train_losses = list(checkpoint.get("train_losses", []))
         self.val_losses = list(checkpoint.get("val_losses", []))
         self.last_val_metrics = dict(checkpoint.get("val_metrics", {}))
+        self.latent_global_step = int(checkpoint.get("latent_global_step", 0))
 
         rng_numpy = checkpoint.get("rng_numpy")
         rng_torch = checkpoint.get("rng_torch")
@@ -459,9 +375,8 @@ class Trainer:
 
         return float(running_loss / max(1, n_samples))
 
-    def solve_latent(self, batch: Dict[str, torch.Tensor], prox_weight: float = 0.0) -> np.ndarray:
+    def solve_latent(self, batch: Dict[str, torch.Tensor], prox_weight: float = 0.0) -> Tuple[np.ndarray, Dict[str, float]]:
         self.model.eval()
-        feature_t0 = time.perf_counter()
 
         with torch.no_grad():
             inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
@@ -489,49 +404,25 @@ class Trainer:
                 bin_ids = bin_idx.detach().cpu().numpy().reshape(-1).astype(np.int64)
                 sample_ids = sample_idx.detach().cpu().numpy().reshape(-1).astype(np.int64)
 
-        feature_s = time.perf_counter() - feature_t0
+        latent_anchor = self.model.latent_vec.detach().cpu().numpy()
+        latent_lr = self._latent_lr_for_step(self.latent_global_step)
 
-        concat_t0 = time.perf_counter()
-        x0_latent: Optional[np.ndarray] = None
-        x_anchor_latent: Optional[np.ndarray] = None
 
-        # Torch latent solver is stateful: initialize once from model latent, then reuse internal state.
-        if self.cfg.latent_solver_backend == "torch":
-            if not self._torch_latent_state_initialized:
-                x0_latent = self.model.latent_vec.detach().cpu().numpy()
-                self._torch_latent_state_initialized = True
-        else:
-            x0_latent = self.model.latent_vec.detach().cpu().numpy()
-            x_anchor_latent = x0_latent
-
-        concat_s = time.perf_counter() - concat_t0
-
-        solve_t0 = time.perf_counter()
-        latent_vec = self.model.latent_solver.solve(
+        latent_vec, timings = self.model.latent_solver.solve(
             y=y_vec,
             intrinsic_vec=intrinsic_vec,
             final_weights=self.model.final_linear.weight.detach().cpu().numpy().squeeze() if self.cfg.embed_dim > 1 else None,
             bin_ids=bin_ids,
             sample_ids=sample_ids,
             loss_type=self.loss_type,
-            x0=x0_latent,
             prox_weight=prox_weight,
-            x_anchor=x_anchor_latent,
+            x_anchor=latent_anchor,
+            latent_lr=latent_lr,
         )
-        solve_s = time.perf_counter() - solve_t0
 
         self.model.set_latent(latent_vec)
-        self.latent_solve_calls += 1
-        log_interval = max(1, int(getattr(self.cfg, "latent_profile_log_interval", 50)))
-        if self.latent_solve_calls % log_interval == 0:
-            log.info(
-                "Latent solve #%d breakdown: feature=%.3fs, concat=%.3fs, optimizer=%.3fs",
-                self.latent_solve_calls,
-                feature_s,
-                concat_s,
-                solve_s,
-            )
-        return latent_vec
+        self.latent_global_step += 1
+        return latent_vec, timings
 
     @torch.no_grad()
     def get_predictions(
@@ -614,9 +505,140 @@ class Trainer:
             np.array(bin_labels),
         )
 
+
     def compute_metrics(self, split: Literal["train", "val", "test"]) -> Dict[str, float]:
-        preds, targets, sample_labels, _ = self.get_predictions(split=split)
-        return compute_extended_metrics(y_true=targets, y_pred=preds, sample_labels=sample_labels)
+        y_pred, y_true, sample_labels, _ = self.get_predictions(split=split)
+
+        y_true = np.asarray(y_true, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+        valid = np.isfinite(y_true) & np.isfinite(y_pred)
+        y_true = y_true[valid]
+        y_pred = np.clip(y_pred[valid], 0, 1)
+        eps = 1e-10
+        
+        def _shannon_diversity(values: np.ndarray, eps: float = 1e-10) -> float:
+            """Compute Shannon diversity from non-negative abundance values."""
+            arr = np.asarray(values, dtype=float).reshape(-1)
+            if arr.size == 0:
+                return np.nan
+            probs = (arr + eps) / np.sum(arr + eps)
+            return float(-np.sum(probs * np.log(probs + eps)))
+        
+        def _spearman_rho(x: np.ndarray, y: np.ndarray) -> Optional[float]:
+            """Compute Spearman rho and return None if undefined."""
+            rank_x = pd.Series(x).rank(method="average").to_numpy(dtype=float)
+            rank_y = pd.Series(y).rank(method="average").to_numpy(dtype=float)
+            if np.std(rank_x) == 0 or np.std(rank_y) == 0:
+                return None
+            rho = float(np.corrcoef(rank_x, rank_y)[0, 1])
+            return rho if np.isfinite(rho) else None
+        
+        def _r2_and_intercept(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float]:
+            """Compute R² and intercept from scatter points."""
+            if len(y_true) == 0:
+                return np.nan, np.nan
+            ss_res = np.sum((y_true - y_pred) ** 2)
+            ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+            r2 = float(1 - ss_res / (ss_tot + eps))
+            
+            slope, intercept = np.polyfit(y_true, y_pred, 1)
+            intercept = float(intercept) if np.isfinite(intercept) else np.nan
+            return r2, intercept
+
+        rmse_macro = np.nan
+        mae_macro = np.nan
+        kl_divergence = np.nan
+        shannon_r2 = np.nan
+        shannon_intercept = np.nan
+        spearman_macro = np.nan
+
+        if sample_labels is not None:
+            sample_labels_v = np.asarray(sample_labels)[valid]
+            rmse_per, mae_per, kl_per = [], [], []
+            shannon_true_per, shannon_pred_per = [], []
+            spearman_per = []
+            for sample in np.unique(sample_labels_v):
+                mask = sample_labels_v == sample
+                true_s = y_true[mask]
+                pred_s = y_pred[mask]
+                if len(true_s) == 0:
+                    continue
+                rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
+                mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
+                true_s_norm = (true_s + eps) / (true_s + eps).sum()
+                pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
+                kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
+
+                shannon_true = _shannon_diversity(true_s, eps)
+                shannon_pred = _shannon_diversity(pred_s, eps)
+                if np.isfinite(shannon_true) and np.isfinite(shannon_pred):
+                    shannon_true_per.append(shannon_true)
+                    shannon_pred_per.append(shannon_pred)
+
+                if len(true_s) > 1:
+                    rho = _spearman_rho(true_s, pred_s)
+                    if rho is not None:
+                        spearman_per.append(rho)
+
+            if rmse_per:
+                rmse_macro = float(np.mean(rmse_per))
+                mae_macro = float(np.mean(mae_per))
+                kl_divergence = float(np.mean(kl_per))
+
+            if len(shannon_true_per) > 1:
+                shannon_r2, shannon_intercept = _r2_and_intercept(np.array(shannon_true_per), np.array(shannon_pred_per))
+
+            if spearman_per:
+                spearman_macro = float(np.mean(spearman_per))
+
+        rmse_micro = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+        mae_micro = float(np.mean(np.abs(y_true - y_pred)))
+        ss_res = np.sum((y_true - y_pred) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+        r2 = float(1 - ss_res / (ss_tot + eps))
+
+        y_true_log = np.log(y_true + 1)
+        y_pred_log = np.log(y_pred + 1)
+        ss_res_log = np.sum((y_true_log - y_pred_log) ** 2)
+        ss_tot_log = np.sum((y_true_log - np.mean(y_true_log)) ** 2)
+        r2_log = float(1 - ss_res_log / (ss_tot_log + eps))
+
+        zero_mask = y_true == 0
+        nonzero_mask = y_true > 0
+        rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))) if zero_mask.sum() > 0 else np.nan
+        mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))) if zero_mask.sum() > 0 else np.nan
+        rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2))) if nonzero_mask.sum() > 0 else np.nan
+        mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask]))) if nonzero_mask.sum() > 0 else np.nan
+
+        corr = np.corrcoef(y_true, y_pred)[0, 1] if len(y_true) > 1 else 0.0
+        correlation = 0.0 if np.isnan(corr) else float(corr)
+
+        nz = y_true != 0
+        rel_error = np.zeros_like(y_true, dtype=float)
+        rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
+        absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else np.nan
+
+        return {
+            "RMSE (micro)": rmse_micro,
+            "RMSE (macro)": rmse_macro,
+            "MAE (micro)": mae_micro,
+            "MAE (macro)": mae_macro,
+            "Absolute Relative Error": absolute_relative_error,
+            "R² (Shannon diversity)": shannon_r2,
+            "Shannon intercept": shannon_intercept,
+            "Spearman Rho (macro)": spearman_macro,
+            "R²": r2,
+            "R² (log + 1)": r2_log,
+            "RMSE (zeros)": rmse_zeros,
+            "MAE (zeros)": mae_zeros,
+            "RMSE (non-zeros)": rmse_nonzeros,
+            "MAE (non-zeros)": mae_nonzeros,
+            "KL Divergence": kl_divergence,
+            "Correlation": correlation,
+            "n_zeros": float(zero_mask.sum()),
+            "n_nonzeros": float(nonzero_mask.sum()),
+        }
+
 
     def _metric_key(self, metric_name: str) -> str:
         return (
@@ -672,32 +694,40 @@ class Trainer:
                 batch_start = time.perf_counter()
 
                 latent_start = time.perf_counter()
-                latent_vec = self.solve_latent(batch=batch, prox_weight=prox_weight)
+                latent_vec, latent_timings = self.solve_latent(batch=batch, prox_weight=prox_weight)
                 latent_s = time.perf_counter() - latent_start
 
-                loss_value, timings = self._train_batch(batch)
+                loss_value, mlp_timings = self._train_batch(batch)
                 self.scheduler.step()
                 self.global_step += 1
 
                 total_s = time.perf_counter() - batch_start
-                batch_forward.append(timings["forward_s"])
-                batch_backward.append(timings["backward_s"])
-                batch_optim.append(timings["optim_s"])
+                batch_forward.append(mlp_timings["forward_s"])
+                batch_backward.append(mlp_timings["backward_s"])
+                batch_optim.append(mlp_timings["optim_s"])
                 batch_total.append(total_s)
                 batch_latent.append(latent_s)
 
                 if use_wandb and WANDB_AVAILABLE:
+                    # timings = {"setup_s": setup_done, "epoch_logits_s": [], "epoch_loss_s": [], "epoch_backward_s": [], "epoch_optimizer_s": []}
                     wandb.log(
                         {
                             "train/batch/loss": loss_value,
-                            "timing/batch/forward_s": timings["forward_s"],
-                            "timing/batch/backward_s": timings["backward_s"],
-                            "timing/batch/optim_s": timings["optim_s"],
+                            "train/batch/mlp_lr": self.optimizer.param_groups[0]["lr"],
+                            "train/batch/latent_lr": latent_timings["latent_lr"],
+                            "timing/batch/mlp/forward_s": mlp_timings["forward_s"],
+                            "timing/batch/mlp/backward_s": mlp_timings["backward_s"],
+                            "timing/batch/mlp/optim_s": mlp_timings["optim_s"],
                             "timing/batch/latent_solve_s": latent_s,
+                            "timing/batch/latent/setup_s": latent_timings["setup_s"],
+                            "timing/batch/latent/forward_s": latent_timings["forward_s"],
+                            "timing/batch/latent/backward_s": latent_timings["backward_s"],
+                            "timing/batch/latent/optim_s": latent_timings["optim_s"],
                             "timing/batch/total_s": total_s,
                             "train/epoch": epoch,
                             "train/batch_idx": batch_idx,
                             "train/global_step": self.global_step,
+                            "train/latent_global_step": self.latent_global_step,
                         },
                         step=self.global_step,
                     )
@@ -709,10 +739,14 @@ class Trainer:
             val_eval_start = time.perf_counter()
             val_loss = self.validate(split="val")
             val_eval_s = time.perf_counter() - val_eval_start
+            
+            train_metric_start = time.perf_counter()
+            train_metrics = self.compute_metrics(split="train")
+            train_metric_s = time.perf_counter() - train_metric_start
 
-            metric_start = time.perf_counter()
+            val_metric_start = time.perf_counter()
             val_metrics = self.compute_metrics(split="val")
-            metric_s = time.perf_counter() - metric_start
+            val_metric_s = time.perf_counter() - val_metric_start
             self.last_val_metrics = val_metrics
 
             self.train_losses.append((epoch, train_loss))
@@ -743,18 +777,17 @@ class Trainer:
                 "timing/epoch/total_s": float(epoch_total_s),
                 "timing/epoch/train_eval_s": float(train_eval_s),
                 "timing/epoch/val_eval_s": float(val_eval_s),
-                "timing/epoch/metrics_s": float(metric_s),
+                "timing/epoch/train_metrics_s": float(train_metric_s),
+                "timing/epoch/val_metrics_s": float(val_metric_s),
                 "timing/epoch/batch_forward_mean_s": float(np.mean(batch_forward_arr)),
                 "timing/epoch/batch_backward_mean_s": float(np.mean(batch_backward_arr)),
                 "timing/epoch/batch_optim_mean_s": float(np.mean(batch_optim_arr)),
                 "timing/epoch/batch_total_mean_s": float(np.mean(batch_total_arr)),
                 "timing/epoch/batch_latent_mean_s": float(np.mean(batch_latent_arr)),
-                "timing/epoch/batch_forward_p95_s": float(np.percentile(batch_forward_arr, 95)),
-                "timing/epoch/batch_backward_p95_s": float(np.percentile(batch_backward_arr, 95)),
-                "timing/epoch/batch_total_p95_s": float(np.percentile(batch_total_arr, 95)),
-                "timing/epoch/batch_latent_p95_s": float(np.percentile(batch_latent_arr, 95)),
                 "timing/epoch/latent_total_s": float(np.sum(batch_latent_arr)),
             }
+            for metric_name, metric_value in train_metrics.items():
+                epoch_log_payload[f"train/metrics/{self._metric_key(metric_name)}"] = metric_value
             for metric_name, metric_value in val_metrics.items():
                 epoch_log_payload[f"val/metrics/{self._metric_key(metric_name)}"] = metric_value
 
@@ -774,19 +807,12 @@ class Trainer:
 
         self._plot_training_progress()
 
-        test_eval_start = time.perf_counter()
         test_loss = self.validate(split="test")
-        test_eval_s = time.perf_counter() - test_eval_start
-
-        test_metric_start = time.perf_counter()
         test_metrics = self.compute_metrics(split="test")
-        test_metric_s = time.perf_counter() - test_metric_start
 
         if use_wandb and WANDB_AVAILABLE:
             payload = {
                 "test/loss": test_loss,
-                "timing/test/eval_s": float(test_eval_s),
-                "timing/test/metrics_s": float(test_metric_s),
             }
             for metric_name, metric_value in test_metrics.items():
                 payload[f"test/metrics/{self._metric_key(metric_name)}"] = metric_value

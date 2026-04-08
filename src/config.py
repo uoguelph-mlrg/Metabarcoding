@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from math import e
 from typing import Optional, Literal
 import os
 import numpy as np
@@ -20,8 +19,8 @@ class Config:
     val_frac: float = 0.1
 
     # Neighbour graph
-    use_taxonomy: bool = False           # set to True to use taxonomic distances
-    use_embedding: bool = True         # set to True to use DNA embedding-based neighbors
+    use_taxonomy: bool = False          # set to True to use taxonomic distances
+    use_embedding: bool = True          # set to True to use DNA embedding-based neighbors
     neighbor_mode: str = "knn"          # "threshold" for distance-based, "knn" for K-nearest neighbors
     K: int = 10                         # number of neighbors (used when neighbor_mode="knn")
     dist_thres: int = 4                 # max taxonomic distance (used when neighbor_mode="threshold")
@@ -30,7 +29,7 @@ class Config:
 
     # DNA embedding settings (used when use_embedding=True)
     embedding_path: Optional[str] = None       # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")    # path to TSV with 'bin_uri' and 'seq' columns
+    barcode_data_path: Optional[str] = None    # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"        # distance metric: "cosine" or "euclidean"
 
     # Latent solver - regularization settings
@@ -42,13 +41,14 @@ class Config:
     latent_convergence_gtol: float = 1e-3   # Gradient tolerance for latent L-BFGS solves
     latent_convergence_maxiter: int = 30    # Max iterations for latent L-BFGS solves
     latent_convergence_maxfun: int = 120    # Max function evaluations for latent L-BFGS solves
-    latent_profile_log_interval: int = 50   # Log latent-solver timing every N solves
-    latent_solver_backend: Literal["numpy", "torch"] = "torch"
-    latent_adam_steps: int = 3
-    latent_adam_lr: float = 1e-2
+    latent_adam_steps: int = 15
+    latent_adam_lr: float = 1e-2            #FIXME: parameter redundant
+    latent_lr_warmup_start_factor: float = 1e-3  # Initial multiplier for latent LR warmup
+    latent_lr_warmup_frac: float = 0.1           # Fraction of total latent solves used for warmup
+    latent_lr_eta_min: float = 1e-6              # Minimum latent LR reached by cosine decay
     latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"
     latent_k_hop_threshold: int = 2
-    latent_k_hop_knn: int = 64
+    latent_hop_knn_cap: int = 64
     
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent
@@ -67,7 +67,7 @@ class Config:
     batch_size_bin: int = 1024          # Batch size (in number of observations not samples)
     batch_size_sample: int = 8          # Batch size in number of samples
     lr: float = 5e-4                    # Learning rate for MLP parameters
-    latent_lr: float = 1e-2             # Latent learning rate (rescaled, new parameter)
+    latent_lr: float = 1e-2             # Legacy latent LR field; use latent_adam_lr and schedule params
     weight_decay: float = 1e-5          # Weight decay for MLP parameters
     latent_warmup_frac: float = 0.2     # Fraction of epochs over which proximal damping decays from ρ0 → 0
     latent_prox_scale: float = 50.0     # ρ0 = latent_prox_scale × latent_l2_reg at epoch 0

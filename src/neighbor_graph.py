@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any, Union, Literal, Set, Callable, Iterable, Type
 import os
 import numpy as np
 import pandas as pd
@@ -36,7 +36,7 @@ class NeighbourGraph:
         self.distances: List[np.ndarray] = [np.array([]) for _ in range(self.n_bins)]
 
         # Load (or compute) embeddings when embedding mode is requested
-        self.embeddings: Optional[np.ndarray] = None
+        self.embeddings: Optional[np.ndarray] = None  # shape [n_bins, emb_dim]
         self.bins_with_embedding: np.ndarray = np.zeros(self.n_bins, dtype=bool)  # True where embedding exists
         if self.cfg.use_embedding:
             self._load_or_compute_embeddings()
@@ -58,10 +58,10 @@ class NeighbourGraph:
         Bins with no sequence get a zero vector and bins_with_embedding[i] = False;
         those bins will fall back to taxonomy-based neighbours at build time.
         """
-        embedding_path = getattr(self.cfg, "embedding_path", None)
-        barcode_data_path = getattr(self.cfg, "barcode_data_path", None)
+        embedding_path = self.cfg.embedding_path
+        barcode_data_path = self.cfg.barcode_data_path
 
-        emb_dict: dict  # bin_uri -> np.ndarray
+        emb_dict: Dict[str, np.ndarray] = {}  # bin_uri -> np.ndarray
 
         if embedding_path is not None and os.path.exists(embedding_path):
             log.info(f"Loading precomputed embeddings from {embedding_path}")
@@ -75,7 +75,7 @@ class NeighbourGraph:
             # Cache to disk for future runs
             if embedding_path is not None:
                 os.makedirs(os.path.dirname(os.path.abspath(embedding_path)), exist_ok=True)
-                np.save(embedding_path, emb_dict)
+                np.save(embedding_path, emb_dict, allow_pickle=True)
                 log.info(f"Saved computed embeddings to {embedding_path}")
         else:
             raise ValueError(
@@ -91,8 +91,9 @@ class NeighbourGraph:
         for row_i, row in self.bins.iterrows():
             uri = row["bin_uri"]
             if uri in emb_dict:
-                self.embeddings[row_i] = emb_dict[uri].astype(np.float32)
-                self.bins_with_embedding[row_i] = True
+                idx = int(row_i)
+                self.embeddings[idx] = emb_dict[uri].astype(np.float32)
+                self.bins_with_embedding[idx] = True
 
         n_missing = int((~self.bins_with_embedding).sum())
         n_present = int(self.bins_with_embedding.sum())
@@ -105,7 +106,7 @@ class NeighbourGraph:
         self,
         barcode_data_path: str,
         batch_size: int = 64,
-    ) -> dict:
+    ) -> Dict[str, np.ndarray]:
         """
         Run BarcodeBERT inference on sequences in barcode_data_path and return a
         dict mapping bin_uri -> mean-pooled embedding vector (numpy float32).
@@ -118,7 +119,7 @@ class NeighbourGraph:
             batch_size: Number of sequences per inference batch.
 
         Returns:
-            dict: {bin_uri: np.ndarray of shape [hidden_dim]}
+            Dict[str, np.ndarray]: {bin_uri: np.ndarray of shape [hidden_dim]}
         """
         try:
             from transformers import AutoTokenizer, AutoModel
@@ -152,7 +153,7 @@ class NeighbourGraph:
 
         log.info(f"Running BarcodeBERT inference on {len(sequences)} BINs (batch_size={batch_size}) ...")
 
-        emb_dict: dict = {}
+        emb_dict: Dict[str, np.ndarray] = {}
         with torch.no_grad():
             for start in range(0, len(sequences), batch_size):
                 batch_seqs = sequences[start : start + batch_size]
@@ -491,7 +492,7 @@ class NeighbourGraph:
         Build KNN based on embeddings using sklearn.NearestNeighbors.
 
         Cosine distance is computed by L2-normalizing embeddings before Euclidean
-        nearest-neighbor search (equivalent and faster than direct cosine search).
+        nearest-neighbor search.
         Bins without embeddings fall back to taxonomy-based KNN.
 
         Args:
