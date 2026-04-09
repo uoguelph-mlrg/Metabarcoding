@@ -1,4 +1,4 @@
-from typing import Any, Union, Optional, Literal
+from typing import Any, Dict, Optional, Literal, Union
 import numpy as np
 import torch
 import torch.nn as nn
@@ -34,6 +34,7 @@ class Model(nn.Module):
         gating_alpha: float = 0.5, # FIXME: have generic parameters variable that can be assigned from a dict (using the correct key for each gating function) to avoid unused parameters and confusion
         gating_kappa: float = 0.5,
         gating_epsilon: float = 0.693,
+        interpolation_enabled: bool = False,
     ):
         """
         Args:
@@ -53,6 +54,13 @@ class Model(nn.Module):
         self.device = device
         self.embed_dim = embed_dim
         self.n_bins = n_bins
+        self._interpolation_enabled = interpolation_enabled
+        self.H_interp: Dict[bool, Optional[torch.Tensor]] = {False: None, True: None}
+
+        if interpolation_enabled:
+            interp_device = self.device if self.device.type != "mps" else torch.device("cpu")
+            self.H_interp[False] = latent_solver.get_interpolation_operator(False, device=interp_device)
+            self.H_interp[True] = latent_solver.get_interpolation_operator(True, device=interp_device)
 
         if embed_dim > 1:
             self.gating_fn = gating_fn
@@ -74,7 +82,66 @@ class Model(nn.Module):
                 requires_grad=False,
             )
 
-    def forward(self, x: torch.Tensor, bin_ids: torch.Tensor) -> torch.Tensor:
+    def _compute_logits_from_latent_values(
+        self,
+        latent_obs: torch.Tensor,
+        intrinsic: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.embed_dim == 1:
+            return intrinsic.squeeze(-1) + latent_obs.squeeze(-1)
+
+        gated = self.gating.gate_torch(latent_obs)
+        modulated = intrinsic * gated
+        return self.final_linear(modulated).squeeze(-1)
+
+    def _lookup_latent(
+        self,
+        bin_ids: torch.Tensor,
+        interpolation_mask: Optional[torch.Tensor] = None,
+        include_self_in_interpolation: bool = False,
+    ) -> torch.Tensor:
+        latent_source = self.latent_vec
+        own_latent = latent_source[bin_ids]
+
+        if interpolation_mask is None:
+            return own_latent
+
+        if not self._interpolation_enabled:
+            raise RuntimeError("Interpolation was requested but interpolation operators were not initialized")
+
+        mask_t = interpolation_mask.to(device=latent_source.device, dtype=torch.bool).reshape(-1)
+        if not bool(torch.any(mask_t).item()):
+            return own_latent
+
+        latent_2d = latent_source.unsqueeze(-1) if self.embed_dim == 1 else latent_source
+        interp_operator = self.H_interp[include_self_in_interpolation]
+        if interp_operator is None:
+            raise RuntimeError("Interpolation operator is not initialized")
+
+        interp_device = interp_operator.device
+        latent_for_interp = latent_2d if interp_device == latent_2d.device else latent_2d.to(interp_device)
+        if interp_device != latent_2d.device:
+            interp_operator = interp_operator.to(interp_device)
+
+        interpolated_full = torch.sparse.mm(interp_operator, latent_for_interp)
+        interpolated_obs = interpolated_full[bin_ids]
+        if interpolated_obs.device != own_latent.device:
+            interpolated_obs = interpolated_obs.to(own_latent.device)
+        if self.embed_dim == 1:
+            own_latent_2d = own_latent.unsqueeze(-1)
+            mixed = torch.where(mask_t.unsqueeze(-1), interpolated_obs, own_latent_2d)
+            return mixed.squeeze(-1)
+
+        mixed = torch.where(mask_t.unsqueeze(-1), interpolated_obs, own_latent)
+        return mixed
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        bin_ids: torch.Tensor,
+        interpolation_mask: Optional[torch.Tensor] = None,
+        include_self_in_interpolation: bool = False,
+    ) -> torch.Tensor:
         """
         Forward pass.
 
@@ -87,13 +154,18 @@ class Model(nn.Module):
         """
         if self.embed_dim > 1:
             intrinsic = self.mlp(x)                                          # [N, d]
-            latent = self.latent_vec[bin_ids]                                # [N, d]
-            modulated = intrinsic * self.gating.gate_torch(latent)           # [N, d]
-            return self.final_linear(modulated).squeeze(-1)                  # [N]
         else:
             intrinsic = self.mlp(x).squeeze(-1)                              # [N]
-            latent = self.latent_vec[bin_ids]                                # [N]
-            return intrinsic + latent                                        # [N]
+
+        latent = self._lookup_latent(
+            bin_ids,
+            interpolation_mask=interpolation_mask,
+            include_self_in_interpolation=include_self_in_interpolation,
+        )
+
+        if self.embed_dim > 1:
+            return self._compute_logits_from_latent_values(latent, intrinsic)
+        return self._compute_logits_from_latent_values(latent, intrinsic)
 
     @torch.no_grad()
     def set_latent(self, latent_new: Union[torch.Tensor, np.ndarray]) -> None:

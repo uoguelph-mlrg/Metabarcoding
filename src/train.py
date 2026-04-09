@@ -49,6 +49,7 @@ class Trainer:
         self.model_name = model_name
         self.run_id = run_id or time.strftime("%Y-%m-%d_%H-%M-%S")
         self.resume = resume
+        self._validate_interpolation_config()
 
         if self.cfg.use_embedding and self.cfg.barcode_data_path is None and self.cfg.embedding_path is None:
             self.cfg.barcode_data_path = self.cfg.data_path
@@ -108,6 +109,7 @@ class Trainer:
             gating_alpha=self.cfg.gating_alpha,
             gating_kappa=self.cfg.gating_kappa,
             gating_epsilon=self.cfg.gating_epsilon,
+            interpolation_enabled=bool(self.cfg.train_MLP_with_interpolation or self.cfg.inference_with_interpolation),
         )
 
         if self.cfg.embed_dim > 1:
@@ -128,6 +130,12 @@ class Trainer:
         train = MBDataset(data["train"], bin_index, sample_index, loss_mode=self.loss_mode)
         val = MBDataset(data["val"], bin_index, sample_index, loss_mode=self.loss_mode)
         test = MBDataset(data["test"], bin_index, sample_index, loss_mode=self.loss_mode)
+        self.train_dataset = train
+        self.val_dataset = val
+        self.test_dataset = test
+        self._train_sample_ids = np.unique(train.sample_ids).astype(np.int64, copy=False)
+        self._epoch_selected_sample_ids = np.empty(0, dtype=np.int64)
+        self._epoch_selected_sample_ids_t = torch.empty(0, dtype=torch.long)
 
         batch_size = self.cfg.batch_size_sample if self.loss_mode == "sample" else self.cfg.batch_size_bin
         collate_fn = collate_samples if self.loss_mode == "sample" else None
@@ -186,6 +194,39 @@ class Trainer:
 
         if self.resume:
             self._resume_from_latest()
+
+    def _validate_interpolation_config(self) -> None:
+        fraction = float(self.cfg.interpolated_sample_fraction)
+        if fraction < 0.0 or fraction > 1.0:
+            raise ValueError("interpolated_sample_fraction must be in [0, 1]")
+
+    def _select_epoch_interpolated_samples(self) -> np.ndarray:
+        fraction = float(self.cfg.interpolated_sample_fraction)
+        if fraction <= 0.0 or self._train_sample_ids.size == 0:
+            return np.empty(0, dtype=np.int64)
+
+        n_select = min(self._train_sample_ids.size, int(np.ceil(fraction * self._train_sample_ids.size)))
+        if n_select <= 0:
+            return np.empty(0, dtype=np.int64)
+
+        selected = np.random.choice(self._train_sample_ids, size=n_select, replace=False)
+        selected.sort()
+        return selected.astype(np.int64, copy=False)
+
+    def _refresh_epoch_interpolation_selection(self) -> None:
+        self._epoch_selected_sample_ids = self._select_epoch_interpolated_samples()
+        self._epoch_selected_sample_ids_t = torch.as_tensor(
+            self._epoch_selected_sample_ids,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+    def _epoch_sample_selection_mask(self, sample_idx: torch.Tensor) -> Optional[torch.Tensor]:
+        if self._epoch_selected_sample_ids_t.numel() == 0:
+            return None
+        sample_idx_np = sample_idx.detach().cpu().numpy().reshape(-1)
+        selected_np = np.isin(sample_idx_np, self._epoch_selected_sample_ids)
+        return torch.as_tensor(selected_np, dtype=torch.bool, device=sample_idx.device)
 
     def _checkpoint_path(self, name: str) -> str:
         return os.path.join(self.checkpoint_dir, name)
@@ -308,18 +349,38 @@ class Trainer:
     def _train_batch(self, batch: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, float]]:
         self.model.train()
         inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
+        sample_selection = self._epoch_sample_selection_mask(sample_idx)
 
         t0 = time.perf_counter()
         if self.loss_mode == "sample":
             bsz, max_bins, n_feat = inputs.shape
             inputs_flat = inputs.view(bsz * max_bins, n_feat)
             bin_idx_flat = bin_idx.view(bsz * max_bins)
-            outputs_flat = self.model(inputs_flat, bin_idx_flat)
+            interpolation_mask = None
+            if self.cfg.train_MLP_with_interpolation and sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
+                if mask is not None:
+                    interpolation_mask = interpolation_mask & mask.bool()
+                interpolation_mask = interpolation_mask.reshape(-1)
+            outputs_flat = self.model(
+                inputs_flat,
+                bin_idx_flat,
+                interpolation_mask=interpolation_mask,
+                include_self_in_interpolation=self.cfg.include_self_in_interpolation,
+            )
             outputs = outputs_flat.view(bsz, max_bins)
             outputs = outputs.masked_fill(mask == 0, float("-inf"))
             loss = self.criterion(outputs, targets, mask)
         else:
-            outputs = self.model(inputs, bin_idx)
+            interpolation_mask = None
+            if self.cfg.train_MLP_with_interpolation and sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                interpolation_mask = sample_selection
+            outputs = self.model(
+                inputs,
+                bin_idx,
+                interpolation_mask=interpolation_mask,
+                include_self_in_interpolation=self.cfg.include_self_in_interpolation,
+            )
             loss = self.criterion(outputs, targets)
         t1 = time.perf_counter()
 
@@ -353,6 +414,7 @@ class Trainer:
         )
 
         self.model.eval()
+        use_interpolation = bool(self.cfg.inference_with_interpolation)
         running_loss = 0.0
         n_samples = 0
         for batch in data_loader:
@@ -361,12 +423,24 @@ class Trainer:
                 bsz, max_bins, n_feat = inputs.shape
                 inputs_flat = inputs.view(bsz * max_bins, n_feat)
                 bin_idx_flat = bin_idx.view(bsz * max_bins)
-                outputs_flat = self.model(inputs_flat, bin_idx_flat)
+                interpolation_mask = mask.bool().view(-1) if use_interpolation and mask is not None else None
+                outputs_flat = self.model(
+                    inputs_flat,
+                    bin_idx_flat,
+                    interpolation_mask=interpolation_mask,
+                    include_self_in_interpolation=self.cfg.include_self_in_interpolation,
+                )
                 outputs = outputs_flat.view(bsz, max_bins)
                 outputs = outputs.masked_fill(mask == 0, float("-inf"))
                 loss = self.criterion(outputs, targets, mask)
             else:
-                outputs = self.model(inputs, bin_idx)
+                interpolation_mask = torch.ones_like(sample_idx, dtype=torch.bool) if use_interpolation else None
+                outputs = self.model(
+                    inputs,
+                    bin_idx,
+                    interpolation_mask=interpolation_mask,
+                    include_self_in_interpolation=self.cfg.include_self_in_interpolation,
+                )
                 loss = self.criterion(outputs, targets)
 
             batch_size = targets.size(0)
@@ -380,6 +454,7 @@ class Trainer:
 
         with torch.no_grad():
             inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
+            sample_selection = self._epoch_sample_selection_mask(sample_idx)
 
             if self.loss_mode == "sample":
                 bsz, max_bins, n_feat = inputs.shape
@@ -388,6 +463,11 @@ class Trainer:
 
                 sample_grid = sample_idx.unsqueeze(1).expand(-1, max_bins)
                 valid = mask.bool() if mask is not None else torch.ones_like(bin_idx, dtype=torch.bool)
+                interpolation_mask = None
+                if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                    interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
+                    interpolation_mask = interpolation_mask & valid
+                    interpolation_mask = interpolation_mask[valid]
 
                 intrinsic_vec = intrinsic_flat[valid].detach().cpu().numpy()
                 if self.cfg.embed_dim == 1:
@@ -395,6 +475,7 @@ class Trainer:
                 y_vec = targets[valid].detach().cpu().numpy().reshape(-1)
                 bin_ids = bin_idx[valid].detach().cpu().numpy().reshape(-1).astype(np.int64)
                 sample_ids = sample_grid[valid].detach().cpu().numpy().reshape(-1).astype(np.int64)
+                interpolation_mask_np = None if interpolation_mask is None else interpolation_mask.detach().cpu().numpy().astype(bool, copy=False)
             else:
                 intrinsic = self.model.mlp(inputs)
                 if self.cfg.embed_dim == 1:
@@ -403,6 +484,9 @@ class Trainer:
                 y_vec = targets.detach().cpu().numpy().reshape(-1)
                 bin_ids = bin_idx.detach().cpu().numpy().reshape(-1).astype(np.int64)
                 sample_ids = sample_idx.detach().cpu().numpy().reshape(-1).astype(np.int64)
+                interpolation_mask_np = None
+                if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                    interpolation_mask_np = sample_selection.detach().cpu().numpy().astype(bool, copy=False)
 
         latent_anchor = self.model.latent_vec.detach().cpu().numpy()
         latent_lr = self._latent_lr_for_step(self.latent_global_step)
@@ -414,10 +498,12 @@ class Trainer:
             final_weights=self.model.final_linear.weight.detach().cpu().numpy().squeeze() if self.cfg.embed_dim > 1 else None,
             bin_ids=bin_ids,
             sample_ids=sample_ids,
+            interpolation_mask=interpolation_mask_np,
             loss_type=self.loss_type,
             prox_weight=prox_weight,
             x_anchor=latent_anchor,
             latent_lr=latent_lr,
+            include_self_in_interpolation=self.cfg.include_self_in_interpolation,
         )
 
         self.model.set_latent(latent_vec)
@@ -435,6 +521,7 @@ class Trainer:
             self.test_loader
         )
         self.model.eval()
+        use_interpolation = bool(self.cfg.inference_with_interpolation)
 
         sample_pred: Dict[int, List[float]] = {}
         sample_true: Dict[int, List[float]] = {}
@@ -452,7 +539,13 @@ class Trainer:
                         valid_mask = torch.ones(inputs.shape[1], dtype=torch.bool, device=inputs.device)
                     inputs_flat = inputs[b][valid_mask]
                     bin_idx_flat = bin_idx[b][valid_mask]
-                    outputs = self.model(inputs_flat, bin_idx_flat).unsqueeze(0)
+                    interpolation_mask = valid_mask if use_interpolation else None
+                    outputs = self.model(
+                        inputs_flat,
+                        bin_idx_flat,
+                        interpolation_mask=interpolation_mask,
+                        include_self_in_interpolation=self.cfg.include_self_in_interpolation,
+                    ).unsqueeze(0)
                     probs = F.softmax(outputs, dim=-1).squeeze(0).cpu().numpy()
                     y_true = targets[b][valid_mask].cpu().numpy()
                     sample_pred.setdefault(s_idx, []).extend(probs.tolist())
@@ -473,7 +566,13 @@ class Trainer:
                 for i in range(inputs.shape[0]):
                     s_idx = int(sample_idx[i].item())
                     b_idx = int(bin_idx[i].item())
-                    output = self.model(inputs[i].unsqueeze(0), bin_idx[i].unsqueeze(0))
+                    interpolation_mask = torch.ones(1, dtype=torch.bool, device=self.device) if use_interpolation else None
+                    output = self.model(
+                        inputs[i].unsqueeze(0),
+                        bin_idx[i].unsqueeze(0),
+                        interpolation_mask=interpolation_mask,
+                        include_self_in_interpolation=self.cfg.include_self_in_interpolation,
+                    )
                     prob = float(torch.sigmoid(output).cpu().numpy().item())
                     y_true = float(targets[i].cpu().numpy().item())
                     sample_pred.setdefault(s_idx, []).append(prob)
@@ -683,6 +782,11 @@ class Trainer:
         for epoch in tqdm(range(self.start_epoch, self.cfg.epochs), desc="Epochs", leave=False):
             self.current_epoch = epoch
             epoch_start = time.perf_counter()
+            if self.cfg.interpolated_sample_fraction > 0.0:
+                self._refresh_epoch_interpolation_selection()
+            else:
+                self._epoch_selected_sample_ids = np.empty(0, dtype=np.int64)
+                self._epoch_selected_sample_ids_t = torch.empty(0, dtype=torch.long)
 
             alpha = min(1.0, epoch / warmup_epochs)
             prox_weight = self.cfg.latent_prox_scale * self.cfg.latent_l2_reg * (1.0 - alpha)
@@ -728,6 +832,7 @@ class Trainer:
                             "train/batch_idx": batch_idx,
                             "train/global_step": self.global_step,
                             "train/latent_global_step": self.latent_global_step,
+                            "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
                         },
                         step=self.global_step,
                     )
@@ -770,6 +875,7 @@ class Trainer:
                 "val/loss": val_loss,
                 "train/epoch": epoch,
                 "train/global_step": self.global_step,
+                "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
                 "latent/mean": float(latent_vec.mean()),
                 "latent/std": float(latent_vec.std()),
                 "latent/min": float(latent_vec.min()),

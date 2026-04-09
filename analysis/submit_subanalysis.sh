@@ -13,8 +13,6 @@ CPUS="8"
 MEM="32G"
 QOS="normal"
 TIME_OVERRIDE=""
-DATA_PATH="$PROJECT_ROOT/data/data_merged.csv"
-DATA_PATH_SET="0"
 VENV_ACTIVATE='~/barcode/bin/activate'
 MODULE_LOAD='python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0'
 NO_WANDB="0"
@@ -30,8 +28,7 @@ COLORS_JSON_OVERRIDE=""
 declare -a TARGETS=()
 declare -a DEFAULT_TARGETS=(
   "BarcodeBERT"
-  "interpolated_latent/V3"
-  "interpolated_latent/V4"
+  "interpolated_latent"
   "location_embedding"
   "latent_as_input"
   "latent_as_input_V2"
@@ -47,11 +44,11 @@ LIST_TARGETS="0"
 usage() {
   cat <<'EOF'
 Usage:
-  ./submit_subanalysis.sh --target interpolated_latent/V4
-  ./submit_subanalysis.sh --target interpolated_latent/V4 --target location_embedding
+  ./submit_subanalysis.sh --target interpolated_latent
+  ./submit_subanalysis.sh --target interpolated_latent --target location_embedding
   ./submit_subanalysis.sh --all
   ./submit_subanalysis.sh --baseline-train
-  ./submit_subanalysis.sh --baseline-train --target interpolated_latent/V4
+  ./submit_subanalysis.sh --baseline-train --target interpolated_latent
 
 Options:
   --target PATH            Subanalysis folder path under analysis/
@@ -76,8 +73,7 @@ Options:
 
 Supported targets (first batch):
   BarcodeBERT
-  interpolated_latent/V3
-  interpolated_latent/V4
+  interpolated_latent
   location_embedding
   latent_as_input
   latent_as_input_V2
@@ -184,8 +180,7 @@ fi
 if [[ "$LIST_TARGETS" == "1" ]]; then
   cat <<'EOF'
 BarcodeBERT
-interpolated_latent/V3
-interpolated_latent/V4
+interpolated_latent
 location_embedding
 latent_as_input
 latent_as_input_V2
@@ -209,20 +204,6 @@ if [[ ${#TARGETS[@]} -eq 0 && "$BASELINE_TRAIN" == "0" ]]; then
   exit 1
 fi
 
-# Resolve data path once to an absolute path so nested target directories behave consistently.
-if [[ "$DATA_PATH" != /* ]]; then
-  if [[ -e "$DATA_PATH" ]]; then
-    DATA_PATH="$(cd "$(dirname "$DATA_PATH")" && pwd)/$(basename "$DATA_PATH")"
-  else
-    DATA_PATH="$(cd "$SCRIPT_DIR" && cd "$(dirname "$DATA_PATH")" && pwd)/$(basename "$DATA_PATH")"
-  fi
-fi
-
-if [[ ! -f "$DATA_PATH" ]]; then
-  echo "Data file not found: $DATA_PATH" >&2
-  exit 1
-fi
-
 if ! [[ "$CPUS" =~ ^[0-9]+$ ]]; then
   echo "Invalid --cpus value: $CPUS (must be an integer)" >&2
   exit 1
@@ -242,43 +223,29 @@ resolve_target() {
   DEFAULT_LABELS_JSON=""
   DEFAULT_COLORS_JSON=""
   DEFAULT_TIME="8:00:00"
-  OPTIONAL_DATA_ARG_TEMPLATE=""
 
   case "$target" in
     BarcodeBERT)
       TARGET_DIR="BarcodeBERT"
-      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python barcodebert.py __OPTIONAL_DATA_ARG__'
+      TRAIN_CMD_TEMPLATE='python barcodebert.py __NO_WANDB__'
       RESULTS_PATTERNS='BarcodeBERT/results/barcodebert_*.pkl'
       FIGURES_DIR='figures/BarcodeBERT'
-      DEFAULT_LABELS_JSON='{"baseline":"Taxonomy","barcode_bert":"BarcodeBERT"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","barcode_bert":"#9b59b6"}'
+      DEFAULT_LABELS_JSON='{"baseline":"BarcodeBERT","taxonomy":"Taxonomy"}'
+      DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","taxonomy":"#9b59b6"}'
       DEFAULT_TIME="8:00:00"
       ;;
-    interpolated_latent/V3)
-      TARGET_DIR="interpolated_latent/V3"
-      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __OPTIONAL_DATA_ARG__'
-      RESULTS_PATTERNS='interpolated_latent/V3/results/interpolated_latent_v3_*.pkl'
-      FIGURES_DIR='figures/interpolated_latent/V3'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#1f6feb","interpolated_latent":"#d97706"}'
-      DEFAULT_TIME="8:00:00"
-      ;;
-    interpolated_latent/V4)
-      TARGET_DIR="interpolated_latent/V4"
-      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __OPTIONAL_DATA_ARG__'
-      RESULTS_PATTERNS='interpolated_latent/V4/results/interpolated_latent_v4_*.pkl'
-      FIGURES_DIR='figures/interpolated_latent/V4'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#1f6feb","interpolated_latent":"#d97706"}'
+    interpolated_latent)
+      TARGET_DIR="interpolated_latent"
+      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __NO_WANDB__'
+      RESULTS_PATTERNS='interpolated_latent/results/interpolated_latent_*.pkl'
+      FIGURES_DIR='figures/interpolated_latent'
+      DEFAULT_LABELS_JSON='{"baseline":"Baseline","default_with_interpolation":"Interpolation (20%)","include_self_false":"Interpolation (20%, no self latent)","inference_true":"Interpolation (20%, at inference)","train_mlp_false":"Interpolation (20%, no MLP interpolation)","fraction_0p1":"Interpolation (10%)","fraction_0p5":"Interpolation (50%)","fraction_1p0":"Interpolation (100%)"}'
+      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","default_with_interpolation":"#e74c3c","include_self_false":"#e67e22","inference_true":"#f39c12","train_mlp_false":"#2ecc71","fraction_0p1":"#3498db","fraction_0p5":"#9b59b6","fraction_1p0":"#1abc9c"}'
       DEFAULT_TIME="8:00:00"
       ;;
     location_embedding)
       TARGET_DIR="location_embedding"
-      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python location_embedding.py __OPTIONAL_DATA_ARG__'
+      TRAIN_CMD_TEMPLATE='python location_embedding.py __NO_WANDB__'
       RESULTS_PATTERNS='location_embedding/results/location_embedding_*.pkl'
       FIGURES_DIR='figures/location_embedding'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (No Location Embedding)","satclip":"SatCLIP (256D)","range":"RANGE (1280D)","geoclip":"GeoCLIP (512D)","alphaearth":"AlphaEarth (64D)"}'
@@ -287,8 +254,7 @@ resolve_target() {
       ;;
     latent_as_input)
       TARGET_DIR='latent_as_input'
-      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python latent_as_input.py __OPTIONAL_DATA_ARG__ --output_dir results'
+      TRAIN_CMD_TEMPLATE='python latent_as_input.py __NO_WANDB__ --output_dir results'
       RESULTS_PATTERNS='latent_as_input/results/latent_as_input_*.pkl'
       FIGURES_DIR='figures/latent_as_input'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent as Input"}'
@@ -297,8 +263,7 @@ resolve_target() {
       ;;
     latent_as_input_V2)
       TARGET_DIR='latent_as_input_V2'
-      OPTIONAL_DATA_ARG_TEMPLATE='--data_path "__DATA_PATH__"'
-      TRAIN_CMD_TEMPLATE='python latent_as_input.py __OPTIONAL_DATA_ARG__ --output_dir results'
+      TRAIN_CMD_TEMPLATE='python latent_as_input.py __NO_WANDB__ --output_dir results'
       RESULTS_PATTERNS='latent_as_input_V2/results/latent_as_input_v2_*.pkl'
       FIGURES_DIR='figures/latent_as_input_V2'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent as In-&-Output"}'
@@ -307,7 +272,7 @@ resolve_target() {
       ;;
     ablation_study)
       TARGET_DIR='ablation_study'
-      TRAIN_CMD_TEMPLATE='python ablation_study.py --data_path "__DATA_PATH__" --output_dir results'
+      TRAIN_CMD_TEMPLATE='python ablation_study.py __NO_WANDB__ --output_dir results'
       RESULTS_PATTERNS='ablation_study/results/ablation_study_*.pkl'
       FIGURES_DIR='figures/ablation_study'
       DEFAULT_LABELS_JSON='{"baseline":"MLP + Latent","mlp_no_taxonomy":"MLP (no taxonomy)","mlp_with_taxonomy":"MLP (with taxonomy)"}'
@@ -316,34 +281,34 @@ resolve_target() {
       ;;
     loss_comparison)
       TARGET_DIR='loss_comparison'
-      TRAIN_CMD_TEMPLATE='python loss_comparison.py --data_path "__DATA_PATH__" --output_dir results'
+      TRAIN_CMD_TEMPLATE='python loss_comparison.py __NO_WANDB__ --output_dir results'
       RESULTS_PATTERNS='loss_comparison/results/loss_comparison_*.pkl'
       FIGURES_DIR='figures/loss_comparison'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","cross_entropy":"Cross-Entropy","logistic":"Logistic (BCE)"}'
+      DEFAULT_LABELS_JSON='{"baseline":"Cross-Entropy","logistic":"Logistic (BCE)"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","cross_entropy":"#2ecc71","logistic":"#9b59b6"}'
       DEFAULT_TIME="8:00:00"
       ;;
     optimal_K)
       TARGET_DIR='optimal_K'
-      TRAIN_CMD_TEMPLATE='python K_comparison.py --data_path "__DATA_PATH__" --output_dir results'
+      TRAIN_CMD_TEMPLATE='python K_comparison.py __NO_WANDB__ --output_dir results'
       RESULTS_PATTERNS='optimal_K/results/K_comparison_*.pkl'
       FIGURES_DIR='figures/optimal_K'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","K_13":"K=13","K_78":"K=78 (Optimal)","K_972":"K=972"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","K_13":"#3498db","K_78":"#e67e22","K_972":"#e67e22"}'
+      DEFAULT_LABELS_JSON='{"K_5":"K=5","baseline":"K=25","K_100":"K=100","K_1000":"K=1000"}'
+      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","K_5":"#824e05","K_25":"#e74c3c","K_100":"#e67e22","K_1000":"#f39c12"}'
       DEFAULT_TIME="8:00:00"
       ;;
     preprocessing)
       TARGET_DIR='preprocessing'
-      TRAIN_CMD_TEMPLATE='python utils_test.py --data_path "__DATA_PATH__" && python read_count_preprocessing.py --output_dir results'
+      TRAIN_CMD_TEMPLATE='python utils_test.py && python read_count_preprocessing.py __NO_WANDB__ --output_dir results'
       RESULTS_PATTERNS='preprocessing/results/preprocessing_*.pkl'
       FIGURES_DIR='figures/preprocessing'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","original":"Original (raw counts)","normalized":"Normalized Only","logarithm":"Logarithm Only"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","original":"#ff7f0e","normalized":"#1f77b4","logarithm":"#2ca02c"}'
+      DEFAULT_LABELS_JSON='{"original":"Original (raw counts)","normalized":"Normalized Only","logarithm":"Logarithm Only"}'
+      DEFAULT_COLORS_JSON='{"original":"#ff7f0e","normalized":"#1f77b4","logarithm":"#2ca02c"}'
       DEFAULT_TIME="10:00:00"
       ;;
     dimensionality_increase/gating_function)
       TARGET_DIR='dimensionality_increase/gating_function'
-      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py --data_path "__DATA_PATH__" --output_dir results'
+      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py __NO_WANDB__ --output_dir results'
       RESULTS_PATTERNS='dimensionality_increase/gating_function/results/gating_comparison_*.pkl'
       FIGURES_DIR='figures/dimensionality_gating'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (Additive)","exp":"Exponential","scaled_exp":"Scaled Exponential","additive":"Additive (1+h)","softplus":"Softplus","tanh":"Tanh","sigmoid":"Sigmoid","dot_product":"Dot Product"}'
@@ -352,7 +317,7 @@ resolve_target() {
       ;;
     dimensionality_increase/vector_size)
       TARGET_DIR='dimensionality_increase/vector_size'
-      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py --data_path "__DATA_PATH__" --output_dir results'
+      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py __NO_WANDB__ --output_dir results'
       RESULTS_PATTERNS='dimensionality_increase/vector_size/results/dimensionality_analysis_*.pkl'
       FIGURES_DIR='figures/dimensionality_vector'
       DEFAULT_LABELS_JSON='{"baseline":"Dim=1 (Baseline)","dim_2":"Dim=2","dim_5":"Dim=5","dim_6":"Dim=6","dim_8":"Dim=8","dim_10":"Dim=10","dim_12":"Dim=12","dim_15":"Dim=15","dim_20":"Dim=20","dim_50":"Dim=50"}'
@@ -437,11 +402,6 @@ submit_target() {
     return 1
   fi
 
-  local wandb_flag=""
-  if [[ "$NO_WANDB" == "1" ]]; then
-    wandb_flag="--no_wandb"
-  fi
-
   local labels_json="$DEFAULT_LABELS_JSON"
   local colors_json="$DEFAULT_COLORS_JSON"
   if [[ -n "$LABELS_JSON_OVERRIDE" ]]; then
@@ -463,13 +423,11 @@ submit_target() {
   fi
 
   local train_cmd="$TRAIN_CMD_TEMPLATE"
-  local optional_data_arg=""
-  if [[ "$DATA_PATH_SET" == "1" ]]; then
-    optional_data_arg="$OPTIONAL_DATA_ARG_TEMPLATE"
+  local wandb_arg=""
+  if [[ "$NO_WANDB" == "1" ]]; then
+    wandb_arg="--no_wandb"
   fi
-  train_cmd="${train_cmd//__OPTIONAL_DATA_ARG__/$optional_data_arg}"
-  train_cmd="${train_cmd//__DATA_PATH__/$DATA_PATH}"
-  train_cmd="${train_cmd//__NO_WANDB__/$wandb_flag}"
+  train_cmd="${train_cmd//__NO_WANDB__/$wandb_arg}"
 
   local walltime="$DEFAULT_TIME"
   if [[ -n "$TIME_OVERRIDE" ]]; then
@@ -506,7 +464,6 @@ source $VENV_ACTIVATE
 
 cd "$target_dir_abs"
 echo "[$(date)] Target: $target"
-echo "[$(date)] Data path: $DATA_PATH"
 echo "[$(date)] Train command: $train_cmd"
 $train_cmd
 

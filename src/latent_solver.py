@@ -58,6 +58,51 @@ class LatentSolver:
         self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None       # Precompute I - H_smooth for efficient regularization; (I - H_smooth) @ h gives difference between latent and neighbor interpolation used for smoothness regularization
         self._I_minus_H_smooth_csc: Optional[sparse.csc_matrix] = None  # CSC format of I - H_smooth for efficient column slicing when building row closure
         self._graph_neighbors: Optional[List[np.ndarray]] = None        # List of neighbor arrays for each node, used to build active set on each solve call
+        self.H_interp: Dict[bool, Optional[torch.Tensor]] = {False: None, True: None}
+        self._H_interp_csr: Dict[bool, Optional[sparse.csr_matrix]] = {False: None, True: None}
+
+    def _row_normalize_csr(self, mat: sparse.csr_matrix) -> sparse.csr_matrix:
+        row_sums = np.asarray(mat.sum(axis=1)).reshape(-1).astype(np.float64, copy=False)
+        row_sums[row_sums == 0.0] = 1.0
+        inv = sparse.diags(1.0 / row_sums, format="csr")
+        return (inv @ mat).tocsr()
+
+    def _build_interpolation_operator(self, include_self_in_interpolation: bool) -> sparse.csr_matrix:
+        if self.H_smooth is None:
+            raise RuntimeError("H_smooth is not initialized")
+
+        base = self.H_smooth.copy()
+        if include_self_in_interpolation:
+            base = base + sparse.identity(self.n_bins, format="csr")
+        return self._row_normalize_csr(base.tocsr())
+
+    def get_interpolation_operator(self, include_self_in_interpolation: bool, device: Optional[torch.device] = None) -> torch.Tensor:
+        op = self.H_interp.get(include_self_in_interpolation)
+        if op is None:
+            raise RuntimeError("Interpolation operators are not built; call build_interpolation_matrix first")
+
+        target_device = self.device if device is None else device
+        if target_device.type == "mps":
+            target_device = torch.device("cpu")
+        if op.device == target_device:
+            return op
+        return op.to(target_device)
+
+    def _compute_logits_from_latent_values(
+        self,
+        latent_obs: torch.Tensor,
+        intrinsic_t: torch.Tensor,
+        final_weights_t: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.embed_dim == 1:
+            return intrinsic_t.squeeze(-1) + latent_obs.squeeze(-1)
+
+        if final_weights_t is None:
+            raise ValueError("final_weights_t is required for embed_dim > 1")
+
+        gated = self.gating.gate_torch(latent_obs)
+        m_tilde = intrinsic_t * gated
+        return torch.sum(m_tilde * final_weights_t.unsqueeze(0), dim=1)
 
     def build_interpolation_matrix(
         self,
@@ -100,6 +145,11 @@ class LatentSolver:
         self._I_minus_H_smooth_csc = sparse.csc_matrix(self.I_minus_H_smooth)
         self._graph_neighbors = self._build_graph_active_neighbors()
 
+        self._H_interp_csr[False] = self._build_interpolation_operator(include_self_in_interpolation=False)
+        self._H_interp_csr[True] = self._build_interpolation_operator(include_self_in_interpolation=True)
+        self.H_interp[False] = self._csr_to_torch(self._H_interp_csr[False])
+        self.H_interp[True] = self._csr_to_torch(self._H_interp_csr[True])
+
         log.info(
             "Torch latent solver: H_smooth=%s, embed_dim=%d, device=%s",
             H_smooth.shape,
@@ -141,10 +191,12 @@ class LatentSolver:
         final_weights: Optional[np.ndarray] = None,
         bin_ids: Optional[np.ndarray] = None,
         sample_ids: Optional[np.ndarray] = None,
+        interpolation_mask: Optional[np.ndarray] = None,
         loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy",
         prox_weight: float = 0.0,
         x_anchor: Optional[np.ndarray] = None,
         latent_lr: Optional[float] = None,
+        include_self_in_interpolation: bool = False,
     ) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         Solve for the latent variable h using PyTorch optimization on the active set of bins 
@@ -204,6 +256,12 @@ class LatentSolver:
         if sample_ids is not None:
             sample_ids_t = torch.as_tensor(np.asarray(sample_ids, dtype=np.int64).reshape(-1), dtype=torch.long, device=self.device)
 
+        interpolation_mask_t: Optional[torch.Tensor] = None
+        has_interpolation = False
+        if interpolation_mask is not None:
+            interpolation_mask_t = torch.as_tensor(np.asarray(interpolation_mask, dtype=np.bool_).reshape(-1), dtype=torch.bool, device=self.device)
+            has_interpolation = bool(torch.any(interpolation_mask_t).item())
+
         w_t: Optional[torch.Tensor] = None
         if self.embed_dim > 1:
             w_t = torch.as_tensor(np.asarray(final_weights, dtype=np.float32).reshape(-1), device=self.device)
@@ -224,6 +282,7 @@ class LatentSolver:
         if not np.array_equal(active_map.global_ids[local_bin_ids], batch_bin_ids):
             raise RuntimeError("Active-set searchsorted mapping failed for one or more bin ids")
         local_bin_ids_t = torch.as_tensor(local_bin_ids, dtype=torch.long, device=self.device)
+        batch_bin_ids_t = torch.as_tensor(batch_bin_ids, dtype=torch.long, device=self.device)
 
         steps = int(self.cfg.latent_adam_steps)
         if steps < 1:
@@ -238,7 +297,18 @@ class LatentSolver:
             optimizer.zero_grad(set_to_none=True)
             active_update = active_latent - active_anchor
 
-            logits = self._logits_from_latent(active_latent, intrinsic_t, local_bin_ids_t, final_weights_t=w_t)
+            if has_interpolation and interpolation_mask_t is not None:
+                full_latent = anchor_t.clone().index_copy(0, active_ids_t, active_latent)
+                logits = self._logits_from_latent(
+                    full_latent,
+                    intrinsic_t,
+                    batch_bin_ids_t,
+                    final_weights_t=w_t,
+                    interpolation_mask=interpolation_mask_t,
+                    include_self_in_interpolation=include_self_in_interpolation,
+                )
+            else:
+                logits = self._logits_from_latent(active_latent, intrinsic_t, local_bin_ids_t, final_weights_t=w_t)
 
             if loss_type == "cross_entropy":
                 if sample_ids_t is None:
@@ -390,21 +460,32 @@ class LatentSolver:
 
     def _logits_from_latent(
         self,
-        H_active: torch.Tensor,
+        latent_source: torch.Tensor,
         intrinsic_t: torch.Tensor,
-        local_bin_ids_t: torch.Tensor,
+        bin_ids_t: torch.Tensor,
         final_weights_t: Optional[torch.Tensor] = None,
+        interpolation_mask: Optional[torch.Tensor] = None,
+        include_self_in_interpolation: bool = False,
     ) -> torch.Tensor:
-        h_obs = H_active[local_bin_ids_t]
-        if self.embed_dim == 1:
-            return intrinsic_t.squeeze(-1) + h_obs.squeeze(-1)
+        latent_obs = latent_source[bin_ids_t]
+        own_logits = self._compute_logits_from_latent_values(latent_obs, intrinsic_t, final_weights_t)
 
-        if final_weights_t is None:
-            raise ValueError("final_weights_t is required for embed_dim > 1")
+        if interpolation_mask is None:
+            return own_logits
 
-        gated = self.gating.gate_torch(h_obs)
-        m_tilde = intrinsic_t * gated
-        return torch.sum(m_tilde * final_weights_t.unsqueeze(0), dim=1)
+        mask_t = interpolation_mask.to(device=latent_source.device, dtype=torch.bool).reshape(-1)
+        if not bool(torch.any(mask_t).item()):
+            return own_logits
+
+        latent_2d = latent_source.unsqueeze(-1) if latent_source.ndim == 1 else latent_source
+        interp_operator = self.get_interpolation_operator(include_self_in_interpolation, device=latent_2d.device)
+        interpolated_full = torch.sparse.mm(interp_operator, latent_2d)
+        interpolated_obs = interpolated_full[bin_ids_t]
+        interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic_t, final_weights_t)
+
+        if own_logits.ndim == 1:
+            return torch.where(mask_t, interp_logits, own_logits)
+        return torch.where(mask_t.unsqueeze(-1), interp_logits, own_logits)
 
     def _cross_entropy_loss(
         self,

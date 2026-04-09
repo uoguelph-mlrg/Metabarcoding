@@ -49,6 +49,10 @@ class Config:
     latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"
     latent_k_hop_threshold: int = 2
     latent_hop_knn_cap: int = 64
+    interpolated_sample_fraction: float = 0.0
+    train_MLP_with_interpolation: bool = False
+    inference_with_interpolation: bool = False
+    include_self_in_interpolation: bool = False
     
     # Architecture - New parameters for multiplicative gating
     embed_dim: int = 10                 # Embedding dimension d for vector latent
