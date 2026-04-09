@@ -25,7 +25,7 @@ except ImportError:
 
 from config import Config, set_seed
 from dataset import MBDataset, collate_samples
-from Metabarcoding.src.latent_solver import LatentSolver
+from latent_solver import LatentSolver
 from loss import Loss
 from mlp import MLPModel
 from model import Model

@@ -367,6 +367,7 @@ export NUMEXPR_NUM_THREADS=$CPUS
 module load $MODULE_LOAD
 source ~/.bashrc
 source $VENV_ACTIVATE
+export PYTHONPATH="$baseline_train_dir:$baseline_train_dir/src:\${PYTHONPATH:-}"
 
 cd "$baseline_train_dir"
 echo "[$(date)] Training baseline model"
@@ -461,6 +462,7 @@ export NUMEXPR_NUM_THREADS=$CPUS
 module load $MODULE_LOAD
 source ~/.bashrc
 source $VENV_ACTIVATE
+export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src:\${PYTHONPATH:-}"
 
 cd "$target_dir_abs"
 echo "[$(date)] Target: $target"
