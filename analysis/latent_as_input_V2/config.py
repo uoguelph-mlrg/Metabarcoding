@@ -1,13 +1,16 @@
 from dataclasses import dataclass
 from math import e
 from typing import Optional, Literal
+import os
 import numpy as np
 import torch
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 @dataclass
 class Config:
     # Run configuration
-    data_path: str = "data/data_merged.csv"    # Path to raw data CSV file
+    data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")    # Path to raw data CSV file
     results_dir: str = "../results"                      # Directory where run artifacts are saved
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
     checkpoint_every: int = 5                             # Save periodic checkpoint every N epochs
@@ -27,7 +30,7 @@ class Config:
 
     # DNA embedding settings (used when use_embedding=True)
     embedding_path: Optional[str] = None       # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = "../../data/data_merged.csv"    # path to TSV with 'bin_uri' and 'seq' columns
+    barcode_data_path: Optional[str] = None    # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"        # distance metric: "cosine" or "euclidean"
 
 

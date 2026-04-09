@@ -6,8 +6,7 @@ This script trains only the latent-as-input variant
 Results are saved as one variant pickle for later comparison.
 
 Usage:
-	python latent_as_input.py --data_path ../../data/data_merged.csv
-	python latent_as_input.py --data_dir ../../data --no_wandb
+	python latent_as_input.py --no_wandb
 """
 from __future__ import annotations
 
@@ -69,8 +68,6 @@ def load_variant_trainer(local_dir: str, src_path: str):
 
 
 def run_comparison(
-	data_path: str | None,
-	data_dir: str | None,
 	use_wandb: bool = True,
 	run_group: str | None = None,
 ) -> Dict[str, Any]:
@@ -96,11 +93,7 @@ def run_comparison(
 		run_group=run_group,
 		tags=["latent_as_input_v2", "variant_only", "in-&-out-latent"],
 	):
-		local_trainer = LocalTrainer(
-			local_cfg,
-			data_path=data_path,
-			data_dir=data_dir,
-		)
+		local_trainer = LocalTrainer(local_cfg)
 		local_results = local_trainer.run(use_wandb=use_wandb)
 		results["in-&-out"] = local_results
 
@@ -119,19 +112,6 @@ if __name__ == "__main__":
 	parser = argparse.ArgumentParser(
 		description="Model Comparison: Baseline vs Latent-as-Input"
 	)
-	group = parser.add_mutually_exclusive_group(required=False)
-	group.add_argument(
-		"--data_path",
-		type=str,
-		default=None,
-		help="Path to raw data CSV file (e.g. ../../data/data_merged.csv)",
-	)
-	group.add_argument(
-		"--data_dir",
-		type=str,
-		default=None,
-		help="Path to directory containing processed CSV files (X_*.csv, y_*.csv, taxonomic_data.csv)",
-	)
 	parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
 	parser.add_argument("--no_wandb", action="store_true", help="Disable Weights & Biases logging")
 	parser.add_argument(
@@ -146,18 +126,11 @@ if __name__ == "__main__":
 	log_level = log.DEBUG if args.verbose else log.INFO
 	log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
-	# Decide data source
-	data_path = args.data_path
-	data_dir = args.data_dir
-	if data_path is None and data_dir is None:
-		data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "data_merged.csv"))
-		log.info(f"No data_path or data_dir provided. Using default: {data_path}")
-
 	use_wandb = WANDB_AVAILABLE and not args.no_wandb
 	run_group = make_run_group("latent_as_input_v2_comparison")
 
 	# Run comparison
-	results = run_comparison(data_path=data_path, data_dir=data_dir, use_wandb=use_wandb, run_group=run_group)
+	results = run_comparison(use_wandb=use_wandb, run_group=run_group)
 
 	# Save results
 

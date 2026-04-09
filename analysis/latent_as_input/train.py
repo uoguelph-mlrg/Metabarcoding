@@ -147,9 +147,9 @@ class Trainer:
         self.run_id = run_id or time.strftime("%Y-%m-%d_%H-%M-%S")
         self.resume = resume
 
-        if data_dir is not None:
-            log.warning("`data_dir` is deprecated in Trainer and will be ignored. Raw preprocessing is always used.")
-        effective_data_path = data_path or self.cfg.data_path
+        if data_path is not None or data_dir is not None:
+            log.warning("`data_path` and `data_dir` are ignored by Trainer; using cfg.data_path instead.")
+        effective_data_path = self.cfg.data_path
 
         self.start_epoch = 0
         self.current_epoch = -1
