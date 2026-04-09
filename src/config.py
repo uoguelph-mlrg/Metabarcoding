@@ -22,7 +22,7 @@ class Config:
     use_taxonomy: bool = False          # set to True to use taxonomic distances
     use_embedding: bool = True          # set to True to use DNA embedding-based neighbors
     neighbor_mode: str = "knn"          # "threshold" for distance-based, "knn" for K-nearest neighbors
-    K: int = 10                         # number of neighbors (used when neighbor_mode="knn")
+    K: int = 25                         # number of neighbors (used when neighbor_mode="knn")
     dist_thres: int = 4                 # max taxonomic distance (used when neighbor_mode="threshold")
     emb_radius: float = 1.0             # max embedding distance (used when neighbor_mode="threshold")
     kernel_q: Optional[float] = None    # kernel q parameter (if None, computed adaptively)

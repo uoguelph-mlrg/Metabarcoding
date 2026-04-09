@@ -163,8 +163,6 @@ class Model(nn.Module):
             include_self_in_interpolation=include_self_in_interpolation,
         )
 
-        if self.embed_dim > 1:
-            return self._compute_logits_from_latent_values(latent, intrinsic)
         return self._compute_logits_from_latent_values(latent, intrinsic)
 
     @torch.no_grad()
