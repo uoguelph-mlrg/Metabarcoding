@@ -69,7 +69,7 @@ def run_comparison(
 
         if not os.path.exists(data_dir):
             log.error(f"Data directory not found: {data_dir}")
-            log.error("Please run: python utils_test.py --data_path data/ecuador_training_data.csv")
+            log.error("Please run: python utils_test.py first to generate the preprocessing inputs.")
             raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
         # Reset seed for fair comparison
