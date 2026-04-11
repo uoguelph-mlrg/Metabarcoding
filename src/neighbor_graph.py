@@ -75,7 +75,7 @@ class NeighbourGraph:
             # Cache to disk for future runs
             if embedding_path is not None:
                 os.makedirs(os.path.dirname(os.path.abspath(embedding_path)), exist_ok=True)
-                np.save(embedding_path, emb_dict, allow_pickle=True)
+                np.save(embedding_path, np.array(emb_dict, dtype=object), allow_pickle=True)
                 log.info(f"Saved computed embeddings to {embedding_path}")
         else:
             raise ValueError(
@@ -90,10 +90,10 @@ class NeighbourGraph:
 
         for row_i, row in self.bins.iterrows():
             uri = row["bin_uri"]
+            row_idx = int(row_i) # pyright: ignore[reportArgumentType]
             if uri in emb_dict:
-                idx = int(row_i)
-                self.embeddings[idx] = emb_dict[uri].astype(np.float32)
-                self.bins_with_embedding[idx] = True
+                self.embeddings[row_idx] = emb_dict[uri].astype(np.float32)
+                self.bins_with_embedding[row_idx] = True
 
         n_missing = int((~self.bins_with_embedding).sum())
         n_present = int(self.bins_with_embedding.sum())
@@ -181,7 +181,7 @@ class NeighbourGraph:
                 mean_pooled = (sum_hidden / count).cpu().numpy()  # [B, hidden_dim]
 
                 for uri, emb in zip(batch_uris, mean_pooled):
-                    emb_dict[uri] = emb.astype(np.float32)
+                    emb_dict[str(uri)] = emb.astype(np.float32)
 
                 if (start // batch_size) % 10 == 0:
                     log.debug(f"  Processed {start + len(batch_seqs)}/{len(sequences)} sequences")
@@ -671,7 +671,7 @@ class NeighbourGraph:
         If the local normal matrix is ill-conditioned, this falls back to NW weights.
         """
         idx = np.array(self.neighbours[i])
-        if len(idx) == 0:
+        if len(idx) == 0 or self.embeddings is None:
             return idx, np.array([])
         X = self.embeddings[idx] - self.embeddings[i]
         # build design Z = [1 | X]

@@ -93,7 +93,7 @@ class Trainer:
         input_dim = data["train"]["X"].shape[1]
         mlp_model = MLPModel(
             input_dim,
-            hidden_dims=[128, 128, 128, 128],
+            hidden_dims=self.cfg.mlp_hidden_dims,
             output_dim=self.cfg.embed_dim,
             dropout=self.cfg.dropout,
         ).to(self.device)
@@ -103,6 +103,7 @@ class Trainer:
             latent_solver,
             n_bins=len(bin_index),
             device=self.device,
+            latent_init_std=self.cfg.latent_init_std,
             embed_dim=self.cfg.embed_dim,
             gating_fn=self.cfg.gating_fn,
             gating_alpha=self.cfg.gating_alpha,
@@ -417,7 +418,7 @@ class Trainer:
         previous requires_grad state before returning.
         """
         self.model.eval()
-        solver_device = self.latent_solver.device
+        solver_device = self.model.latent_solver.device
 
         with torch.no_grad():
             inputs, targets, bin_ids, sample_ids, mask = self._to_device(batch)

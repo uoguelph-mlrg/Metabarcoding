@@ -205,7 +205,7 @@ class Trainer:
         mlp_input_dim = input_dim + self.latent_dim
         mlp_model = MLPModel(
             mlp_input_dim,
-            hidden_dims=[128, 128, 128, 128],
+            hidden_dims=self.cfg.mlp_hidden_dims,
             dropout=self.cfg.dropout,
         ).to(self.device)
 

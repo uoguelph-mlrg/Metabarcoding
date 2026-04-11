@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 import os
 import numpy as np
 import torch
@@ -43,8 +43,9 @@ class Config:
     embedding_path: Optional[str] = None        # path to precomputed embeddings (.npy dict: bin_uri->vector)
     barcode_data_path: Optional[str] = None     # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
-    
-    # MLP - optimization settings
+
+    # MLP - architecture & optimization settings
+    mlp_hidden_dims : List[int] = [128, 128, 128, 128]  # Hidden layer dimensions for MLP
     mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
     weight_decay: float = 1e-5                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
@@ -57,23 +58,24 @@ class Config:
     latent_present_only: bool = False           # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
     latent_l2_reg: float = 1e-3                 # L2 norm regularization on D (parameter r)
     latent_init_prox_reg: float = 0.0           # Initial proximal regularization weight; annealed to 0 across epochs to stabilize early active-set latent updates.
-    
+
     # Latent solver - optimization settings
     latent_optim_steps: int = 15                # Number of latent optimization steps per batch / solver call
     latent_lr: float = 1e-2                     # Learning rate for the latent AdamW optimizer
+    latent_init_std: float = 0.0                # Standard deviation for initializing latent embeddings (0 for zeros, >0 for Gaussian noise)
     latent_warmup_start_factor: float = 1e-3    # Initial multiplier for latent LR warmup
     latent_warmup_frac: float = 0.2             # Fraction of total latent solves used for warmup
     latent_lr_eta_min: float = 1e-6             # Minimum latent LR reached by cosine decay
-    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold" # Method for selecting subset of neighbors for latent optimization 
+    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"  # Method for selecting subset of neighbors for latent optimization 
     latent_k_hop_threshold: int = 2             # Number of neighbor graph hops to select BINs from (used when latent_k_hop_mode="threshold")
     latent_hop_knn_cap: int = 64                # Max number of neighbors to include in latent optimization (used when latent_k_hop_mode="knn")
-    
+
     # Training with interpolated latents settings
     interpolated_sample_fraction: float = 0.0   # Fraction of training samples using interpolated latent (set to 0 to disable interpolation during training)
     train_MLP_with_interpolation: bool = False  # Whether to train the MLP on interpolated latents too (instead of only using them in the latent solver)
     inference_with_interpolation: bool = False  # Whether to use interpolated latents during inference (if False, uses BINs own latent)
     include_self_in_interpolation: bool = False # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
-    
+
     # Sizes and combination modalities for latent and intrinsic vectors
     embed_dim: int = 10                         # Embedding dimension d for both latent and intrinsic vectors (set to 1 for scalars)
     gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid"  # Gating function for combining latent and intrinsic vectors

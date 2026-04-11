@@ -251,9 +251,9 @@ def load_processed(
     Load preprocessed splits saved by `load()` from a directory.
 
     Expected files in `data_dir`:
-      - X_train.csv, X_val.csv, X_test.csv (MultiIndex: sample_id, bin_uri)
-      - y_train.csv, y_val.csv, y_test.csv (single column, aligned to X_*.csv row order)
-      - taxonomic_data.csv (must include bin_uri and taxonomy columns)
+    - X_train.csv, X_val.csv, X_test.csv (MultiIndex: sample_id, bin_uri)
+    - y_train.csv, y_val.csv, y_test.csv (single column, aligned to X_*.csv row order)
+    - taxonomic_data.csv (must include bin_uri and taxonomy columns)
 
     Returns the same objects as `load()`, except `split_indices` is empty
     (since the original sample-index permutation is not recoverable from files alone).

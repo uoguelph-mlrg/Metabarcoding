@@ -61,7 +61,7 @@ y_val = splits['val']['y'].values.astype(np.float32)
 y_test = splits['test']['y'].values.astype(np.float32)
 
 print("\n[2/5] Training standalone MLP (no latent)...")
-mlp = MLPOnly(input_dim=X_train.shape[1], hidden_dims=[128, 64], output_dim=1, dropout=0.1).to(device)
+mlp = MLPOnly(input_dim=X_train.shape[1], hidden_dims=config.mlp_hidden_dims, output_dim=1, dropout=0.1).to(device)
 optimizer = torch.optim.Adam(mlp.parameters(), lr=lr)
 loss_fn = torch.nn.MSELoss()
 

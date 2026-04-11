@@ -109,7 +109,7 @@ def test_model_creation():
         # Create MLP (with adjusted input dimension)
         input_dim = 10
         mlp_input_dim = input_dim + cfg.latent_dim
-        mlp = MLPModel(mlp_input_dim, hidden_dims=[32, 16], dropout=0.1)
+        mlp = MLPModel(mlp_input_dim, hidden_dims=cfg.mlp_hidden_dims, dropout=0.1)
         
         # Create model
         model = Model(

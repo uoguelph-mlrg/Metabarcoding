@@ -34,6 +34,7 @@ class Model(nn.Module):
         gating_alpha: float = 0.5, # FIXME: have generic parameters variable that can be assigned from a dict (using the correct key for each gating function) to avoid unused parameters and confusion
         gating_kappa: float = 0.5,
         gating_epsilon: float = 0.693,
+        latent_init_std: float = 0.0,
         interpolation_enabled: bool = False,
         include_self_in_interpolation: bool = True,
     ):
@@ -58,7 +59,7 @@ class Model(nn.Module):
         self.embed_dim = embed_dim
         self.n_bins = n_bins
         self._interpolation_enabled = interpolation_enabled
-        self.H_interp: Dict[bool, Optional[torch.Tensor]] = {False: None, True: None}
+        self.H_interp: Optional[torch.Tensor] = None
 
         if interpolation_enabled:
             interp_device = self.device if self.device.type != "mps" else torch.device("cpu")
@@ -69,9 +70,10 @@ class Model(nn.Module):
             self.gating = make_gating_function(
                 gating_fn, alpha=gating_alpha, kappa=gating_kappa, epsilon=gating_epsilon
             )
-            # Latent matrix H ∈ R^{n_bins × d}, initialized to 0 so g(0) = 1 (identity modulation)
+            # Latent matrix H ∈ R^{n_bins × d}
+            latent_init = torch.randn((n_bins, embed_dim), device=device) * latent_init_std if latent_init_std > 0 else torch.zeros((n_bins, embed_dim), device=device)
             self.latent_vec = nn.Parameter(
-                torch.zeros((n_bins, embed_dim), device=device),
+                latent_init,
                 requires_grad=False,
             )
             # Final linear layer w: R^d → R (no bias)
@@ -79,8 +81,9 @@ class Model(nn.Module):
             nn.init.xavier_uniform_(self.final_linear.weight)
         else:
             # Scalar mode: latent is a 1D vector, no gating, no final linear
+            latent_init = torch.randn(n_bins, device=device) * latent_init_std if latent_init_std > 0 else torch.zeros(n_bins, device=device)
             self.latent_vec = nn.Parameter(
-                torch.zeros(n_bins, device=device),
+                latent_init,
                 requires_grad=False,
             )
 

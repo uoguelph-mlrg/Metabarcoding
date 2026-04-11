@@ -65,7 +65,7 @@ class LatentSolver:
         row_sums = np.asarray(mat.sum(axis=1)).reshape(-1).astype(np.float64, copy=False)
         row_sums[row_sums == 0.0] = 1.0
         inv = sparse.diags(1.0 / row_sums, format="csr")
-        return (inv @ mat).tocsr()
+        return sparse.csr_matrix(inv @ mat)
 
     def _build_interpolation_operator(self, include_self_in_interpolation: bool) -> sparse.csr_matrix:
         if self.H_smooth is None:
@@ -164,7 +164,9 @@ class LatentSolver:
             self.device,
         )
 
-    def _csr_to_torch(self, mat: sparse.csr_matrix) -> torch.Tensor:
+    def _csr_to_torch(self, mat: Optional[sparse.csr_matrix]) -> torch.Tensor:
+        if mat is None:
+            raise ValueError("mat cannot be None")
         crow = torch.as_tensor(mat.indptr.astype(np.int64), device=self.device)
         col = torch.as_tensor(mat.indices.astype(np.int64), device=self.device)
         vals = torch.as_tensor(mat.data.astype(np.float32), device=self.device)
@@ -238,7 +240,7 @@ class LatentSolver:
             )
 
         w: Optional[torch.Tensor] = None
-        if self.embed_dim > 1:
+        if self.embed_dim > 1 and final_weights is not None:
             w = final_weights.to(device=self.device, dtype=torch.float32).reshape(-1)
             if w.shape[0] != self.embed_dim:
                 raise ValueError(f"final_weights has shape {tuple(w.shape)}, expected ({self.embed_dim},)")
@@ -513,8 +515,8 @@ class LatentSolver:
         final_weights: Optional[torch.Tensor] = None,
         interpolation_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        latent_obs = latent_source[bin_ids_t]
-        own_logits = self._compute_logits_from_latent_values(latent_obs, intrinsic_t, final_weights_t)
+        latent_obs = latent_source[bin_ids]
+        own_logits = self._compute_logits_from_latent_values(latent_obs, intrinsic, final_weights)
 
         if interpolation_mask is None:
             return own_logits
@@ -526,8 +528,8 @@ class LatentSolver:
         latent_2d = latent_source.unsqueeze(-1) if latent_source.ndim == 1 else latent_source
         interp_operator = self.get_interpolation_operator(self.cfg.include_self_in_interpolation, device=latent_2d.device)
         interpolated_full = torch.sparse.mm(interp_operator, latent_2d)
-        interpolated_obs = interpolated_full[bin_ids_t]
-        interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic_t, final_weights_t)
+        interpolated_obs = interpolated_full[bin_ids]
+        interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic, final_weights)
 
         if own_logits.ndim == 1:
             return torch.where(mask_t, interp_logits, own_logits)

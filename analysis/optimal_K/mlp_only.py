@@ -7,7 +7,7 @@ class MLPOnly(nn.Module):
     """
     Standalone MLP for intrinsic prediction (no latent component).
     """
-    def __init__(self, input_dim: int, hidden_dims: List[int] = [128, 64], output_dim: int = 1, dropout: float = 0.1):
+    def __init__(self, input_dim: int, hidden_dims: List[int] = [128, 128, 128, 128], output_dim: int = 1, dropout: float = 0.1):
         super().__init__()
         layers = []
         prev = input_dim

@@ -54,7 +54,7 @@ class Config:
     latent_convergence_maxfun: int = 120    # Max function evaluations for latent L-BFGS solves
     latent_device: Optional[str] = None
     latent_adam_steps: int = 3
-    latent_adam_lr: float = 1e-2
+    latent_lr: float = 1e-2
     latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"
     latent_k_hop_threshold: int = 2
     latent_hop_knn_cap: int = 64

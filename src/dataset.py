@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from random import sample
-from typing import Any, Dict, List, Literal, Tuple
+from typing import Any, Dict, List, Literal, Tuple, Optional, Union
 import numpy as np
 import pandas as pd
 import torch
@@ -68,9 +68,9 @@ class MBDataset(Dataset):
     
     Two modes:
     - "sample": Returns all bins for a single sample. Use with collate_samples.
-      Good for cross-entropy loss where bins within a sample form a distribution.
+    Good for cross-entropy loss where bins within a sample form a distribution.
     - "bin": Returns individual (sample, bin) observations.
-      Good for logistic/MSE loss on individual bins.
+    Good for logistic/MSE loss on individual bins.
     """
 
     def __init__(
@@ -141,10 +141,10 @@ class MBDataset(Dataset):
         indices = self._sample_to_indices[sample_idx]
         
         return {
-            "input": self.X[indices],           # [n_bins, n_features]
-            "target": self.y[indices],          # [n_bins] - relative abundances
-            "bin_idx": self.bin_uris[indices],  # [n_bins]
-            "sample_idx": sample_idx,           # scalar
+            "input": self.X[indices],                           # [n_bins, n_features]
+            "target": self.y[indices],                          # [n_bins] - relative abundances
+            "bin_idx": self.bin_uris[indices],                  # [n_bins]
+            "sample_idx": np.array(sample_idx, dtype=np.int64), # scalar
         }
 
     # -------------------- Bin mode --------------------
@@ -168,5 +168,5 @@ class MBDataset(Dataset):
             "input": self.X[idx],
             "target": self.y[idx],
             "bin_idx": self.bin_uris[idx],
-            "sample_idx": self.sample_ids[idx],
+            "sample_idx": np.array(self.sample_ids[idx], dtype=np.int64),
         }
