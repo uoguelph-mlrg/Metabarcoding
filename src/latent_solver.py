@@ -507,31 +507,31 @@ class LatentSolver:
 
     def _logits_from_latent(
         self,
-        latent: torch.Tensor,
+        latent_source: torch.Tensor,
         intrinsic: torch.Tensor,
         bin_ids: torch.Tensor,
         final_weights: Optional[torch.Tensor] = None,
         interpolation_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        latent_obs = latent[bin_ids]
-        own_logits = self._compute_logits_from_latent_values(latent_obs, intrinsic, final_weights)
+        latent_obs = latent_source[bin_ids_t]
+        own_logits = self._compute_logits_from_latent_values(latent_obs, intrinsic_t, final_weights_t)
 
         if interpolation_mask is None:
             return own_logits
 
-        mask = interpolation_mask.to(device=latent.device, dtype=torch.bool).reshape(-1)
-        if not bool(torch.any(mask).item()):
+        mask_t = interpolation_mask.to(device=latent_source.device, dtype=torch.bool).reshape(-1)
+        if not bool(torch.any(mask_t).item()):
             return own_logits
 
-        latent_2d = latent.unsqueeze(-1) if latent.ndim == 1 else latent
+        latent_2d = latent_source.unsqueeze(-1) if latent_source.ndim == 1 else latent_source
         interp_operator = self.get_interpolation_operator(self.cfg.include_self_in_interpolation, device=latent_2d.device)
         interpolated_full = torch.sparse.mm(interp_operator, latent_2d)
-        interpolated_obs = interpolated_full[bin_ids]
-        interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic, final_weights)
+        interpolated_obs = interpolated_full[bin_ids_t]
+        interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic_t, final_weights_t)
 
         if own_logits.ndim == 1:
-            return torch.where(mask, interp_logits, own_logits)
-        return torch.where(mask.unsqueeze(-1), interp_logits, own_logits)
+            return torch.where(mask_t, interp_logits, own_logits)
+        return torch.where(mask_t.unsqueeze(-1), interp_logits, own_logits)
 
     def _cross_entropy_loss(
         self,
