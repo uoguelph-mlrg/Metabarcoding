@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -56,10 +57,8 @@ class Trainer:
 
         self.start_epoch = 0
         self.current_epoch = -1
-        self.global_step = 0
         self.best_val_loss = float("inf")
         self.last_val_metrics: Dict[str, float] = {}
-        self.latent_global_step = 0
 
         self.train_losses: List[Tuple[int, float]] = []
         self.val_losses: List[Tuple[int, float]] = []
@@ -88,7 +87,7 @@ class Trainer:
             embed_dim=self.cfg.embed_dim,
             gating_fn=self.cfg.gating_fn,
         )
-        latent_solver.build_interpolation_matrix(method="nw")
+        latent_solver.build_interpolation_matrix()
 
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
@@ -111,17 +110,31 @@ class Trainer:
             gating_epsilon=self.cfg.gating_epsilon,
             interpolation_enabled=bool(self.cfg.train_MLP_with_interpolation or self.cfg.inference_with_interpolation),
         )
+        self.model.latent_vec.requires_grad_(False) # latent is optimized separately, not by the main optimizer
 
         if self.cfg.embed_dim > 1:
             optim_params = [
                 {"params": self.model.mlp.parameters(), "weight_decay": self.cfg.weight_decay},
-                {"params": self.model.final_linear.parameters(), "weight_decay": self.cfg.final_linear_wd},
+                {"params": self.model.final_linear.parameters(), "weight_decay": self.cfg.final_linear_weight_decay},
             ]
         else:
             optim_params = [
                 {"params": self.model.mlp.parameters(), "weight_decay": self.cfg.weight_decay},
             ]
-        self.optimizer = torch.optim.AdamW(optim_params, lr=self.cfg.lr)
+        self.mlp_optimizer = torch.optim.AdamW(optim_params, lr=self.cfg.mlp_lr)
+        self.latent_optimizer = torch.optim.AdamW([self.model.latent_vec], lr=self.cfg.latent_lr)
+        
+        total_steps = max(1, self.cfg.epochs * len(self.train_loader))
+        warmup_steps = max(1, int(self.cfg.mlp_warmup_frac * total_steps))
+        warmup_scheduler = LinearLR(self.mlp_optimizer, start_factor=self.cfg.mlp_warmup_start_factor, total_iters=warmup_steps)
+        cosine_scheduler = CosineAnnealingLR(self.mlp_optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=self.cfg.mlp_lr_eta_min)
+        self.mlp_scheduler = SequentialLR(self.mlp_optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+
+        total_steps = max(1, self.cfg.epochs * len(self.train_loader) * self.cfg.latent_optim_steps)
+        warmup_steps = max(1, int(self.cfg.latent_warmup_frac * total_steps))
+        warmup_scheduler = LinearLR(self.latent_optimizer, start_factor=self.cfg.latent_warmup_start_factor, total_iters=warmup_steps)
+        cosine_scheduler = CosineAnnealingLR(self.latent_optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=self.cfg.latent_lr_eta_min)
+        self.latent_scheduler = SequentialLR(self.latent_optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
         self.loss_type: Literal["cross_entropy", "logistic"] = self.cfg.loss_type
         self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
@@ -139,58 +152,15 @@ class Trainer:
 
         batch_size = self.cfg.batch_size_sample if self.loss_mode == "sample" else self.cfg.batch_size_bin
         collate_fn = collate_samples if self.loss_mode == "sample" else None
-        # Safer loader defaults across platforms: multiprocessing + pinned memory can
-        # be unstable on macOS/MPS in some environments.
         num_workers = int(getattr(self.cfg, "num_workers", 0 if sys.platform == "darwin" else 8))
         pin_memory = bool(getattr(self.cfg, "pin_memory", self.device.type == "cuda"))
+        args = {
+            "batch_size": batch_size, "collate_fn": collate_fn, "num_workers": num_workers, "pin_memory": pin_memory
+        }
 
-        self.train_loader = DataLoader(
-            train,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=collate_fn,
-            drop_last=True,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )
-        self.val_loader = DataLoader(
-            val,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )
-        self.test_loader = DataLoader(
-            test,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )
-
-        self._latent_total_steps = max(1, self.cfg.epochs * len(self.train_loader))
-        self._latent_warmup_steps = max(0, int(self.cfg.latent_lr_warmup_frac * self._latent_total_steps))
-
-        total_steps = self.cfg.epochs * len(self.train_loader)
-        warmup_steps = max(1, int(0.1 * total_steps))
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer,
-            start_factor=1e-3,
-            end_factor=1.0,
-            total_iters=warmup_steps,
-        )
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=max(1, total_steps - warmup_steps),
-            eta_min=1e-6,
-        )
-        self.scheduler = torch.optim.lr_scheduler.SequentialLR(
-            self.optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[warmup_steps],
-        )
+        self.train_loader = DataLoader(train, shuffle=True, drop_last=True, **args)
+        self.val_loader = DataLoader(val, shuffle=False, **args)
+        self.test_loader = DataLoader(test, shuffle=False, **args)
 
         if self.resume:
             self._resume_from_latest()
@@ -222,6 +192,11 @@ class Trainer:
         )
 
     def _epoch_sample_selection_mask(self, sample_idx: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return per-sample boolean mask for this epoch's interpolation subset.
+
+        The returned mask has the same first dimension as sample_idx and is used to
+        decide where interpolated latents are enabled during training/latent solves.
+        """
         if self._epoch_selected_sample_ids_t.numel() == 0:
             return None
         sample_idx_np = sample_idx.detach().cpu().numpy().reshape(-1)
@@ -236,20 +211,20 @@ class Trainer:
             "model_name": self.model_name,
             "run_id": self.run_id,
             "epoch": epoch,
-            "global_step": self.global_step,
             "best_val_loss": self.best_val_loss,
             "val_loss": val_loss,
             "val_metrics": val_metrics,
             "config": asdict(self.cfg),
             "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "scheduler_state_dict": self.scheduler.state_dict(),
+            "mlp_optimizer_state_dict": self.mlp_optimizer.state_dict(),
+            "mlp_scheduler_state_dict": self.mlp_scheduler.state_dict(),
+            "latent_optimizer_state_dict": self.latent_optimizer.state_dict(),
+            "latent_scheduler_state_dict": self.latent_scheduler.state_dict(),
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "rng_numpy": np.random.get_state(),
             "rng_torch": torch.get_rng_state(),
             "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            "latent_global_step": self.latent_global_step,
             "saved_at": time.strftime("%Y-%m-%d_%H-%M-%S"),
         }
 
@@ -282,30 +257,6 @@ class Trainer:
         ckpts.sort(key=os.path.getmtime, reverse=True)
         return ckpts[0]
 
-    def _latent_lr_for_step(self, step_idx: int) -> float:
-        total_steps = max(1, self._latent_total_steps)
-        base_lr = float(self.cfg.latent_adam_lr)
-        start_factor = float(self.cfg.latent_lr_warmup_start_factor)
-        eta_min = float(self.cfg.latent_lr_eta_min)
-        warmup_steps = min(max(0, int(self._latent_warmup_steps)), total_steps)
-        step_idx = max(0, min(int(step_idx), total_steps - 1))
-
-        if warmup_steps > 0 and step_idx < warmup_steps:
-            if warmup_steps == 1:
-                return max(eta_min, base_lr)
-            progress = step_idx / float(warmup_steps - 1)
-            factor = start_factor + (1.0 - start_factor) * progress
-            return max(eta_min, base_lr * factor)
-
-        cosine_steps = max(1, total_steps - warmup_steps)
-        if cosine_steps == 1:
-            return max(eta_min, base_lr)
-
-        cosine_step = min(step_idx - warmup_steps, cosine_steps - 1)
-        progress = cosine_step / float(cosine_steps - 1)
-        cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
-        return float(eta_min + (base_lr - eta_min) * cosine)
-
     def _resume_from_latest(self) -> None:
         ckpt_path = self._find_latest_checkpoint_path()
         if ckpt_path is None:
@@ -322,17 +273,17 @@ class Trainer:
                 )
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        self.mlp_optimizer.load_state_dict(checkpoint["mlp_optimizer_state_dict"])
+        self.mlp_scheduler.load_state_dict(checkpoint["mlp_scheduler_state_dict"])
+        self.latent_optimizer.load_state_dict(checkpoint["latent_optimizer_state_dict"])
+        self.latent_scheduler.load_state_dict(checkpoint["latent_scheduler_state_dict"])
 
         self.current_epoch = int(checkpoint.get("epoch", -1))
         self.start_epoch = self.current_epoch + 1
-        self.global_step = int(checkpoint.get("global_step", 0))
         self.best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
         self.train_losses = list(checkpoint.get("train_losses", []))
         self.val_losses = list(checkpoint.get("val_losses", []))
         self.last_val_metrics = dict(checkpoint.get("val_metrics", {}))
-        self.latent_global_step = int(checkpoint.get("latent_global_step", 0))
 
         rng_numpy = checkpoint.get("rng_numpy")
         rng_torch = checkpoint.get("rng_torch")
@@ -347,6 +298,12 @@ class Trainer:
         log.info(f"Resumed from checkpoint: {ckpt_path} (epoch {self.current_epoch})")
 
     def _train_batch(self, batch: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, float]]:
+        """Run one MLP optimization step and return loss plus timing breakdown.
+
+        In sample mode, inputs are flattened to observation level, then reshaped back
+        to [batch_size, max_bins] for masked cross-entropy. In bin mode, observations
+        are already independent and no reshape is needed.
+        """
         self.model.train()
         inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
         sample_selection = self._epoch_sample_selection_mask(sample_idx)
@@ -354,10 +311,12 @@ class Trainer:
         t0 = time.perf_counter()
         if self.loss_mode == "sample":
             bsz, max_bins, n_feat = inputs.shape
+            # Flatten keeps sample order, so bin/sample alignment is preserved.
             inputs_flat = inputs.view(bsz * max_bins, n_feat)
             bin_idx_flat = bin_idx.view(bsz * max_bins)
             interpolation_mask = None
             if self.cfg.train_MLP_with_interpolation and sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                # Expand sample-level selection to observation-level and drop padded bins.
                 interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                 if mask is not None:
                     interpolation_mask = interpolation_mask & mask.bool()
@@ -366,9 +325,9 @@ class Trainer:
                 inputs_flat,
                 bin_idx_flat,
                 interpolation_mask=interpolation_mask,
-                include_self_in_interpolation=self.cfg.include_self_in_interpolation,
             )
             outputs = outputs_flat.view(bsz, max_bins)
+            # Padded positions must be -inf so softmax contributes exactly zero mass.
             outputs = outputs.masked_fill(mask == 0, float("-inf"))
             loss = self.criterion(outputs, targets, mask)
         else:
@@ -379,12 +338,11 @@ class Trainer:
                 inputs,
                 bin_idx,
                 interpolation_mask=interpolation_mask,
-                include_self_in_interpolation=self.cfg.include_self_in_interpolation,
             )
             loss = self.criterion(outputs, targets)
         t1 = time.perf_counter()
 
-        self.optimizer.zero_grad()
+        self.mlp_optimizer.zero_grad()
         loss.backward()
         t2 = time.perf_counter()
 
@@ -394,7 +352,7 @@ class Trainer:
                 params_to_clip += list(self.model.final_linear.parameters())
             torch.nn.utils.clip_grad_norm_(params_to_clip, self.cfg.grad_clip)
 
-        self.optimizer.step()
+        self.mlp_optimizer.step()
         t3 = time.perf_counter()
 
         timing = {
@@ -428,7 +386,6 @@ class Trainer:
                     inputs_flat,
                     bin_idx_flat,
                     interpolation_mask=interpolation_mask,
-                    include_self_in_interpolation=self.cfg.include_self_in_interpolation,
                 )
                 outputs = outputs_flat.view(bsz, max_bins)
                 outputs = outputs.masked_fill(mask == 0, float("-inf"))
@@ -439,7 +396,6 @@ class Trainer:
                     inputs,
                     bin_idx,
                     interpolation_mask=interpolation_mask,
-                    include_self_in_interpolation=self.cfg.include_self_in_interpolation,
                 )
                 loss = self.criterion(outputs, targets)
 
@@ -449,65 +405,68 @@ class Trainer:
 
         return float(running_loss / max(1, n_samples))
 
-    def solve_latent(self, batch: Dict[str, torch.Tensor], prox_weight: float = 0.0) -> Tuple[np.ndarray, Dict[str, float]]:
+    def solve_latent(
+        self,
+        batch: Dict[str, torch.Tensor],
+        prox_weight: float = 0.0,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Run one latent-variable solve for the current batch.
+
+        The latent solver consumes torch tensors directly on its configured device.
+        This method temporarily enables gradient tracking for latent_vec only, then restores its
+        previous requires_grad state before returning.
+        """
         self.model.eval()
+        solver_device = self.latent_solver.device
 
         with torch.no_grad():
-            inputs, targets, bin_idx, sample_idx, mask = self._to_device(batch)
-            sample_selection = self._epoch_sample_selection_mask(sample_idx)
+            inputs, targets, bin_ids, sample_ids, mask = self._to_device(batch)
+            sample_selection = self._epoch_sample_selection_mask(sample_ids)
 
             if self.loss_mode == "sample":
                 bsz, max_bins, n_feat = inputs.shape
                 inputs_flat = inputs.view(bsz * max_bins, n_feat)
-                intrinsic_flat = self.model.mlp(inputs_flat).view(bsz, max_bins, self.cfg.embed_dim)
+                intrinsic = self.model.mlp(inputs_flat).view(bsz, max_bins, self.cfg.embed_dim)
 
-                sample_grid = sample_idx.unsqueeze(1).expand(-1, max_bins)
-                valid = mask.bool() if mask is not None else torch.ones_like(bin_idx, dtype=torch.bool)
+                sample_grid = sample_ids.unsqueeze(1).expand(-1, max_bins)
+                valid = mask.bool() if mask is not None else torch.ones_like(bin_ids, dtype=torch.bool)
                 interpolation_mask = None
                 if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
                     interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                     interpolation_mask = interpolation_mask & valid
                     interpolation_mask = interpolation_mask[valid]
 
-                intrinsic_vec = intrinsic_flat[valid].detach().cpu().numpy()
-                if self.cfg.embed_dim == 1:
-                    intrinsic_vec = intrinsic_vec.reshape(-1)
-                y_vec = targets[valid].detach().cpu().numpy().reshape(-1)
-                bin_ids = bin_idx[valid].detach().cpu().numpy().reshape(-1).astype(np.int64)
-                sample_ids = sample_grid[valid].detach().cpu().numpy().reshape(-1).astype(np.int64)
-                interpolation_mask_np = None if interpolation_mask is None else interpolation_mask.detach().cpu().numpy().astype(bool, copy=False)
+                intrinsic = intrinsic[valid]
+                y = targets[valid]
+                bin_ids = bin_ids[valid]
+                sample_ids = sample_grid[valid]
             else:
                 intrinsic = self.model.mlp(inputs)
-                if self.cfg.embed_dim == 1:
-                    intrinsic = intrinsic.squeeze(-1)
-                intrinsic_vec = intrinsic.detach().cpu().numpy()
-                y_vec = targets.detach().cpu().numpy().reshape(-1)
-                bin_ids = bin_idx.detach().cpu().numpy().reshape(-1).astype(np.int64)
-                sample_ids = sample_idx.detach().cpu().numpy().reshape(-1).astype(np.int64)
-                interpolation_mask_np = None
+                interpolation_mask = None
                 if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
-                    interpolation_mask_np = sample_selection.detach().cpu().numpy().astype(bool, copy=False)
+                    interpolation_mask = sample_selection.to(dtype=torch.bool)
 
-        latent_anchor = self.model.latent_vec.detach().cpu().numpy()
-        latent_lr = self._latent_lr_for_step(self.latent_global_step)
+        previous_requires_grad = self.model.latent_vec.requires_grad
+        # Invariant: latent is optimized only in this block, not in _train_batch.
+        self.model.latent_vec.requires_grad_(True)
 
+        try:
+            latent_vec, timings = self.model.latent_solver.solve(
+                y=y,
+                intrinsic=intrinsic,
+                final_weights=self.model.final_linear.weight if self.cfg.embed_dim > 1 else None,
+                bin_ids=bin_ids,
+                sample_ids=sample_ids,
+                interpolation_mask=interpolation_mask,
+                loss_type=self.loss_type,
+                prox_weight=prox_weight,
+                latent=self.model.latent_vec,
+                optimizer=self.latent_optimizer,
+            )
+            self.latent_scheduler.step()
+        finally:
+            self.model.latent_vec.requires_grad_(previous_requires_grad)
 
-        latent_vec, timings = self.model.latent_solver.solve(
-            y=y_vec,
-            intrinsic_vec=intrinsic_vec,
-            final_weights=self.model.final_linear.weight.detach().cpu().numpy().squeeze() if self.cfg.embed_dim > 1 else None,
-            bin_ids=bin_ids,
-            sample_ids=sample_ids,
-            interpolation_mask=interpolation_mask_np,
-            loss_type=self.loss_type,
-            prox_weight=prox_weight,
-            x_anchor=latent_anchor,
-            latent_lr=latent_lr,
-            include_self_in_interpolation=self.cfg.include_self_in_interpolation,
-        )
-
-        self.model.set_latent(latent_vec)
-        self.latent_global_step += 1
         return latent_vec, timings
 
     @torch.no_grad()
@@ -544,7 +503,6 @@ class Trainer:
                         inputs_flat,
                         bin_idx_flat,
                         interpolation_mask=interpolation_mask,
-                        include_self_in_interpolation=self.cfg.include_self_in_interpolation,
                     ).unsqueeze(0)
                     probs = F.softmax(outputs, dim=-1).squeeze(0).cpu().numpy()
                     y_true = targets[b][valid_mask].cpu().numpy()
@@ -571,7 +529,6 @@ class Trainer:
                         inputs[i].unsqueeze(0),
                         bin_idx[i].unsqueeze(0),
                         interpolation_mask=interpolation_mask,
-                        include_self_in_interpolation=self.cfg.include_self_in_interpolation,
                     )
                     prob = float(torch.sigmoid(output).cpu().numpy().item())
                     y_true = float(targets[i].cpu().numpy().item())
@@ -606,6 +563,12 @@ class Trainer:
 
 
     def compute_metrics(self, split: Literal["train", "val", "test"]) -> Dict[str, float]:
+        """Compute per-observation and per-sample evaluation metrics.
+
+        Micro metrics are computed on all observations pooled together. Macro metrics
+        are computed per sample first and then averaged to avoid domination by samples
+        with many observed BINs.
+        """
         y_pred, y_true, sample_labels, _ = self.get_predictions(split=split)
 
         y_true = np.asarray(y_true, dtype=float)
@@ -620,6 +583,8 @@ class Trainer:
             arr = np.asarray(values, dtype=float).reshape(-1)
             if arr.size == 0:
                 return np.nan
+            # eps is added before normalization so zero-only vectors still produce a
+            # finite distribution and log argument.
             probs = (arr + eps) / np.sum(arr + eps)
             return float(-np.sum(probs * np.log(probs + eps)))
         
@@ -633,7 +598,7 @@ class Trainer:
             return rho if np.isfinite(rho) else None
         
         def _r2_and_intercept(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float]:
-            """Compute R² and intercept from scatter points."""
+            """Compute R² plus fitted intercept for Shannon diversity."""
             if len(y_true) == 0:
                 return np.nan, np.nan
             ss_res = np.sum((y_true - y_pred) ** 2)
@@ -662,6 +627,7 @@ class Trainer:
                 pred_s = y_pred[mask]
                 if len(true_s) == 0:
                     continue
+                # Macro metrics weight each sample equally regardless of sample size.
                 rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
                 mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
                 true_s_norm = (true_s + eps) / (true_s + eps).sum()
@@ -704,6 +670,8 @@ class Trainer:
 
         zero_mask = y_true == 0
         nonzero_mask = y_true > 0
+        # Report sparsity-sensitive errors separately because abundance vectors can be
+        # strongly zero-inflated.
         rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))) if zero_mask.sum() > 0 else np.nan
         mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))) if zero_mask.sum() > 0 else np.nan
         rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2))) if nonzero_mask.sum() > 0 else np.nan
@@ -788,10 +756,11 @@ class Trainer:
                 self._epoch_selected_sample_ids = np.empty(0, dtype=np.int64)
                 self._epoch_selected_sample_ids_t = torch.empty(0, dtype=torch.long)
 
-            alpha = min(1.0, epoch / warmup_epochs)
-            prox_weight = self.cfg.latent_prox_scale * self.cfg.latent_l2_reg * (1.0 - alpha)
+            # Linearly fade proximal pull as training progresses: early stability,
+            # late freedom for latent adaptation.
+            alpha = min(1.0, epoch / self.cfg.epochs)
+            prox_weight = self.cfg.latent_init_prox_reg * (1.0 - alpha)
 
-            batch_forward, batch_backward, batch_optim, batch_total, batch_latent = [], [], [], [], []
             latent_vec = self.model.latent_vec.detach().cpu().numpy()
 
             for batch_idx, batch in enumerate(self.train_loader):
@@ -802,40 +771,34 @@ class Trainer:
                 latent_s = time.perf_counter() - latent_start
 
                 loss_value, mlp_timings = self._train_batch(batch)
-                self.scheduler.step()
-                self.global_step += 1
+                self.mlp_scheduler.step()
 
                 total_s = time.perf_counter() - batch_start
-                batch_forward.append(mlp_timings["forward_s"])
-                batch_backward.append(mlp_timings["backward_s"])
-                batch_optim.append(mlp_timings["optim_s"])
-                batch_total.append(total_s)
-                batch_latent.append(latent_s)
 
                 if use_wandb and WANDB_AVAILABLE:
                     # timings = {"setup_s": setup_done, "epoch_logits_s": [], "epoch_loss_s": [], "epoch_backward_s": [], "epoch_optimizer_s": []}
-                    wandb.log(
-                        {
-                            "train/batch/loss": loss_value,
-                            "train/batch/mlp_lr": self.optimizer.param_groups[0]["lr"],
-                            "train/batch/latent_lr": latent_timings["latent_lr"],
-                            "timing/batch/mlp/forward_s": mlp_timings["forward_s"],
-                            "timing/batch/mlp/backward_s": mlp_timings["backward_s"],
-                            "timing/batch/mlp/optim_s": mlp_timings["optim_s"],
-                            "timing/batch/latent_solve_s": latent_s,
-                            "timing/batch/latent/setup_s": latent_timings["setup_s"],
-                            "timing/batch/latent/forward_s": latent_timings["forward_s"],
-                            "timing/batch/latent/backward_s": latent_timings["backward_s"],
-                            "timing/batch/latent/optim_s": latent_timings["optim_s"],
-                            "timing/batch/total_s": total_s,
-                            "train/epoch": epoch,
-                            "train/batch_idx": batch_idx,
-                            "train/global_step": self.global_step,
-                            "train/latent_global_step": self.latent_global_step,
-                            "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
-                        },
-                        step=self.global_step,
-                    )
+                    wandb.log({
+                        "train/batch/loss": loss_value,
+                        "train/batch/mlp_lr": self.mlp_optimizer.param_groups[0]["lr"],
+                        "train/batch/latent_lr": latent_timings["latent_lr"],
+                        "timing/batch/mlp/forward_s": mlp_timings["forward_s"],
+                        "timing/batch/mlp/backward_s": mlp_timings["backward_s"],
+                        "timing/batch/mlp/optim_s": mlp_timings["optim_s"],
+                        "timing/batch/latent/total": latent_s,
+                        "timing/batch/latent/setup_s": latent_timings["setup_s"],
+                        "timing/batch/latent/forward_s": latent_timings["forward_s"],
+                        "timing/batch/latent/backward_s": latent_timings["backward_s"],
+                        "timing/batch/latent/optim_s": latent_timings["optim_s"],
+                        "train/batch/latent/loss_CE": latent_timings["loss_CE"],
+                        "train/batch/latent/loss_l2": latent_timings["loss_l2"],
+                        "train/batch/latent/loss_smooth": latent_timings["loss_smooth"],
+                        "train/batch/latent/loss_prox": latent_timings["loss_prox"],
+                        "train/batch/latent/loss_total": latent_timings["loss_total"],
+                        "timing/batch/total_s": total_s,
+                        "train/epoch": epoch,
+                        "train/batch_idx": batch_idx,
+                        "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
+                    })
 
             train_eval_start = time.perf_counter()
             train_loss = self.validate(split="train")
@@ -864,17 +827,11 @@ class Trainer:
             self._save_checkpoint(epoch=epoch, val_loss=val_loss, val_metrics=val_metrics, best=improved)
 
             epoch_total_s = time.perf_counter() - epoch_start
-            batch_forward_arr = np.array(batch_forward, dtype=float)
-            batch_backward_arr = np.array(batch_backward, dtype=float)
-            batch_optim_arr = np.array(batch_optim, dtype=float)
-            batch_total_arr = np.array(batch_total, dtype=float)
-            batch_latent_arr = np.array(batch_latent, dtype=float)
 
             epoch_log_payload = {
                 "train/loss": train_loss,
                 "val/loss": val_loss,
                 "train/epoch": epoch,
-                "train/global_step": self.global_step,
                 "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
                 "latent/mean": float(latent_vec.mean()),
                 "latent/std": float(latent_vec.std()),
@@ -885,12 +842,6 @@ class Trainer:
                 "timing/epoch/val_eval_s": float(val_eval_s),
                 "timing/epoch/train_metrics_s": float(train_metric_s),
                 "timing/epoch/val_metrics_s": float(val_metric_s),
-                "timing/epoch/batch_forward_mean_s": float(np.mean(batch_forward_arr)),
-                "timing/epoch/batch_backward_mean_s": float(np.mean(batch_backward_arr)),
-                "timing/epoch/batch_optim_mean_s": float(np.mean(batch_optim_arr)),
-                "timing/epoch/batch_total_mean_s": float(np.mean(batch_total_arr)),
-                "timing/epoch/batch_latent_mean_s": float(np.mean(batch_latent_arr)),
-                "timing/epoch/latent_total_s": float(np.sum(batch_latent_arr)),
             }
             for metric_name, metric_value in train_metrics.items():
                 epoch_log_payload[f"train/metrics/{self._metric_key(metric_name)}"] = metric_value
@@ -898,7 +849,7 @@ class Trainer:
                 epoch_log_payload[f"val/metrics/{self._metric_key(metric_name)}"] = metric_value
 
             if use_wandb and WANDB_AVAILABLE:
-                wandb.log(epoch_log_payload, step=self.global_step)
+                wandb.log(epoch_log_payload)
 
             log.info(
                 f"Epoch {epoch + 1}/{self.cfg.epochs}: "
@@ -922,7 +873,7 @@ class Trainer:
             }
             for metric_name, metric_value in test_metrics.items():
                 payload[f"test/metrics/{self._metric_key(metric_name)}"] = metric_value
-            wandb.log(payload, step=self.global_step)
+            wandb.log(payload)
 
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
         latent_vector = self.model.latent_vec.detach().cpu().numpy()

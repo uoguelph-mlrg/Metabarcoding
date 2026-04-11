@@ -50,10 +50,10 @@ class NeighbourGraph:
         Populate self.embeddings (shape [n_bins, emb_dim]) and self.bins_with_embedding.
 
         Priority:
-          1. Load from cfg.embedding_path if the file exists.
-          2. Otherwise compute via BarcodeBERT using cfg.barcode_data_path and
-             save to cfg.embedding_path (if provided) so future runs skip inference.
-          3. If neither path is usable, raise a descriptive error.
+            1. Load from cfg.embedding_path if the file exists.
+            2. Otherwise compute via BarcodeBERT using cfg.barcode_data_path and save to 
+            cfg.embedding_path (if provided) so future runs skip inference.
+            3. If neither path is usable, raise a descriptive error.
 
         Bins with no sequence get a zero vector and bins_with_embedding[i] = False;
         those bins will fall back to taxonomy-based neighbours at build time.
@@ -283,7 +283,8 @@ class NeighbourGraph:
         
         for level in self.tax_levels:
             if level not in self.bins.columns:
-                tax_codes[level] = np.full(self.n_bins, -1, dtype=np.int32) # NOTE: to check
+                # Use -1 as missing-taxonomy sentinel, matching pandas.factorize NaN behavior.
+                tax_codes[level] = np.full(self.n_bins, -1, dtype=np.int32)
                 tax_groups[level] = {}
                 continue
             
@@ -329,9 +330,11 @@ class NeighbourGraph:
         
         # Log statistics about neighbor counts
         neighbor_counts = [len(n) for n in self.neighbours]
-        log.debug(f"Neighbor count stats: min={min(neighbor_counts)}, "
-                  f"max={max(neighbor_counts)}, mean={np.mean(neighbor_counts):.1f}, "
-                  f"median={np.median(neighbor_counts):.1f}")
+        log.debug(
+            f"Neighbor count stats: min={min(neighbor_counts)}, "
+            f"max={max(neighbor_counts)}, mean={np.mean(neighbor_counts):.1f}, "
+            f"median={np.median(neighbor_counts):.1f}"
+        )
 
     def analyze_taxonomy_thresholds(self) -> pd.DataFrame:
         """
@@ -341,8 +344,7 @@ class NeighbourGraph:
         helping you choose an appropriate dist_thres value.
         
         Returns:
-            pd.DataFrame with columns: threshold, level, min, max, mean, std, median,
-                                       pct_zero (percentage of bins with 0 neighbors)
+            pd.DataFrame with columns: threshold, level, min, max, mean, std, median, pct_zero (percentage of bins with 0 neighbors)
         """
         from tqdm import tqdm
         
@@ -494,6 +496,11 @@ class NeighbourGraph:
         Cosine distance is computed by L2-normalizing embeddings before Euclidean
         nearest-neighbor search.
         Bins without embeddings fall back to taxonomy-based KNN.
+
+        Note:
+        - For bins with embeddings, exactly min(K, n_with_embeddings - 1) neighbors are
+            selected after removing self from the query result.
+        - For bins without embeddings, neighbors are filled by taxonomy fallback.
 
         Args:
             K: Number of nearest neighbors to select.
@@ -655,8 +662,13 @@ class NeighbourGraph:
 
     # -------- LLR coefficients per node
     def llr_coeffs_for_node(self, i: int, q: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (indices, coeffs) such that h_i = sum_j coeffs[j] * d_j
-        For LLR, coeffs are derived from weighted least squares fitting of linear model.
+        """Return local-linear interpolation coefficients for node i.
+
+        Returns (indices, coeffs) such that h_i ≈ sum_j coeffs[j] * h_j over neighbors.
+        Coeffs are derived from weighted least squares on local offsets X_j - X_i and
+        correspond to the intercept row e0^T (Z^T W Z)^(-1) Z^T W.
+
+        If the local normal matrix is ill-conditioned, this falls back to NW weights.
         """
         idx = np.array(self.neighbours[i])
         if len(idx) == 0:

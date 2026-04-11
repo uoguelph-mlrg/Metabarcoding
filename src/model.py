@@ -35,6 +35,7 @@ class Model(nn.Module):
         gating_kappa: float = 0.5,
         gating_epsilon: float = 0.693,
         interpolation_enabled: bool = False,
+        include_self_in_interpolation: bool = True,
     ):
         """
         Args:
@@ -47,6 +48,8 @@ class Model(nn.Module):
             gating_alpha: Scale for scaled_exp gating
             gating_kappa: Scale for tanh gating
             gating_epsilon: Offset for softplus gating
+            interpolation_enabled: Whether to enable latent interpolation (requires precomputed interpolation operators in latent_solver)
+            include_self_in_interpolation: Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
         """
         super().__init__()
         self.mlp = mlp
@@ -59,8 +62,7 @@ class Model(nn.Module):
 
         if interpolation_enabled:
             interp_device = self.device if self.device.type != "mps" else torch.device("cpu")
-            self.H_interp[False] = latent_solver.get_interpolation_operator(False, device=interp_device)
-            self.H_interp[True] = latent_solver.get_interpolation_operator(True, device=interp_device)
+            self.H_interp = latent_solver.get_interpolation_operator(include_self_in_interpolation, device=interp_device)
 
         if embed_dim > 1:
             self.gating_fn = gating_fn
@@ -98,8 +100,13 @@ class Model(nn.Module):
         self,
         bin_ids: torch.Tensor,
         interpolation_mask: Optional[torch.Tensor] = None,
-        include_self_in_interpolation: bool = False,
     ) -> torch.Tensor:
+        """Fetch latent values for observations, optionally mixing interpolated latents.
+
+        interpolation_mask is observation-aligned (shape [N], True means use
+        interpolation operator output for that observation, False means use the BIN's
+        own latent value).
+        """
         latent_source = self.latent_vec
         own_latent = latent_source[bin_ids]
 
@@ -114,11 +121,12 @@ class Model(nn.Module):
             return own_latent
 
         latent_2d = latent_source.unsqueeze(-1) if self.embed_dim == 1 else latent_source
-        interp_operator = self.H_interp[include_self_in_interpolation]
+        interp_operator = self.H_interp
         if interp_operator is None:
             raise RuntimeError("Interpolation operator is not initialized")
 
         interp_device = interp_operator.device
+        # Keep sparse matmul on the operator device to avoid repeated sparse transfers.
         latent_for_interp = latent_2d if interp_device == latent_2d.device else latent_2d.to(interp_device)
         if interp_device != latent_2d.device:
             interp_operator = interp_operator.to(interp_device)
@@ -140,7 +148,6 @@ class Model(nn.Module):
         x: torch.Tensor,
         bin_ids: torch.Tensor,
         interpolation_mask: Optional[torch.Tensor] = None,
-        include_self_in_interpolation: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass.
@@ -160,7 +167,6 @@ class Model(nn.Module):
         latent = self._lookup_latent(
             bin_ids,
             interpolation_mask=interpolation_mask,
-            include_self_in_interpolation=include_self_in_interpolation,
         )
 
         return self._compute_logits_from_latent_values(latent, intrinsic)
@@ -181,8 +187,11 @@ class Model(nn.Module):
 
     @torch.no_grad()
     def predict_MLP_only(self, data_loader, loss_mode: str = "bin") -> np.ndarray:
-        """Predict m for all observations using the current MLP (without latent).
-        
+        """Predict intrinsic MLP outputs without latent modulation.
+
+        In sample mode, predictions are returned only for valid (non-padded) bins in
+        each sample. In bin mode, predictions are returned for every observation.
+
         Returns:
             numpy array of shape (N,) for scalar mode or (N, embed_dim) for vector mode.
         """

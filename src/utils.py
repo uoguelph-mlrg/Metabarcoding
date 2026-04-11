@@ -89,6 +89,8 @@ def load(
 
     if len(sample_reads) > 0:
         q05 = float(sample_reads.quantile(0.05))
+        # Cap the read filter at 50k to avoid dropping a large tail of reasonably well-sequenced 
+        # samples (in the cases where the dataset is well curated)
         reads_threshold = min(q05, 50000.0)
         kept_sample_ids = sample_reads[sample_reads >= reads_threshold].index
         dropped_samples = int((sample_reads < reads_threshold).sum())
@@ -194,11 +196,12 @@ def load(
         if col not in bin_medians.columns:
             continue
         median_map = bin_medians[col].to_dict()
+        # First pass: preserve BIN-specific structure using train-split medians only
         df_long[col] = df_long.apply(
             lambda row: median_map.get(row["bin_uri"], np.nan) if pd.isna(row[col]) else row[col],
             axis=1
         )
-        # Now fill any remaining missing values with overall median
+        # Second pass: global fallback for BINs with no usable train median.
         df_long[col] = df_long[col].fillna(df_long[col].median())
     
     # Normalize based on training set statistics
@@ -270,6 +273,7 @@ def load_processed(
             y = y_df.iloc[:, 0]
         else:
             # fallback: try a known column name
+            # Contract: if rel_abundance is absent, first column is treated as target.
             y = y_df["rel_abundance"] if "rel_abundance" in y_df.columns else y_df.iloc[:, 0]
         if len(y) != n_rows:
             raise ValueError(f"{path} has {len(y)} rows but X_{split}.csv has {n_rows}")
