@@ -337,7 +337,7 @@ submit_baseline() {
   local baseline_results_dir="$baseline_train_dir/results/baseline"
   mkdir -p "$baseline_results_dir"
 
-  local walltime="6:00:00"
+  local walltime="2:00:00"
   if [[ -n "$TIME_OVERRIDE" ]]; then
     walltime="$TIME_OVERRIDE"
   fi
