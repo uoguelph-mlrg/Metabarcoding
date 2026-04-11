@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Tuple, cast
+from typing import Dict, List, Literal, Optional, Tuple, Union, cast
 
 import logging as log
 import numpy as np
@@ -90,37 +90,44 @@ class LatentSolver:
 
     def _compute_logits_from_latent_values(
         self,
-        latent_obs: torch.Tensor,
-        intrinsic_t: torch.Tensor,
-        final_weights_t: Optional[torch.Tensor] = None,
+        latent: torch.Tensor,
+        intrinsic: torch.Tensor,
+        final_weights: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.embed_dim == 1:
-            return intrinsic_t.squeeze(-1) + latent_obs.squeeze(-1)
+            return intrinsic.squeeze(-1) + latent.squeeze(-1)
 
-        if final_weights_t is None:
-            raise ValueError("final_weights_t is required for embed_dim > 1")
+        if final_weights is None:
+            raise ValueError("final_weights is required for embed_dim > 1")
 
-        gated = self.gating.gate_torch(latent_obs)
-        m_tilde = intrinsic_t * gated
-        return torch.sum(m_tilde * final_weights_t.unsqueeze(0), dim=1)
+        gated = self.gating.gate_torch(latent)
+        m_tilde = intrinsic * gated
+        return torch.sum(m_tilde * final_weights.unsqueeze(0), dim=1)
 
-    def build_interpolation_matrix(
-        self,
-        method: str = "nw",
-    ) -> None:
+    def build_interpolation_matrix(self) -> None:
         """
-        Build the H_smooth matrix from the neighbor graph using either Nadaraya-Watson or LLR weights, precompute I - H_smooth for efficient smoothness regularization, and build neighbor lists for active set construction.
-        The matrix H_smooth is defined such that H_smooth @ h gives the latent interpolated from neighbors, and (I - H_smooth) @ h gives the difference from neighbors used for smoothness regularization.
+        Build sparse interpolation/smoothness operators from the neighbor graph.
+
+        method="nw" uses kernel-normalized Nadaraya-Watson weights, while other
+        values currently route to LLR coefficients from the neighbor graph.
+
+        Semantics:
+        - H_smooth @ h gives neighbor-interpolated latent values.
+        - (I - H_smooth) @ h gives smoothness residuals used by regularization.
+        - If a node has no neighbors, we place a 1 on the diagonal so that node keeps its own latent
+        instead of introducing an undefined row.
         """
         rows_H: List[int] = []
         cols_H: List[int] = []
         vals_H: List[float] = []
 
         for b in tqdm(range(self.n_bins), desc="Building H matrix", unit="bin", leave=False):
-            if method == "nw":
+            if self.cfg.interpolation_method == "nw":
                 neigh, w = self.ng.nw_weights_for_node(b)
-            else:
+            elif self.cfg.interpolation_method == "llr":
                 neigh, w = self.ng.llr_coeffs_for_node(b)
+            else:
+                raise ValueError(f"Unsupported interpolation method: {self.cfg.interpolation_method}")
 
             if len(neigh) == 0:
                 rows_H.append(b)
@@ -170,174 +177,178 @@ class LatentSolver:
             device=self.device,
         )
 
-    def _build_row_set(self, active_ids: np.ndarray) -> np.ndarray:
-        """
-        Build the set of row indices needed for the current solve, which includes all active bins 
-        plus any bins that share a smoothness constraint with the active bins (i.e., any bin that is
-        a neighbor of an active bin in the graph, since smoothness regularization couples neighbors)
-        """
-        if self._I_minus_H_smooth_csc is None:
-            raise RuntimeError("I_minus_H_smooth CSC is not initialized")
-
-        csc = cast(sparse.csc_matrix, self._I_minus_H_smooth_csc)
-        dep_rows = csc[:, active_ids].indices.astype(np.int64, copy=False)
-        row_ids = np.unique(np.concatenate([active_ids.astype(np.int64, copy=False), dep_rows]))
-        return row_ids
-
     def solve(
         self,
-        y: np.ndarray,
-        intrinsic_vec: np.ndarray,
-        final_weights: Optional[np.ndarray] = None,
-        bin_ids: Optional[np.ndarray] = None,
-        sample_ids: Optional[np.ndarray] = None,
-        interpolation_mask: Optional[np.ndarray] = None,
+        y: torch.Tensor,
+        intrinsic: torch.Tensor,
+        final_weights: Optional[torch.Tensor] = None,
+        bin_ids: Optional[torch.Tensor] = None,
+        sample_ids: Optional[torch.Tensor] = None,
+        interpolation_mask: Optional[torch.Tensor] = None,
         loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy",
         prox_weight: float = 0.0,
-        x_anchor: Optional[np.ndarray] = None,
-        latent_lr: Optional[float] = None,
-        include_self_in_interpolation: bool = False,
-    ) -> Tuple[np.ndarray, Dict[str, float]]:
+        latent: Optional[torch.Tensor] = None,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Solve for the latent variable h using PyTorch optimization on the active set of bins 
         corresponding to the current batch, with optional proximal regularization towards an 
-        anchor point. The optimization is performed using Adam with gradients computed from 
-        the specified loss type, and only updates the latent variables for the active bins 
-        while keeping others fixed.
+        anchor point. The optimization is performed using a persistent latent tensor
+        and optimizer supplied by the caller, and only updates the part of the latent variable 
+        corresponding to the active set of bins for the current batch.
         
         Args:
-            y (np.ndarray): Observed target values for the current batch (shape [batch_size,]).
-            intrinsic_vec (np.ndarray): Intrinsic predictions obtained from the MLP for the current batch (shape [batch_size, embed_dim] or [batch_size,]).
-            final_weights (Optional[np.ndarray], optional): Weights for the final linear layer (shape [embed_dim,]) used in the loss computation when embed_dim > 1. Required if embed_dim > 1. Defaults to None.
-            bin_ids (Optional[np.ndarray], optional): BIN indices corresponding to each observation in the current batch (shape [batch_size,]). Required for mapping observations to latent variables. Defaults to None.
-            sample_ids (Optional[np.ndarray], optional): Sample indices corresponding to each observation in the current batch (shape [batch_size,]). Used for sample-level loss modes. Defaults to None.
+            y (torch.Tensor): Observed target values for the current batch (shape [batch_size,]).
+            intrinsic (torch.Tensor): Intrinsic predictions obtained from the MLP for the current batch (shape [batch_size, embed_dim] or [batch_size,]).
+            final_weights (Optional[torch.Tensor], optional): Weights for the final linear layer (shape [embed_dim,]) used in the loss computation when embed_dim > 1. Required if embed_dim > 1. Defaults to None.
+            bin_ids (Optional[torch.Tensor], optional): BIN indices corresponding to each observation in the current batch (shape [batch_size,]). Required for mapping observations to latent variables. Defaults to None.
+            sample_ids (Optional[torch.Tensor], optional): Sample indices corresponding to each observation in the current batch (shape [batch_size,]). Used for sample-level loss modes. Defaults to None.
             loss_type (Literal[&quot;cross_entropy&quot;, &quot;logistic&quot;], optional): Type of loss function to use. Defaults to "cross_entropy".
             prox_weight (float, optional): Weight for proximal regularization towards x_anchor. If > 0, adds a term prox_weight * ||h - x_anchor||^2 to the loss. Defaults to 0.0.
-            x_anchor (Optional[np.ndarray], optional): Anchor values for the latent variables, obtained from the previous iteration (shape [n_bins, embed_dim]). Defaults to None.
-            latent_lr (Optional[float], optional): Learning rate to use for the freshly initialized Adam optimizer. Defaults to cfg.latent_adam_lr.
+            latent (Optional[torch.Tensor], optional): Persistent latent tensor to optimize in-place. If omitted, a temporary parameter is created for this call.
+            optimizer (Optional[torch.optim.Optimizer], optional): Optimizer for latent. Required when latent is supplied.
 
         Returns:
-            Tuple[np.ndarray, Dict[str, float]]: A tuple containing:
-                - The optimized latent variable h as a numpy array of shape [n_bins, embed_dim] (or [n_bins,] if embed_dim=1).
+            Tuple[torch.Tensor, Dict[str, float]]: A tuple containing:
+                - The optimized latent variable h tensor of shape [n_bins, embed_dim] (or [n_bins,] if embed_dim=1).
                 - A dictionary of timing information for different parts of the optimization process.
         """
-        if self.I_minus_H_smooth is None:
-            raise RuntimeError("Matrices not built; call build_interpolation_matrix first")
-        if bin_ids is None:
-            raise ValueError("bin_ids are required for torch latent solving")
-
-        if self.embed_dim > 1 and final_weights is None:
-            raise ValueError("final_weights are required for embed_dim > 1")
-
-        latent_shape = (self.n_bins, self.embed_dim)
-        if x_anchor is None:
-            raise ValueError("x_anchor is required for latent solving")
-
-        lr = float(self.cfg.latent_adam_lr if latent_lr is None else latent_lr)
-        
         solve_start = time.perf_counter()
+        
+        if self.I_minus_H_smooth is None: 
+            raise RuntimeError("Matrices not built; call build_interpolation_matrix first")
+        if bin_ids is None: 
+            raise ValueError("bin_ids are required for latent solving")
+        if self.embed_dim > 1 and final_weights is None: 
+            raise ValueError("final_weights are required for embed_dim > 1")
+        if latent is None or optimizer is None:
+            raise ValueError("latent_param and optimizer must both be provided for persistent latent solving")
+        if latent.device != self.device:
+            raise ValueError(f"latent_param is on {latent.device}, expected {self.device}")
 
-        anchor_np = np.asarray(x_anchor, dtype=np.float32).reshape(latent_shape)
-        batch_bin_ids = np.asarray(bin_ids, dtype=np.int64).reshape(-1)
-        active_map = self._build_active_set(batch_bin_ids)
-
-        y_t = torch.as_tensor(np.asarray(y, dtype=np.float32).reshape(-1), device=self.device)
-        intrinsic_t = torch.as_tensor(np.asarray(intrinsic_vec, dtype=np.float32), device=self.device)
-        if intrinsic_t.ndim == 1:
-            intrinsic_t = intrinsic_t.unsqueeze(-1)
-        if self.embed_dim == 1 and intrinsic_t.shape[1] != 1:
-            intrinsic_t = intrinsic_t.reshape(-1, 1)
-        if intrinsic_t.shape[1] != self.embed_dim:
+        y = y.to(device=self.device, dtype=torch.float32).reshape(-1)
+        intrinsic = intrinsic.to(device=self.device, dtype=torch.float32)
+        if intrinsic.ndim == 1:
+            intrinsic = intrinsic.unsqueeze(-1)
+        if self.embed_dim == 1 and intrinsic.shape[1] != 1:
+            intrinsic = intrinsic.reshape(-1, 1)
+        if intrinsic.shape[1] != self.embed_dim:
             raise ValueError(
-                f"intrinsic_vec has shape {tuple(intrinsic_t.shape)}, expected (*, {self.embed_dim})"
+                f"intrinsic has shape {tuple(intrinsic.shape)}, expected (*, {self.embed_dim})"
             )
 
-        sample_ids_t = None
-        if sample_ids is not None:
-            sample_ids_t = torch.as_tensor(np.asarray(sample_ids, dtype=np.int64).reshape(-1), dtype=torch.long, device=self.device)
+        w: Optional[torch.Tensor] = None
+        if self.embed_dim > 1:
+            w = final_weights.to(device=self.device, dtype=torch.float32).reshape(-1)
+            if w.shape[0] != self.embed_dim:
+                raise ValueError(f"final_weights has shape {tuple(w.shape)}, expected ({self.embed_dim},)")
 
-        interpolation_mask_t: Optional[torch.Tensor] = None
+        bin_ids = bin_ids.to(device=self.device, dtype=torch.long).reshape(-1)
+
+        if sample_ids is not None:
+            sample_ids = sample_ids.to(device=self.device, dtype=torch.long).reshape(-1)
+
         has_interpolation = False
         if interpolation_mask is not None:
-            interpolation_mask_t = torch.as_tensor(np.asarray(interpolation_mask, dtype=np.bool_).reshape(-1), dtype=torch.bool, device=self.device)
-            has_interpolation = bool(torch.any(interpolation_mask_t).item())
+            interpolation_mask = interpolation_mask.to(device=self.device, dtype=torch.bool).reshape(-1)
+            has_interpolation = bool(torch.any(interpolation_mask).item())
 
-        w_t: Optional[torch.Tensor] = None
-        if self.embed_dim > 1:
-            w_t = torch.as_tensor(np.asarray(final_weights, dtype=np.float32).reshape(-1), device=self.device)
-            if w_t.shape[0] != self.embed_dim:
-                raise ValueError(f"final_weights has shape {tuple(w_t.shape)}, expected ({self.embed_dim},)")
+        anchor_latent = latent.detach().to(self.device, dtype=torch.float32).reshape(self.n_bins, self.embed_dim)
+        batch_bin_ids = bin_ids.detach().cpu().numpy()
+        active_map = self._build_active_set(batch_bin_ids) # batch bins + neighbors that are optimized over in this block
+        active_bin_ids = torch.as_tensor(active_map.global_ids, dtype=torch.long, device=self.device)
+        active_anchor_latent = anchor_latent[active_bin_ids]
 
-        anchor_t = torch.as_tensor(anchor_np, dtype=torch.float32, device=self.device)
-        active_ids_t = torch.as_tensor(active_map.global_ids, dtype=torch.long, device=self.device)
-        active_anchor = anchor_t[active_ids_t]
-        active_latent = torch.nn.Parameter(active_anchor.clone())
-        optimizer = torch.optim.Adam([active_latent], lr=lr)
-
-        row_ids = self._build_row_set(active_map.global_ids)
-        L_rows, L_RA = self._build_row_and_active_operators(row_ids, active_map.global_ids)
-
-        # Map global bin ids to local active set indices for the current batch; these are used to index into the active latent variable during optimization and must be consistent with the active set construction
+        # Map global bin ids to local active set ids for the current batch; used to index into the 
+        # active latent during optimization (must be consistent with active set construction)
         local_bin_ids = np.searchsorted(active_map.global_ids, batch_bin_ids)
         if not np.array_equal(active_map.global_ids[local_bin_ids], batch_bin_ids):
             raise RuntimeError("Active-set searchsorted mapping failed for one or more bin ids")
-        local_bin_ids_t = torch.as_tensor(local_bin_ids, dtype=torch.long, device=self.device)
-        batch_bin_ids_t = torch.as_tensor(batch_bin_ids, dtype=torch.long, device=self.device)
 
-        steps = int(self.cfg.latent_adam_steps)
-        if steps < 1:
-            steps = 1
-        
-        # Timing for the entire solve
+        # Build the sparse operators for smoothness reg term based on the active set for this batch
+        L_rows, L_RA = self._build_row_and_active_operators(active_map.global_ids)
+        frozen_smooth_contribution: Optional[torch.Tensor] = None
+        if float(self.cfg.latent_smooth_reg) > 0:
+            # Cache baseline smoothness term once; per-step updates only need the
+            # active-set correction through L_RA @ (h_active - h_anchor_active).
+            frozen_smooth_contribution = torch.sparse.mm(L_rows, anchor_latent)
+
         setup_done = time.perf_counter() - solve_start
-        timings = {"setup_s": setup_done, "forward_s": [], "backward_s": [], "optim_s": [], "latent_lr": lr}
+        timings = {
+            "setup_s": float(setup_done),
+            "forward_s": 0.0,
+            "backward_s": 0.0,
+            "optim_s": 0.0,
+            "latent_lr": float(optimizer.param_groups[0]["lr"]),
+            "loss_CE": 0.0,
+            "loss_l2": 0.0,
+            "loss_smooth": 0.0,
+            "loss_prox": 0.0,
+            "loss_total": 0.0,
+        }
 
+        steps = max(1, int(self.cfg.latent_optim_steps))
         for _ in range(steps):
             t0 = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
-            active_update = active_latent - active_anchor
+            active_current_latent = latent[active_bin_ids]
+            active_latent_update = active_current_latent - active_anchor_latent
 
-            if has_interpolation and interpolation_mask_t is not None:
-                full_latent = anchor_t.clone().index_copy(0, active_ids_t, active_latent)
+            if has_interpolation and interpolation_mask is not None:
                 logits = self._logits_from_latent(
-                    full_latent,
-                    intrinsic_t,
-                    batch_bin_ids_t,
-                    final_weights_t=w_t,
-                    interpolation_mask=interpolation_mask_t,
-                    include_self_in_interpolation=include_self_in_interpolation,
+                    latent,
+                    intrinsic,
+                    bin_ids,
+                    final_weights=w,
+                    interpolation_mask=interpolation_mask
                 )
             else:
-                logits = self._logits_from_latent(active_latent, intrinsic_t, local_bin_ids_t, final_weights_t=w_t)
+                logits = self._logits_from_latent(latent, intrinsic, bin_ids, final_weights=w)
 
             if loss_type == "cross_entropy":
-                if sample_ids_t is None:
+                if sample_ids is None:
                     raise ValueError("sample_ids are required for cross_entropy latent solving")
-                data_loss, scale = self._cross_entropy_loss(y_t, logits, sample_ids_t)
+                data_term, scale = self._cross_entropy_loss(y, logits, sample_ids)
             elif loss_type == "logistic":
-                data_loss, scale = self._logistic_loss(y_t, logits)
+                data_term, scale = self._logistic_loss(y, logits)
             else:
                 raise ValueError(f"Unsupported loss_type: {loss_type}")
 
-            loss = data_loss
+            l2_term = torch.zeros((), dtype=data_term.dtype, device=data_term.device)
+            smooth_term = torch.zeros((), dtype=data_term.dtype, device=data_term.device)
+            prox_term = torch.zeros((), dtype=data_term.dtype, device=data_term.device)
 
             # Regularization terms - L2 on H and smoothness via L_A
             l2_coef = float(self.cfg.latent_l2_reg)
             if l2_coef > 0:
-                loss = loss + 0.5 * l2_coef * torch.sum(active_latent * active_latent)
+                l2_term = 0.5 * l2_coef * torch.sum(active_current_latent * active_current_latent)
 
-            # Smoothness with row closure and frozen-boundary contribution.
+            # Smoothness regularization on the active set only (for efficiency)
             smooth_coef = float(self.cfg.latent_smooth_reg)
             if smooth_coef > 0:
-                base = torch.sparse.mm(L_rows, anchor_t)
-                corr = torch.sparse.mm(L_RA, active_update)
-                diff = base + corr
-                loss = loss + 0.5 * smooth_coef * torch.sum(diff * diff)
+                if frozen_smooth_contribution is None:
+                    raise RuntimeError("frozen_smooth_contribution was not initialized")
+                # L_RA @ active_latent = smoothness diff of new latents with active BINs + neighbors
+                active_correction = torch.sparse.mm(L_RA, active_latent_update)
+                diff = frozen_smooth_contribution + active_correction
+                smooth_term = 0.5 * smooth_coef * torch.sum(diff * diff)
 
-            if prox_weight > 0:
-                loss = loss + 0.5 * float(prox_weight) * torch.sum(active_update * active_update)
+            # Proximal term stabilizes local active-set updates relative to anchor_latent,
+            # especially early in training when gradients can move sparse blocks abruptly.
+            if prox_weight > 0: # FIXME: I'm not completely sure this is necessary because why would we need the latent update to be small, especially if we already have L2 and smoothness regularization? Maybe it just helps with optimization stability early on when the latent can change a lot from the anchor + given we only optimize over the active set?
+                prox_term = 0.5 * float(prox_weight) * torch.sum(active_latent_update * active_latent_update)
 
-            loss = loss / scale
+            loss_unscaled = data_term + l2_term + smooth_term + prox_term
+
+            # data_loss returns a scale so CE/logistic modes have comparable step sizes.
+            inv_scale = 1.0 / scale
+            loss = loss_unscaled * inv_scale
+
+            timings["loss_CE"] += float((data_term * inv_scale).detach().item())
+            timings["loss_l2"] += float((l2_term * inv_scale).detach().item())
+            timings["loss_smooth"] += float((smooth_term * inv_scale).detach().item())
+            timings["loss_prox"] += float((prox_term * inv_scale).detach().item())
+            timings["loss_total"] += float(loss.detach().item())
             t1 = time.perf_counter()
             
             loss.backward()
@@ -345,41 +356,77 @@ class LatentSolver:
             optimizer.step()
             t3 = time.perf_counter()
             
-            timings["forward_s"].append(t1 - t0)
-            timings["backward_s"].append(t2 - t1)
-            timings["optim_s"].append(t3 - t2)
+            timings["forward_s"] += float(t1 - t0)
+            timings["backward_s"] += float(t2 - t1)
+            timings["optim_s"] += float(t3 - t2)
 
-        out = anchor_np.copy()
-        out[active_map.global_ids] = active_latent.detach().cpu().numpy()
+        inv_steps = 1.0 / float(steps)
+        timings["loss_CE"] *= inv_steps
+        timings["loss_l2"] *= inv_steps
+        timings["loss_smooth"] *= inv_steps
+        timings["loss_prox"] *= inv_steps
+        timings["loss_total"] *= inv_steps
+
+
+        out = latent.detach()
         if self.embed_dim == 1:
             return out.reshape(-1), timings
         return out, timings
-
+    
     def _build_row_and_active_operators(
         self,
-        row_ids: np.ndarray,
         active_ids: np.ndarray,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Build the sparse operators needed for the smoothness regularization term in the optimization 
-        problem. L_rows is the operator that computes the smoothness differences for all rows in 
-        row_ids (using I - H), and L_RA is the operator that computes the contribution of active 
-        variables to those differences, allowing us to exclude inactive variables from the 
-        optimization problem while still correctly computing the smoothness regularization.
+        Build the sparse operators needed for the smoothness regularization term in the 
+        optimization problem.
+
+        This combines the logic of:
+        - building the set of row indices needed for the current solve, and
+        - constructing the sparse operators for those rows and for the active subset.
+
+        The row set includes:
+        - all active bins, and
+        - any bins that share a smoothness constraint with the active bins.
+
+        In practice, this means we take all rows of I - H_smooth that have a nonzero in any of the
+        active columns. These rows correspond to:
+        - the active bins themselves, because the diagonal of I - H_smooth is 1, and
+        - any neighboring bins coupled through smoothness regularization.
 
         Args:
-            row_ids (np.ndarray): Row indices corresponding to the smoothness constraints that need to be evaluated for the current active set (includes active bins and any bins that share a smoothness constraint with them).
-            active_ids (np.ndarray): Indices of the active bins for the current optimization block (subset of row_ids that correspond to the bins we are optimizing over).
+            active_ids (np.ndarray): Indices of the active bins for the current optimization block.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Two sparse tensors: 
-                - L_rows: Sparse operator that computes the smoothness differences for all rows in row_ids when multiplied by the full latent variable h (shape [len(row_ids), n_bins]).
-                - L_RA: Sparse operator that computes the contribution of the active variables to those differences, effectively giving us the part of L_rows that corresponds to the active variables (shape [len(row_ids), len(active_ids)]).
+            Tuple[torch.Tensor, torch.Tensor]:
+                - L_rows: Sparse operator that computes the smoothness differences for all rows in
+                row_ids when multiplied by the full latent variable h. Shape:
+                [len(row_ids), n_bins].
+                - L_RA: Sparse operator that computes the contribution of the active variables to
+                those differences, i.e. the part of L_rows restricted to the active columns.
+                Shape: [len(row_ids), len(active_ids)].
         """
+        if self._I_minus_H_smooth_csc is None:
+            raise RuntimeError("I_minus_H_smooth CSC is not initialized")
         if self.I_minus_H_smooth is None:
             raise RuntimeError("I_minus_H_smooth is not initialized")
+
+        active_ids = active_ids.astype(np.int64, copy=False)
+
+        # CSC is used here because column slicing is efficient for identifying dependencies
+        csc = cast(sparse.csc_matrix, self._I_minus_H_smooth_csc)
+        dep_rows = csc[:, active_ids].indices.astype(np.int64, copy=False)
+
+        # Get all rows that have a nonzero in any active column, which corresponds to all bins that 
+        # are either active or share a smoothness constraint with an active bin
+        row_ids = np.union1d(active_ids, dep_rows)
+
+        # Slice the I - H_smooth matrix to get the operators for the relevant rows & active columns
+        # L_rows @ latent gives the smoothness differences for all rows in the active set, and
+        # L_RA @ latent_active gives the contribution of the active variables to those differences.
         L_rows_csr = self.I_minus_H_smooth[row_ids, :].tocsr()
         L_RA_csr = L_rows_csr[:, active_ids].tocsr()
+
         return self._csr_to_torch(L_rows_csr), self._csr_to_torch(L_RA_csr)
 
     def _build_active_set(self, batch_bin_ids: np.ndarray) -> ActiveSetMap:
@@ -460,60 +507,69 @@ class LatentSolver:
 
     def _logits_from_latent(
         self,
-        latent_source: torch.Tensor,
-        intrinsic_t: torch.Tensor,
-        bin_ids_t: torch.Tensor,
-        final_weights_t: Optional[torch.Tensor] = None,
+        latent: torch.Tensor,
+        intrinsic: torch.Tensor,
+        bin_ids: torch.Tensor,
+        final_weights: Optional[torch.Tensor] = None,
         interpolation_mask: Optional[torch.Tensor] = None,
-        include_self_in_interpolation: bool = False,
     ) -> torch.Tensor:
-        latent_obs = latent_source[bin_ids_t]
-        own_logits = self._compute_logits_from_latent_values(latent_obs, intrinsic_t, final_weights_t)
+        latent_obs = latent[bin_ids]
+        own_logits = self._compute_logits_from_latent_values(latent_obs, intrinsic, final_weights)
 
         if interpolation_mask is None:
             return own_logits
 
-        mask_t = interpolation_mask.to(device=latent_source.device, dtype=torch.bool).reshape(-1)
-        if not bool(torch.any(mask_t).item()):
+        mask = interpolation_mask.to(device=latent.device, dtype=torch.bool).reshape(-1)
+        if not bool(torch.any(mask).item()):
             return own_logits
 
-        latent_2d = latent_source.unsqueeze(-1) if latent_source.ndim == 1 else latent_source
-        interp_operator = self.get_interpolation_operator(include_self_in_interpolation, device=latent_2d.device)
+        latent_2d = latent.unsqueeze(-1) if latent.ndim == 1 else latent
+        interp_operator = self.get_interpolation_operator(self.cfg.include_self_in_interpolation, device=latent_2d.device)
         interpolated_full = torch.sparse.mm(interp_operator, latent_2d)
-        interpolated_obs = interpolated_full[bin_ids_t]
-        interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic_t, final_weights_t)
+        interpolated_obs = interpolated_full[bin_ids]
+        interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic, final_weights)
 
         if own_logits.ndim == 1:
-            return torch.where(mask_t, interp_logits, own_logits)
-        return torch.where(mask_t.unsqueeze(-1), interp_logits, own_logits)
+            return torch.where(mask, interp_logits, own_logits)
+        return torch.where(mask.unsqueeze(-1), interp_logits, own_logits)
 
     def _cross_entropy_loss(
         self,
-        y_t: torch.Tensor,
+        y: torch.Tensor,
         logits: torch.Tensor,
-        sample_ids_t: torch.Tensor,
+        sample_ids: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        unique_s, inv = torch.unique(sample_ids_t, sorted=False, return_inverse=True)
-        n_samples = max(1, int(unique_s.numel()))
+        # Expected format: flattened observations grouped contiguously by sample id.
+        # We repack into a padded [n_samples, max_bins] layout and reuse dense log_softmax CE.
+        _, counts = torch.unique_consecutive(sample_ids, return_counts=True)
+        n_samples = max(1, int(counts.numel()))
+        max_bins = int(counts.max().item())
 
-        max_per = torch.full((n_samples,), -torch.inf, dtype=logits.dtype, device=logits.device)
-        max_per.scatter_reduce_(0, inv, logits, reduce="amax", include_self=True)
+        sample_rows = torch.repeat_interleave(
+            torch.arange(n_samples, device=logits.device, dtype=torch.long),
+            counts,
+        )
+        starts = torch.cumsum(counts, dim=0) - counts
+        obs_pos = torch.arange(logits.numel(), device=logits.device, dtype=torch.long)
+        sample_cols = obs_pos - torch.repeat_interleave(starts, counts)
 
-        logits_shift = logits - max_per[inv]
-        exp_logits = torch.exp(logits_shift)
-        denom = torch.zeros((n_samples,), dtype=logits.dtype, device=logits.device)
-        denom.index_add_(0, inv, exp_logits)
-        denom = denom + 1e-12
+        logits_dense = torch.full((n_samples, max_bins), -torch.inf, dtype=logits.dtype, device=logits.device)
+        targets_dense = torch.zeros((n_samples, max_bins), dtype=y.dtype, device=y.device)
+        valid_dense = torch.zeros((n_samples, max_bins), dtype=torch.bool, device=logits.device)
+        logits_dense[sample_rows, sample_cols] = logits
+        targets_dense[sample_rows, sample_cols] = y
+        valid_dense[sample_rows, sample_cols] = True
 
-        logsumexp = torch.log(denom) + max_per
-        ce_sum = -(y_t * (logits - logsumexp[inv])).sum()
+        log_probs = F.log_softmax(logits_dense, dim=-1)
+        log_probs = torch.where(valid_dense, log_probs, torch.zeros_like(log_probs))
+        ce_sum = -(targets_dense * log_probs).sum()
         return ce_sum, torch.tensor(float(n_samples), dtype=logits.dtype, device=logits.device)
 
     def _logistic_loss(
         self,
-        y_t: torch.Tensor,
+        y: torch.Tensor,
         logits: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        bce_sum = F.binary_cross_entropy_with_logits(logits, y_t, reduction="sum")
-        scale = torch.tensor(float(max(1, y_t.numel())), dtype=logits.dtype, device=logits.device)
+        bce_sum = F.binary_cross_entropy_with_logits(logits, y, reduction="sum")
+        scale = torch.tensor(float(max(1, y.numel())), dtype=logits.dtype, device=logits.device)
         return bce_sum, scale
