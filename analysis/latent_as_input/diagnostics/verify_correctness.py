@@ -299,7 +299,7 @@ def check_gradient_flow():
         log.info(f"  Latent nonzero: {nonzero}/{total} ({100*nonzero/total:.1f}%)")
         
         # Check which bins have gradients
-        bin_grads = latent_grad.abs().sum(dim=1)  # Sum across latent_dim
+        bin_grads = latent_grad.abs().sum(dim=1)  # Sum across latent_input_dim
         bins_with_grad = (bin_grads > 1e-10).sum().item()
         log.info(f"  BINs with gradients: {bins_with_grad}/{len(bin_grads)} ({100*bins_with_grad/len(bin_grads):.1f}%)")
         

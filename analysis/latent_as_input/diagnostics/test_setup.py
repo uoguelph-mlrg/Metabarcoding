@@ -65,7 +65,7 @@ def test_config():
     
     cfg = Config()
     required_attrs = [
-        'latent_dim', 'latent_init_std', 'latent_lr', 'latent_steps',
+        'latent_input_dim', 'latent_init_std', 'latent_lr', 'latent_steps',
         'latent_norm_reg', 'latent_smooth_reg', 'latent_present_only'
     ]
     
@@ -74,7 +74,7 @@ def test_config():
             print(f"✗ Config missing attribute: {attr}")
             return False
     
-    print(f"✓ Config complete (latent_dim={cfg.latent_dim}, latent_lr={cfg.latent_lr})")
+    print(f"✓ Config complete (latent_input_dim={cfg.latent_input_dim}, latent_lr={cfg.latent_lr})")
     return True
 
 
@@ -108,7 +108,7 @@ def test_model_creation():
         
         # Create MLP (with adjusted input dimension)
         input_dim = 10
-        mlp_input_dim = input_dim + cfg.latent_dim
+        mlp_input_dim = input_dim + cfg.latent_input_dim
         mlp = MLPModel(mlp_input_dim, hidden_dims=cfg.mlp_hidden_dims, dropout=0.1)
         
         # Create model
@@ -116,7 +116,7 @@ def test_model_creation():
             mlp=mlp,
             latent_solver=solver,
             n_bins=10,
-            latent_dim=cfg.latent_dim,
+            latent_input_dim=cfg.latent_input_dim,
             latent_init_std=cfg.latent_init_std,
             device=torch.device('cpu')
         )

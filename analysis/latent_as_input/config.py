@@ -78,7 +78,7 @@ class Config:
     include_self_in_interpolation: bool = False # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
 
     # Sizes and combination modalities for latent and intrinsic vectors
-    latent_dim: int = 4                         # Dimension of input latent embedding per BIN
+    latent_input_dim: int = 4                   # Dimension of input latent embedding per BIN
     embed_dim: int = 10                         # Embedding dimension d for both latent and intrinsic vectors (set to 1 for scalars)
     gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid"  # Gating function for combining latent and intrinsic vectors
     gating_alpha: float = 0.5                   # Scaling factor for scaled_exp gating (in (0,1])

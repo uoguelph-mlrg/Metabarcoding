@@ -1,10 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Literal, List
 import os
 import numpy as np
 import torch
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 @dataclass
 class Config:
@@ -12,7 +12,7 @@ class Config:
     data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
     results_dir: str = "../results"             # Directory where run artifacts are saved
     checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
-    diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
+    diag_ablation_interval: int = 20            # Compute Z ablation delta every N epochs (0 = disabled)
 
     # Train / val / test split
     train_frac: float = 0.8
@@ -46,7 +46,7 @@ class Config:
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
     # MLP - architecture & optimization settings
-    mlp_hidden_dims : List[int] = [128, 128, 128, 128]  # Hidden layer dimensions for MLP
+    mlp_hidden_dims : List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
     mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
     weight_decay: float = 1e-5                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
@@ -58,6 +58,8 @@ class Config:
     latent_smooth_reg: float = 1e-3             # Smoothness regularization (parameter λ_smooth)
     latent_present_only: bool = False           # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
     latent_l2_reg: float = 1e-3                 # L2 norm regularization on D (parameter r)
+    z_smooth_reg: float = 1e-4                  # Smoothness regularization on input latent Z during Phase B
+    z_l2_reg: float = 0.0                       # Optional L2 regularization on input latent Z during Phase B
     latent_init_prox_reg: float = 0.0           # Initial proximal regularization weight; annealed to 0 across epochs to stabilize early active-set latent updates.
 
     # Latent solver - optimization settings
@@ -78,7 +80,8 @@ class Config:
     include_self_in_interpolation: bool = False # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
 
     # Sizes and combination modalities for latent and intrinsic vectors
-    embed_dim: int = 10                         # Embedding dimension d for both latent and intrinsic vectors (set to 1 for scalars)
+    latent_input_dim: int = 4                   # Dimension of input latent embedding Z per BIN
+    embed_dim: int = 10                         # Embedding dimension d for output latent D and intrinsic vectors (set to 1 for scalar D, 0 to disable output latent D)
     gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid"  # Gating function for combining latent and intrinsic vectors
     gating_alpha: float = 0.5                   # Scaling factor for scaled_exp gating (in (0,1])
     gating_kappa: float = 0.5                   # Scaling factor for tanh gating

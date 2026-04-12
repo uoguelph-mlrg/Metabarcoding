@@ -91,10 +91,14 @@ class Trainer:
 
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
+        self.feature_input_dim = int(input_dim)
+        self.latent_input_dim = int(self.cfg.latent_input_dim)
+        self.total_input_dim = self.feature_input_dim + self.latent_input_dim
+        self.has_output_latent = bool(self.cfg.embed_dim > 0)
         mlp_model = MLPModel(
-            input_dim,
+            self.total_input_dim,
             hidden_dims=self.cfg.mlp_hidden_dims,
-            output_dim=self.cfg.embed_dim,
+            output_dim=int(self.cfg.embed_dim) if self.cfg.embed_dim > 0 else 1,
             dropout=self.cfg.dropout,
         ).to(self.device)
 
@@ -103,6 +107,7 @@ class Trainer:
             latent_solver,
             n_bins=len(bin_index),
             device=self.device,
+            latent_input_dim=self.latent_input_dim,
             latent_init_std=self.cfg.latent_init_std,
             embed_dim=self.cfg.embed_dim,
             gating_fn=self.cfg.gating_fn,
@@ -111,19 +116,27 @@ class Trainer:
             gating_epsilon=self.cfg.gating_epsilon,
             interpolation_enabled=bool(self.cfg.train_MLP_with_interpolation or self.cfg.inference_with_interpolation),
         )
-        self.model.latent_vec.requires_grad_(False) # latent is optimized separately, not by the main optimizer
+        if self.model.latent_d is not None:
+            self.model.latent_d.requires_grad_(False)  # Latent D is optimized via the latent solver, not directly by the optimizer
+        self.z_smooth_operator: Optional[torch.Tensor] = None
+        if float(getattr(self.cfg, "z_smooth_reg", 0.0)) > 0.0:
+            if self.model.latent_solver.I_minus_H_smooth is None:
+                raise RuntimeError("I_minus_H_smooth is not initialized; call build_interpolation_matrix first")
+            self.z_smooth_operator = self.model.latent_solver._csr_to_torch(self.model.latent_solver.I_minus_H_smooth)
 
         if self.cfg.embed_dim > 1:
             optim_params = [
                 {"params": self.model.mlp.parameters(), "weight_decay": self.cfg.weight_decay},
                 {"params": self.model.final_linear.parameters(), "weight_decay": self.cfg.final_linear_weight_decay},
+                {"params": [self.model.latent_z], "weight_decay": 0.0},
             ]
         else:
             optim_params = [
                 {"params": self.model.mlp.parameters(), "weight_decay": self.cfg.weight_decay},
+                {"params": [self.model.latent_z], "weight_decay": 0.0},
             ]
         self.mlp_optimizer = torch.optim.AdamW(optim_params, lr=self.cfg.mlp_lr)
-        self.latent_optimizer = torch.optim.AdamW([self.model.latent_vec], lr=self.cfg.latent_lr)
+        self.latent_optimizer = torch.optim.AdamW([self.model.latent_d], lr=self.cfg.latent_lr) if self.has_output_latent else None
 
         self.loss_type: Literal["cross_entropy", "logistic"] = self.cfg.loss_type
         self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
@@ -157,11 +170,14 @@ class Trainer:
         cosine_scheduler = CosineAnnealingLR(self.mlp_optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=self.cfg.mlp_lr_eta_min)
         self.mlp_scheduler = SequentialLR(self.mlp_optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
-        total_steps = max(1, self.cfg.epochs * len(self.train_loader) * self.cfg.latent_optim_steps)
-        warmup_steps = max(1, int(self.cfg.latent_warmup_frac * total_steps))
-        warmup_scheduler = LinearLR(self.latent_optimizer, start_factor=self.cfg.latent_warmup_start_factor, total_iters=warmup_steps)
-        cosine_scheduler = CosineAnnealingLR(self.latent_optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=self.cfg.latent_lr_eta_min)
-        self.latent_scheduler = SequentialLR(self.latent_optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+        if self.latent_optimizer is not None:
+            total_steps = max(1, self.cfg.epochs * len(self.train_loader) * self.cfg.latent_optim_steps)
+            warmup_steps = max(1, int(self.cfg.latent_warmup_frac * total_steps))
+            warmup_scheduler = LinearLR(self.latent_optimizer, start_factor=self.cfg.latent_warmup_start_factor, total_iters=warmup_steps)
+            cosine_scheduler = CosineAnnealingLR(self.latent_optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=self.cfg.latent_lr_eta_min)
+            self.latent_scheduler = SequentialLR(self.latent_optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+        else:
+            self.latent_scheduler = None
 
         self.latent_diagnostics: List[Dict[str, Any]] = []
 
@@ -221,8 +237,8 @@ class Trainer:
             "model_state_dict": self.model.state_dict(),
             "mlp_optimizer_state_dict": self.mlp_optimizer.state_dict(),
             "mlp_scheduler_state_dict": self.mlp_scheduler.state_dict(),
-            "latent_optimizer_state_dict": self.latent_optimizer.state_dict(),
-            "latent_scheduler_state_dict": self.latent_scheduler.state_dict(),
+            "latent_optimizer_state_dict": self.latent_optimizer.state_dict() if self.latent_optimizer is not None else None,
+            "latent_scheduler_state_dict": self.latent_scheduler.state_dict() if self.latent_scheduler is not None else None,
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "latent_diagnostics": self.latent_diagnostics,
@@ -269,7 +285,7 @@ class Trainer:
 
         checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         saved_cfg = checkpoint.get("config", {})
-        for key in ["embed_dim", "gating_fn", "loss_type"]:
+        for key in ["embed_dim", "gating_fn", "loss_type", "latent_input_dim", "z_smooth_reg", "z_l2_reg"]:
             if key in saved_cfg and getattr(self.cfg, key) != saved_cfg[key]:
                 raise ValueError(
                     f"Checkpoint/config mismatch for '{key}': "
@@ -279,8 +295,9 @@ class Trainer:
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.mlp_optimizer.load_state_dict(checkpoint["mlp_optimizer_state_dict"])
         self.mlp_scheduler.load_state_dict(checkpoint["mlp_scheduler_state_dict"])
-        self.latent_optimizer.load_state_dict(checkpoint["latent_optimizer_state_dict"])
-        self.latent_scheduler.load_state_dict(checkpoint["latent_scheduler_state_dict"])
+        if self.latent_optimizer is not None and self.latent_scheduler is not None:
+            self.latent_optimizer.load_state_dict(checkpoint["latent_optimizer_state_dict"])
+            self.latent_scheduler.load_state_dict(checkpoint["latent_scheduler_state_dict"])
 
         self.current_epoch = int(checkpoint.get("epoch", -1))
         self.start_epoch = self.current_epoch + 1
@@ -345,16 +362,32 @@ class Trainer:
                 interpolation_mask=interpolation_mask,
             )
             loss = self.criterion(outputs, targets)
+        
+        z_l2_term = torch.zeros((), dtype=loss.dtype, device=loss.device)
+        z_smooth_term = torch.zeros((), dtype=loss.dtype, device=loss.device)
+
+        l2_coef = float(self.cfg.z_l2_reg)
+        if l2_coef > 0.0:
+            z_l2_term = 0.5 * l2_coef * torch.sum(self.model.latent_z * self.model.latent_z)
+        
+        smooth_coef = float(self.cfg.z_smooth_reg)
+        if smooth_coef > 0.0:
+            if self.z_smooth_operator is None:
+                raise RuntimeError("z_smooth_operator is not initialized")
+            diff = torch.sparse.mm(self.z_smooth_operator, self.model.latent_z)
+            z_smooth_term = 0.5 * smooth_coef * torch.sum(diff * diff)
+        total_loss = loss + z_l2_term + z_smooth_term
         t1 = time.perf_counter()
 
         self.mlp_optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         t2 = time.perf_counter()
 
         if self.cfg.grad_clip is not None:
             params_to_clip = list(self.model.mlp.parameters())
             if self.cfg.embed_dim > 1:
                 params_to_clip += list(self.model.final_linear.parameters())
+            params_to_clip += [self.model.latent_z]
             torch.nn.utils.clip_grad_norm_(params_to_clip, self.cfg.grad_clip)
 
         self.mlp_optimizer.step()
@@ -418,11 +451,13 @@ class Trainer:
         """Run one latent-variable solve for the current batch.
 
         The latent solver consumes torch tensors directly on its configured device.
-        This method temporarily enables gradient tracking for latent_vec only, then restores its
+        This method temporarily enables gradient tracking for output latent D only, then restores its
         previous requires_grad state before returning.
         """
-        self.model.eval()
+        if not self.has_output_latent:
+            raise RuntimeError("solve_latent is unavailable when embed_dim == 0")
 
+        self.model.eval()
         with torch.no_grad():
             inputs, targets, bin_ids, sample_ids, mask = self._to_device(batch)
             sample_selection = self._epoch_sample_selection_mask(sample_ids)
@@ -430,7 +465,6 @@ class Trainer:
             if self.loss_mode == "sample":
                 bsz, max_bins, n_feat = inputs.shape
                 inputs_flat = inputs.view(bsz * max_bins, n_feat)
-                intrinsic = self.model.mlp(inputs_flat).view(bsz, max_bins, self.cfg.embed_dim)
 
                 sample_grid = sample_ids.unsqueeze(1).expand(-1, max_bins)
                 valid = mask.bool() if mask is not None else torch.ones_like(bin_ids, dtype=torch.bool)
@@ -440,22 +474,35 @@ class Trainer:
                     interpolation_mask = interpolation_mask & valid
                     interpolation_mask = interpolation_mask[valid]
 
-                intrinsic = intrinsic[valid]
+                inputs_flat = inputs_flat[valid.view(-1)]
                 y = targets[valid]
                 bin_ids = bin_ids[valid]
                 sample_ids = sample_grid[valid]
+
+                z_obs = self.model._lookup_input_latent(
+                    bin_ids,
+                    interpolation_mask=interpolation_mask,
+                )
+                intrinsic = self.model.mlp(torch.cat([inputs_flat, z_obs], dim=-1))
             else:
-                intrinsic = self.model.mlp(inputs)
                 interpolation_mask = None
                 if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
                     interpolation_mask = sample_selection.to(dtype=torch.bool)
+                z_obs = self.model._lookup_input_latent(
+                    bin_ids,
+                    interpolation_mask=interpolation_mask,
+                )
+                intrinsic = self.model.mlp(torch.cat([inputs, z_obs], dim=-1))
 
-        previous_requires_grad = self.model.latent_vec.requires_grad
-        # Invariant: latent is optimized only in this block, not in _train_batch.
-        self.model.latent_vec.requires_grad_(True)
+        if self.model.latent_d is None or self.latent_optimizer is None or self.latent_scheduler is None:
+            raise RuntimeError("Output latent optimizer state is not initialized")
+
+        previous_requires_grad = self.model.latent_d.requires_grad
+        # Invariant: output latent D is optimized only in this block, not in _train_batch.
+        self.model.latent_d.requires_grad_(True)
 
         try:
-            latent_vec, timings = self.model.latent_solver.solve(
+            latent_d, timings = self.model.latent_solver.solve(
                 y=y,
                 intrinsic=intrinsic,
                 final_weights=self.model.final_linear.weight if self.cfg.embed_dim > 1 else None,
@@ -464,14 +511,14 @@ class Trainer:
                 interpolation_mask=interpolation_mask,
                 loss_type=self.loss_type,
                 prox_weight=prox_weight,
-                latent=self.model.latent_vec,
+                latent=self.model.latent_d,
                 optimizer=self.latent_optimizer,
             )
             self.latent_scheduler.step()
         finally:
-            self.model.latent_vec.requires_grad_(previous_requires_grad)
+            self.model.latent_d.requires_grad_(previous_requires_grad)
 
-        return latent_vec, timings
+        return latent_d, timings
 
     @torch.no_grad()
     def get_predictions(
@@ -766,9 +813,10 @@ class Trainer:
             for batch_idx, batch in enumerate(self.train_loader):
                 batch_start = time.perf_counter()
 
-                latent_start = time.perf_counter()
-                latent_vec, latent_timings = self.solve_latent(batch=batch, prox_weight=prox_weight)
-                latent_s = time.perf_counter() - latent_start
+                if self.has_output_latent:
+                    latent_start = time.perf_counter()
+                    latent_d, latent_timings = self.solve_latent(batch=batch, prox_weight=prox_weight)
+                    latent_s = time.perf_counter() - latent_start
 
                 loss_value, mlp_timings = self._train_batch(batch)
                 self.mlp_scheduler.step()
@@ -776,29 +824,32 @@ class Trainer:
                 total_s = time.perf_counter() - batch_start
 
                 if use_wandb and WANDB_AVAILABLE:
-                    # timings = {"setup_s": setup_done, "epoch_logits_s": [], "epoch_loss_s": [], "epoch_backward_s": [], "epoch_optimizer_s": []}
-                    wandb.log({
+                    payload = {
                         "train/batch/loss": loss_value,
                         "train/batch/mlp_lr": self.mlp_optimizer.param_groups[0]["lr"],
-                        "train/batch/latent_lr": latent_timings["latent_lr"],
                         "timing/batch/mlp/forward_s": mlp_timings["forward_s"],
                         "timing/batch/mlp/backward_s": mlp_timings["backward_s"],
                         "timing/batch/mlp/optim_s": mlp_timings["optim_s"],
-                        "timing/batch/latent/total": latent_s,
-                        "timing/batch/latent/setup_s": latent_timings["setup_s"],
-                        "timing/batch/latent/forward_s": latent_timings["forward_s"],
-                        "timing/batch/latent/backward_s": latent_timings["backward_s"],
-                        "timing/batch/latent/optim_s": latent_timings["optim_s"],
-                        "train/batch/latent/loss_CE": latent_timings["loss_CE"],
-                        "train/batch/latent/loss_l2": latent_timings["loss_l2"],
-                        "train/batch/latent/loss_smooth": latent_timings["loss_smooth"],
-                        "train/batch/latent/loss_prox": latent_timings["loss_prox"],
-                        "train/batch/latent/loss_total": latent_timings["loss_total"],
                         "timing/batch/total_s": total_s,
                         "train/epoch": epoch,
                         "train/batch_idx": batch_idx,
                         "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
-                    })
+                    }
+                    if self.has_output_latent:
+                        payload.update({
+                            "train/batch/latent_lr": latent_timings["latent_lr"],
+                            "timing/batch/latent/total": latent_s,
+                            "timing/batch/latent/setup_s": latent_timings["setup_s"],
+                            "timing/batch/latent/forward_s": latent_timings["forward_s"],
+                            "timing/batch/latent/backward_s": latent_timings["backward_s"],
+                            "timing/batch/latent/optim_s": latent_timings["optim_s"],
+                            "train/batch/latent/loss_CE": latent_timings["loss_CE"],
+                            "train/batch/latent/loss_l2": latent_timings["loss_l2"],
+                            "train/batch/latent/loss_smooth": latent_timings["loss_smooth"],
+                            "train/batch/latent/loss_prox": latent_timings["loss_prox"],
+                            "train/batch/latent/loss_total": latent_timings["loss_total"],
+                        })
+                    wandb.log(payload)
 
             train_eval_start = time.perf_counter()
             train_loss = self.validate(split="train")
@@ -878,7 +929,8 @@ class Trainer:
             wandb.log(payload)
 
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
-        latent_vector = self.model.latent_vec.detach().cpu().numpy()
+        latent_d_vector = self.model.latent_d.detach().cpu().numpy()
+        latent_z_vector = self.model.latent_z.detach().cpu().numpy()
 
         return {
             "model": self.model_name,
@@ -889,7 +941,9 @@ class Trainer:
             "targets": targets,
             "sample_labels": sample_labels,
             "bin_labels": bin_labels,
-            "latent_vector": latent_vector,
+            "latent_vector": latent_d_vector if self.has_output_latent else latent_z_vector,  # For backward compatibility
+            "latent_d_vector": latent_d_vector if self.has_output_latent else None,
+            "latent_z_vector": latent_z_vector,
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "val_metrics": self.last_val_metrics,
@@ -898,11 +952,30 @@ class Trainer:
         }
 
     @torch.no_grad()
-    def _compute_ablation_delta(self) -> float:
-        saved = self.model.latent_vec.data.clone()
-        self.model.latent_vec.data.zero_()
+    def _compute_z_weight_ratio(self) -> float:
+        W = self.model.mlp.net[0].weight.data # type: ignore
+        W_feat = W[:, :self.feature_input_dim]
+        W_latent = W[:, self.feature_input_dim: self.feature_input_dim + self.latent_input_dim]
+        feat_col_mean = W_feat.norm(p="fro").item() / max(1, self.feature_input_dim)
+        latent_col_mean = W_latent.norm(p="fro").item() / max(1, self.latent_input_dim)
+        return float(latent_col_mean / (feat_col_mean + 1e-12))
+
+    @torch.no_grad()
+    def _compute_ablation_delta(self, latent_type: Literal["z", "d", "both"]) -> float:
+        latent_to_zero = ["z", "d"] if latent_type == "both" else [latent_type]
+        if "z" in latent_to_zero:
+            saved_z = self.model.latent_z.data.clone()
+            self.model.latent_z.data.zero_()
+        if "d" in latent_to_zero:
+            if self.model.latent_d is None:
+                return float("nan")
+            saved_d = self.model.latent_d.data.clone()
+            self.model.latent_d.data.zero_()
         loss_no_latent = self.validate(split="val")
-        self.model.latent_vec.data.copy_(saved)
+        if "z" in latent_to_zero:
+            self.model.latent_z.data.copy_(saved_z)
+        if "d" in latent_to_zero:
+            self.model.latent_d.data.copy_(saved_d)
         loss_with_latent = self.validate(split="val")
         return float(loss_no_latent - loss_with_latent)
 
@@ -910,15 +983,31 @@ class Trainer:
         diag: Dict[str, Any] = {
             "epoch": int(epoch),
             # Latent metrics are computed as the average per-dimension to avoid domination by large embed_dim values.
-            "latent_mean": float(self.model.latent_vec.data.mean(dim=0).mean().item()),
-            "latent_std": float(self.model.latent_vec.data.std(dim=0).mean().item()),
-            "latent_min": float(self.model.latent_vec.data.min().item()),
-            "latent_max": float(self.model.latent_vec.data.max().item()),
-            "ablation_delta": self._compute_ablation_delta() if run_abl else None,
-            "final_weight_mean": float(self.model.final_linear.weight.data.mean().item()) if self.cfg.embed_dim > 1 else None,
-            "final_weight_std": float(self.model.final_linear.weight.data.std().item()) if self.cfg.embed_dim > 1 else None,
-            "final_weight_norm": float(self.model.final_linear.weight.data.norm().item()) if self.cfg.embed_dim > 1 else None,
+            "latent_z_mean": float(self.model.latent_z.data.mean(dim=0).mean().item()),
+            "latent_z_std": float(self.model.latent_z.data.std(dim=0).mean().item()),
+            "latent_d_mean": None,
+            "latent_d_std": None,
+            "latent_d_min": None,
+            "latent_d_max": None,
+            "z_weight_norm_ratio": self._compute_z_weight_ratio(),
+            "z_ablation_delta": self._compute_ablation_delta("z") if run_abl else None,
+            "d_ablation_delta": None,
+            "joint_ablation_delta": None,
+            "final_weight_mean": None,
+            "final_weight_std": None,
+            "final_weight_norm": None,
         }
+        if self.has_output_latent and self.model.latent_d is not None:
+            diag["latent_d_mean"] = float(self.model.latent_d.data.mean().item())
+            diag["latent_d_std"] = float(self.model.latent_d.data.std().item())
+            diag["latent_d_min"] = float(self.model.latent_d.data.min().item())
+            diag["latent_d_max"] = float(self.model.latent_d.data.max().item())
+            diag["d_ablation_delta"] = self._compute_ablation_delta("d") if run_abl else None
+            diag["joint_ablation_delta"] = self._compute_ablation_delta("both") if run_abl else None
+        if self.cfg.embed_dim > 1:
+            diag["final_weight_mean"] = float(self.model.final_linear.weight.data.mean().item())
+            diag["final_weight_std"] = float(self.model.final_linear.weight.data.std().item())
+            diag["final_weight_norm"] = float(self.model.final_linear.weight.data.norm().item())
         return diag
 
     def _to_device(

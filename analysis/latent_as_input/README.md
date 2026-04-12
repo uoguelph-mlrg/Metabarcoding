@@ -5,13 +5,13 @@ This folder contains a variant of the metabarcoding model where BIN-specific lat
 ## Architecture Overview
 
 ### Model Structure
-- **Latent Embedding**: `Z ∈ ℝ^{n_bins × latent_dim}` stored as `nn.Embedding(n_bins, latent_dim)`
+- **Latent Embedding**: `Z ∈ ℝ^{n_bins × latent_input_dim}` stored as `nn.Embedding(n_bins, latent_input_dim)`
   - Initialized with small Gaussian noise (std ∈ [10⁻³, 10⁻²])
   - Optimized in unconstrained Euclidean space (not log-space)
   - Dimension is configurable (default: 1)
 
 - **Forward Pass**:
-  1. Retrieve latent embedding for each BIN: `z_b ∈ ℝ^{latent_dim}`
+  1. Retrieve latent embedding for each BIN: `z_b ∈ ℝ^{latent_input_dim}`
   2. Concatenate with input features: `x_augmented = [x, z_b]`
   3. Pass through MLP: `output = MLP(x_augmented)`
   4. Output is in log-space (logits for cross-entropy)
@@ -47,7 +47,7 @@ Where:
 
 ### Modified Files
 1. **config.py**: Added hyperparameters
-   - `latent_dim`: Embedding dimension (default: 1)
+   - `latent_input_dim`: Embedding dimension (default: 1)
    - `latent_init_std`: Initialization std (default: 1e-3)
    - `latent_lr`: Learning rate for Phase A (default: 1e-3)
    - `latent_steps`: Gradient steps per EM cycle (default: 5)
@@ -57,7 +57,7 @@ Where:
 2. **model.py**: Latent-as-input architecture
    - Uses `nn.Embedding` instead of `nn.Parameter`
    - Concatenates latent to input in `forward()`
-   - MLP input dimension adjusted: `input_dim + latent_dim`
+   - MLP input dimension adjusted: `input_dim + latent_input_dim`
 
 3. **latent_solver.py**: Gradient-based optimization
    - New method: `solve_gradient_based()`
@@ -111,7 +111,7 @@ All hyperparameters are configured in `config.py`. No command-line arguments nee
 
 ## Hyperparameter Tuning Guidance
 
-- **latent_dim**: Start with 1, increase if underfitting (try 2, 4, 8)
+- **latent_input_dim**: Start with 1, increase if underfitting (try 2, 4, 8)
 - **latent_init_std**: Keep small (1e-3 to 1e-2) to avoid initialization issues
 - **latent_steps**: Balance accuracy vs. speed (1-5 steps recommended)
 - **latent_lr**: Typically lower than MLP lr (1e-4 to 1e-3)
@@ -127,7 +127,7 @@ BINs not present in training are handled via interpolation from the neighborhood
 
 ## Future Extensions
 
-1. **Multi-dimensional latent**: Increase `latent_dim` to capture richer structures
+1. **Multi-dimensional latent**: Increase `latent_input_dim` to capture richer structures
 2. **Attention mechanisms**: Use latent as query/key for sample-bin interactions
 3. **Hierarchical latent**: Different dimensions for different taxonomic levels
 4. **Joint optimization**: Train θ and Z simultaneously (remove alternation)

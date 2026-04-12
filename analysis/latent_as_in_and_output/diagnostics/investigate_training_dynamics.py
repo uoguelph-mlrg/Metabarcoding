@@ -33,7 +33,7 @@ for mod in ["config", "train", "model", "latent_solver"]:
 
 import torch
 from config import Config, set_seed
-from latent_as_input import load_variant_trainer, load_baseline_trainer
+from Metabarcoding.analysis.latent_as_in_and_output.latent_as_in_and_output import load_variant_trainer, load_baseline_trainer
 
 
 def analyze_loss_patterns(results_path: str):

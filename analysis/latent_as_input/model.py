@@ -29,7 +29,7 @@ class Model(nn.Module):
         mlp: nn.Module,
         latent_solver: LatentSolver,
         n_bins: int,
-        latent_dim: int,
+        latent_input_dim: int,
         latent_init_std: float,
         device: torch.device,
     ):
@@ -38,7 +38,7 @@ class Model(nn.Module):
             mlp: MLP model that takes concatenated features + latent as input
             latent_solver: Solver for latent embeddings Z
             n_bins: Number of BINs (size of latent embedding table)
-            latent_dim: Dimension of latent embedding per BIN
+            latent_input_dim: Dimension of latent input per BIN
             latent_init_std: Std for Gaussian initialization of latent
             device: Compute device
         """
@@ -47,11 +47,11 @@ class Model(nn.Module):
         self.latent_solver = latent_solver
         self.device = device
         self.n_bins = n_bins
-        self.latent_dim = latent_dim
+        self.latent_input_dim = latent_input_dim
 
-        # Latent embedding Z: (n_bins, latent_dim) in Euclidean space
+        # Latent embedding Z: (n_bins, latent_input_dim) in Euclidean space
         # Updated in Phase A, frozen during Phase B
-        self.latent_embedding = nn.Embedding(n_bins, latent_dim, device=device)
+        self.latent_embedding = nn.Embedding(n_bins, latent_input_dim, device=device)
         # Initialize with zeros to match baseline (Issue #5)
         # Note: latent_init_std kept in signature for compatibility but not used if 0.0
         if latent_init_std > 0.0:
@@ -73,10 +73,10 @@ class Model(nn.Module):
             For cross-entropy loss, these are reshaped to [B, n_bins_per_sample]
             and softmax is applied across the bin dimension within each sample.
         """
-        # Get latent embeddings for the given BINs: [N, latent_dim]
+        # Get latent embeddings for the given BINs: [N, latent_input_dim]
         latent = self.latent_embedding(bin_ids)
         
-        # Concatenate features with latent: [N, input_dim + latent_dim]
+        # Concatenate features with latent: [N, input_dim + latent_input_dim]
         x_augmented = torch.cat([x, latent], dim=-1)
         
         # MLP output in logit space: [N, n_classes] or [N]
@@ -93,7 +93,7 @@ class Model(nn.Module):
 
     @torch.no_grad()
     def get_latent(self) -> np.ndarray:
-        """Get current latent embeddings as numpy array [n_bins, latent_dim]."""
+        """Get current latent embeddings as numpy array [n_bins, latent_input_dim]."""
         return self.latent_embedding.weight.detach().cpu().numpy()
 
     @torch.no_grad()

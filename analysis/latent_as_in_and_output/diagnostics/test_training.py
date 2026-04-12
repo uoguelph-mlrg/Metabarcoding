@@ -25,7 +25,7 @@ def test_training():
     log.info("=" * 70)
     log.info("CONFIGURATION")
     log.info("=" * 70)
-    log.info(f"latent_dim: {cfg.latent_dim}")
+    log.info(f"latent_input_dim: {cfg.latent_input_dim}")
     log.info(f"latent_steps: {cfg.latent_steps}")
     log.info(f"latent_lr: {cfg.latent_lr}")
     log.info(f"latent_init_std: {cfg.latent_init_std}")
@@ -40,7 +40,6 @@ def test_training():
     data_path = "/Users/emmaboehly/Documents/Vector/Metabarcoding/data/ecuador_training_data.csv"
     trainer = Trainer(
         cfg=cfg,
-        data_path=data_path,
     )
     
     # Train initial MLP (Phase 0)

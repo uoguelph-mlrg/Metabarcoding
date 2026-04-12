@@ -160,7 +160,7 @@ def compare_gradient_masking():
                 grad_stats['sparsity'].append(1.0 - nonzero_grads / total_grads)
                 grad_stats['max_grad'].append(grad_after.abs().max().item())
                 grad_stats['mean_grad'].append(grad_after.abs().mean().item())
-                grad_stats['bins_updated'].append(nonzero_grads / cfg.latent_dim)
+                grad_stats['bins_updated'].append(nonzero_grads / cfg.latent_input_dim)
                 
                 trainer.latent_optimizer.step()
                 

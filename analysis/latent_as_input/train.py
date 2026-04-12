@@ -188,14 +188,14 @@ class Trainer:
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
         self.input_dim = input_dim
-        self.latent_dim = int(getattr(self.cfg, "latent_dim", getattr(self.cfg, "embed_dim", 1)))
+        self.latent_input_dim = int(getattr(self.cfg, "latent_input_dim", getattr(self.cfg, "embed_dim", 1)))
         self.latent_init_std = float(getattr(self.cfg, "latent_init_std", 0.01))
         self.latent_norm_reg = float(getattr(self.cfg, "latent_norm_reg", getattr(self.cfg, "latent_l2_reg", 0.0)))
         
         # In two-phase training, Phase 1 uses input_dim only (no latent).
         # _expand_mlp_for_latent() will expand the first layer after Phase 1.
-        # Otherwise, build the full input_dim + latent_dim MLP from the start.
-        mlp_input_dim = input_dim + self.latent_dim
+        # Otherwise, build the full input_dim + latent_input_dim MLP from the start.
+        mlp_input_dim = input_dim + self.latent_input_dim
         mlp_model = MLPModel(
             mlp_input_dim,
             hidden_dims=self.cfg.mlp_hidden_dims,
@@ -207,7 +207,7 @@ class Trainer:
             latent_solver,
             n_bins=len(bin_index),
             device=self.device,
-            latent_dim=self.latent_dim,
+            latent_input_dim=self.latent_input_dim,
             latent_init_std=self.latent_init_std,
         )
         
@@ -358,7 +358,7 @@ class Trainer:
 
         checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         saved_cfg = checkpoint.get("config", {})
-        for key in ["latent_dim", "loss_type"]:
+        for key in ["latent_input_dim", "loss_type"]:
             if key in saved_cfg and getattr(self.cfg, key) != saved_cfg[key]:
                 raise ValueError(
                     f"Checkpoint/config mismatch for '{key}': "
@@ -411,7 +411,7 @@ class Trainer:
                 loss = self.criterion(outputs, targets)
 
             # Smoothness regularization: λ * ||Z - HZ||^2
-            Z = self.model.latent_embedding.weight  # [n_bins, latent_dim]
+            Z = self.model.latent_embedding.weight  # [n_bins, latent_input_dim]
             HZ = torch.sparse.mm(self.H_torch, Z)
             smooth_loss = self.cfg.latent_smooth_reg * torch.sum((Z - HZ) ** 2)
             total_loss = loss + smooth_loss
@@ -676,7 +676,7 @@ class Trainer:
         test_loss = self.validate(split="test")
         test_metrics = self.compute_metrics(split="test")
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
-        latent_vector = self.model.get_latent()  # [n_bins, latent_dim]
+        latent_vector = self.model.get_latent()  # [n_bins, latent_input_dim]
         return {
             "model": self.model_name,
             "run_id": self.run_id,
@@ -761,16 +761,16 @@ class Trainer:
 
         Returns latent_col_mean_norm / feat_col_mean_norm, where:
             feat_col_mean_norm  = ||W[:, :input_dim]||_F  / input_dim
-            latent_col_mean_norm= ||W[:, input_dim:]||_F  / latent_dim
+            latent_col_mean_norm= ||W[:, input_dim:]||_F  / latent_input_dim
 
         A ratio < 1 means latent columns are weaker than feature columns on
         average; approaching 0 signals the MLP is ignoring the latent input.
         """
-        W = self.model.mlp.net[0].weight.data  # [hidden0, input_dim + latent_dim]
+        W = self.model.mlp.net[0].weight.data  # [hidden0, input_dim + latent_input_dim]
         W_feat   = W[:, :self.input_dim]
         W_latent = W[:, self.input_dim:]
         feat_col_mean   = W_feat.norm(p='fro').item()   / self.input_dim
-        latent_col_mean = W_latent.norm(p='fro').item() / self.latent_dim
+        latent_col_mean = W_latent.norm(p='fro').item() / self.latent_input_dim
         return latent_col_mean / (feat_col_mean + 1e-12)
 
     @torch.no_grad()

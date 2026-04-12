@@ -36,7 +36,7 @@ print(f"  Base improvement over last 5 cycles : {delta_base:.6f}")
 print(f"  V2 still converging? {'YES' if delta_v2 > 1e-5 else 'no'}")
 
 # ── 3. Latent parameter magnitudes ──────────────────────────────────────────
-z = np.array(results['latent_as_input']['latent_embeddings'])   # [n_bins, latent_dim]
+z = np.array(results['latent_as_input']['latent_embeddings'])   # [n_bins, latent_input_dim]
 d = np.array(results['baseline']['latent_vector'])               # [n_bins]
 
 print("\n" + "=" * 60)
