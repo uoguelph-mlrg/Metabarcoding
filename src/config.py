@@ -85,6 +85,16 @@ class Config:
     gating_epsilon: float = 0.693               # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
 
+def cpu_if_mps(device: torch.device) -> torch.device:
+    """Return CPU when device is MPS.
+
+    Sparse CSR operations (used by the latent solver and interpolation operators)
+    are numerically unstable on MPS. All callers that need a sparse-safe device
+    should use this helper instead of duplicating the check.
+    """
+    return torch.device("cpu") if device.type == "mps" else device
+
+
 def set_seed(seed: int = 42) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)

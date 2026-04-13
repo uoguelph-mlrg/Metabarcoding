@@ -30,6 +30,10 @@ class Loss:
             # No additional criterion needed, will compute directly in cross_entropy_soft_targets
             pass
         elif task == "logistic":
+            # BCEWithLogitsLoss accepts continuous targets in [0,1]: the loss
+            # −[y·log σ(z) + (1−y)·log(1−σ(z))] is a valid cross-entropy over
+            # a Bernoulli whose probability is y, so it is appropriate even when
+            # targets are fractional relative abundances rather than hard 0/1 labels.
             self.criterion = nn.BCEWithLogitsLoss()
         else:
             raise ValueError(f"Unknown task {task}")

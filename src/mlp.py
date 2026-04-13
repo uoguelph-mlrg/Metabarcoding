@@ -27,8 +27,5 @@ class MLPModel(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.net(x)
-        # Only squeeze if output is scalar (output_dim=1)
-        if out.shape[-1] == 1:
-            return out.squeeze(-1)
-        return out
+        # Always returns [N, output_dim]; callers squeeze when needed.
+        return self.net(x)
