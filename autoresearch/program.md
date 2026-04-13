@@ -34,11 +34,13 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment runs on a single GPU. within a **fixed time budget of 5 minutes** (wall-clock training time; preprocessing and evaluation overhead are excluded). Launch with:
+Each experiment runs on a single GPU, within a **fixed time budget of 5 minutes** (wall-clock training time; preprocessing and evaluation overhead are excluded). Launch with:
 
 ```
-uv run train.py > run.log 2>&1
+./submit.sh --wait
 ```
+
+This submits a SLURM job and blocks until it completes (~7 min). Training output (including the `---` summary) is written to `run.log`.
 
 **What you CAN do** (modify `train.py` only):
 - `Config` — any hyperparameter: lr, batch size, epochs, dropout, embed_dim, K, neighbor_mode, gating_fn, loss_type, regularization weights, etc.
@@ -53,9 +55,9 @@ uv run train.py > run.log 2>&1
 
 **The goal is simple: get the lowest `val_kl_divergence`** (mean per-sample KL divergence on the validation set, lower is better). Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
 
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
+**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_kl gains, but it should not blow up dramatically.
 
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_kl improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_kl improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
 
 **The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
 
@@ -77,9 +79,6 @@ test/rmse_macro:     0.034500
 ...
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
-
-
 Extract the key metric:
 ```
 grep "^val_kl_divergence:" run.log
@@ -91,7 +90,8 @@ grep "^val_kl_divergence:" run.log
 
 When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
 
-The TSV has a header row and the following columns:```
+The TSV has a header row and the following columns:
+```
 commit	val_kl	status	description
 ```
 
@@ -121,12 +121,12 @@ LOOP FOREVER:
 1. Check git state (current branch/commit)
 2. Edit train.py with an experimental idea by directly modifying the code.
 3. git commit -m "short description"
-4. uv run train.py > run.log 2>&1 (redirect everything — do NOT use tee or let output flood your context)
+4. `./submit.sh --wait` — submits a SLURM job and blocks until it completes. Training output goes to `run.log`. Do NOT run train.py directly.
 5. Read out the results: `grep "^val_kl_divergence:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
 8. If val_kl improved (lower): you "advance" the branch, keeping the git commit
-9. If val_kl equal or worse: is equal or worse, you git reset back to where you started and try a new idea
+9. If val_kl is equal or worse: git reset --hard HEAD~1 and try a new idea
 ```
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).

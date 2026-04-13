@@ -19,5 +19,10 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
-# Results file
+# Results file and per-run training log (both untracked by design)
 results.tsv
+run.log
+
+# SLURM job scripts and output logs
+.slurm_jobs/
+slogs/
