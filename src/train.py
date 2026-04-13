@@ -302,6 +302,13 @@ class Trainer:
 
         log.info(f"Resumed from checkpoint: {ckpt_path} (epoch {self.current_epoch})")
 
+    @staticmethod
+    def _has_interpolation_samples(sample_selection: Optional[torch.Tensor]) -> bool:
+        """Return True iff sample_selection is non-None and contains at least one True entry."""
+        if sample_selection is None or sample_selection.numel() == 0:
+            return False
+        return bool(torch.any(sample_selection).item())
+
     def _train_batch(self, batch: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, float]]:
         """Run one MLP optimization step and return loss plus timing breakdown.
 
@@ -320,7 +327,7 @@ class Trainer:
             inputs_flat = inputs.view(bsz * max_bins, n_feat)
             bin_idx_flat = bin_idx.view(bsz * max_bins)
             interpolation_mask = None
-            if self.cfg.train_MLP_with_interpolation and sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+            if self.cfg.train_MLP_with_interpolation and self._has_interpolation_samples(sample_selection):
                 # Expand sample-level selection to observation-level and drop padded bins.
                 interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                 if mask is not None:
@@ -337,7 +344,7 @@ class Trainer:
             loss = self.criterion(outputs, targets, mask)
         else:
             interpolation_mask = None
-            if self.cfg.train_MLP_with_interpolation and sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+            if self.cfg.train_MLP_with_interpolation and self._has_interpolation_samples(sample_selection):
                 interpolation_mask = sample_selection
             outputs = self.model(
                 inputs,
@@ -566,14 +573,24 @@ class Trainer:
         )
 
 
-    def compute_metrics(self, split: Literal["train", "val", "test"]) -> Dict[str, float]:
+    def compute_metrics(
+        self,
+        split: Literal["train", "val", "test"],
+        predictions: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None,
+    ) -> Dict[str, float]:
         """Compute per-observation and per-sample evaluation metrics.
 
         Micro metrics are computed on all observations pooled together. Macro metrics
         are computed per sample first and then averaged to avoid domination by samples
         with many observed BINs.
+
+        Args:
+            split: Dataset split to evaluate.
+            predictions: Optional pre-computed output of get_predictions(). When
+                provided the forward pass is skipped, avoiding a redundant computation
+                that would otherwise double the inference cost at each epoch.
         """
-        y_pred, y_true, sample_labels, _ = self.get_predictions(split=split)
+        y_pred, y_true, sample_labels, _ = predictions if predictions is not None else self.get_predictions(split=split)
 
         y_true = np.asarray(y_true, dtype=float)
         y_pred = np.asarray(y_pred, dtype=float)
@@ -801,19 +818,21 @@ class Trainer:
                     })
 
             train_eval_start = time.perf_counter()
+            train_preds = self.get_predictions(split="train")
             train_loss = self.validate(split="train")
             train_eval_s = time.perf_counter() - train_eval_start
 
             val_eval_start = time.perf_counter()
+            val_preds = self.get_predictions(split="val")
             val_loss = self.validate(split="val")
             val_eval_s = time.perf_counter() - val_eval_start
-            
+
             train_metric_start = time.perf_counter()
-            train_metrics = self.compute_metrics(split="train")
+            train_metrics = self.compute_metrics(split="train", predictions=train_preds)
             train_metric_s = time.perf_counter() - train_metric_start
 
             val_metric_start = time.perf_counter()
-            val_metrics = self.compute_metrics(split="val")
+            val_metrics = self.compute_metrics(split="val", predictions=val_preds)
             val_metric_s = time.perf_counter() - val_metric_start
             self.last_val_metrics = val_metrics
 
@@ -867,7 +886,8 @@ class Trainer:
         self._plot_training_progress()
 
         test_loss = self.validate(split="test")
-        test_metrics = self.compute_metrics(split="test")
+        test_preds = self.get_predictions(split="test")
+        test_metrics = self.compute_metrics(split="test", predictions=test_preds)
 
         if use_wandb and WANDB_AVAILABLE:
             payload = {
@@ -877,7 +897,7 @@ class Trainer:
                 payload[f"test/metrics/{self._metric_key(metric_name)}"] = metric_value
             wandb.log(payload)
 
-        predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
+        predictions, targets, sample_labels, bin_labels = test_preds
         latent_vector = self.model.latent_vec.detach().cpu().numpy()
 
         return {

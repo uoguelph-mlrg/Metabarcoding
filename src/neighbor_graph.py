@@ -644,6 +644,9 @@ class NeighbourGraph:
         med = np.median(last_dists)
         if med <= 0:
             return 1.0
+        # Floor med to prevent q = 1/med² from overflowing exp(-q·dist²) when
+        # distances are very small (e.g. near-identical sequences).
+        med = max(med, 1e-6)
         return 1.0 / (med ** 2)
 
     def nw_weights_for_node(self, i: int, q: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:

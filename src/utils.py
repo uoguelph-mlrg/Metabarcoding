@@ -196,11 +196,9 @@ def load(
         if col not in bin_medians.columns:
             continue
         median_map = bin_medians[col].to_dict()
-        # First pass: preserve BIN-specific structure using train-split medians only
-        df_long[col] = df_long.apply(
-            lambda row: median_map.get(row["bin_uri"], np.nan) if pd.isna(row[col]) else row[col],
-            axis=1
-        )
+        # First pass: fill NaNs with the BIN-specific train-set median (vectorized).
+        missing = df_long[col].isna()
+        df_long.loc[missing, col] = df_long.loc[missing, "bin_uri"].map(median_map)
         # Second pass: global fallback for BINs with no usable train median.
         df_long[col] = df_long[col].fillna(df_long[col].median())
     

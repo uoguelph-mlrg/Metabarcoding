@@ -2,6 +2,7 @@ from typing import Any, Dict, Optional, Literal, Union
 import numpy as np
 import torch
 import torch.nn as nn
+from config import cpu_if_mps
 from gating_functions import make_gating_function
 
 class Model(nn.Module):
@@ -30,7 +31,7 @@ class Model(nn.Module):
         device: torch.device,
         embed_dim: int = 1,
         gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid",
-        gating_alpha: float = 0.5, # FIXME: have generic parameters variable that can be assigned from a dict (using the correct key for each gating function) to avoid unused parameters and confusion
+        gating_alpha: float = 0.5,
         gating_kappa: float = 0.5,
         gating_epsilon: float = 0.693,
         latent_init_std: float = 0.0,
@@ -61,7 +62,7 @@ class Model(nn.Module):
         self.H_interp: Optional[torch.Tensor] = None
 
         if interpolation_enabled:
-            interp_device = self.device if self.device.type != "mps" else torch.device("cpu")
+            interp_device = cpu_if_mps(self.device)
             self.H_interp = latent_solver.get_interpolation_operator(include_self_in_interpolation, device=interp_device)
 
         if embed_dim > 1:
@@ -207,22 +208,23 @@ class Model(nn.Module):
             for batch in data_loader:
                 x = batch["input"].to(self.device)  # [B, max_bins, features]
                 mask = batch.get("mask")  # [B, max_bins]
-                
+
                 B, max_bins, n_feat = x.shape
                 x_flat = x.view(B * max_bins, n_feat)
-                
+
                 intrinsic_flat = self.mlp(x_flat)  # [B * max_bins, d] or [B * max_bins]
                 mask_np = mask.cpu().numpy().astype(bool) if mask is not None else np.ones((B, max_bins), dtype=bool)
-                
+
                 if self.embed_dim > 1:
                     intrinsic_np = intrinsic_flat.view(B, max_bins, self.embed_dim).cpu().numpy()
                     for b in range(B):
                         all_preds.append(intrinsic_np[b, mask_np[b]])  # [n_valid, d]
-                    return np.concatenate(all_preds, axis=0)
                 else:
                     intrinsic_np = intrinsic_flat.squeeze(-1).view(B, max_bins).cpu().numpy()
                     for b in range(B):
                         all_preds.extend(intrinsic_np[b, mask_np[b]])
+            if self.embed_dim > 1:
+                return np.concatenate(all_preds, axis=0)
             return np.array(all_preds)
         else:
             for batch in data_loader:

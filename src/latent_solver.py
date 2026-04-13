@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from scipy import sparse
 from tqdm import tqdm
 
-from config import Config
+from config import Config, cpu_if_mps
 from gating_functions import make_gating_function
 from neighbor_graph import NeighbourGraph
 
@@ -52,7 +52,7 @@ class LatentSolver:
                 epsilon=cfg.gating_epsilon,
             )
 
-        self.device = torch.device(self.cfg.device) if str(self.cfg.device.lower()) != "mps" else torch.device("cpu") # Use CPU for latent solver if MPS due to sparse CSR stability issues, otherwise use configured device
+        self.device = cpu_if_mps(torch.device(self.cfg.device))  # sparse CSR ops are unstable on MPS
 
         self.H_smooth: Optional[sparse.csr_matrix] = None               # Smoothness operator matrix built from neighbor graph; H_smooth @ h gives neighbor-interpolated latent
         self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None       # Precompute I - H_smooth for efficient regularization; (I - H_smooth) @ h gives difference between latent and neighbor interpolation used for smoothness regularization
@@ -81,9 +81,7 @@ class LatentSolver:
         if op is None:
             raise RuntimeError("Interpolation operators are not built; call build_interpolation_matrix first")
 
-        target_device = self.device if device is None else device
-        if target_device.type == "mps":
-            target_device = torch.device("cpu")
+        target_device = cpu_if_mps(self.device if device is None else device)
         if op.device == target_device:
             return op
         return op.to(target_device)
@@ -337,7 +335,13 @@ class LatentSolver:
 
             # Proximal term stabilizes local active-set updates relative to anchor_latent,
             # especially early in training when gradients can move sparse blocks abruptly.
-            if prox_weight > 0: # FIXME: I'm not completely sure this is necessary because why would we need the latent update to be small, especially if we already have L2 and smoothness regularization? Maybe it just helps with optimization stability early on when the latent can change a lot from the anchor + given we only optimize over the active set?
+            # Proximal pull is annealed to 0 across epochs (see train.py). It is most
+            # useful early in training: the active-set latent optimizes only a local
+            # subgraph per batch, so without a proximal anchor nearby bins can drift
+            # far from each other before the global picture converges. L2 and smoothness
+            # regularization alone do not prevent this because they are relative terms;
+            # the proximal term ties each bin to its own initialization anchor.
+            if prox_weight > 0:
                 prox_term = 0.5 * float(prox_weight) * torch.sum(active_latent_update * active_latent_update)
 
             loss_unscaled = data_term + l2_term + smooth_term + prox_term
