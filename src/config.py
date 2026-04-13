@@ -41,7 +41,7 @@ class Config:
     interpolation_method: Literal["nw", "llr"] = "nw"  # interpolation method for latent solver: "nw" for Nadaraya-Watson, "llr" for locally linear regression
 
     # DNA embedding settings (used when use_embedding=True)
-    embedding_path: Optional[str] = None        # path to precomputed embeddings (.npy dict: bin_uri->vector)
+    embedding_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "embeddings.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
     barcode_data_path: Optional[str] = None     # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
