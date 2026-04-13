@@ -442,7 +442,7 @@ class Trainer:
                 sample_grid = sample_ids.unsqueeze(1).expand(-1, max_bins)
                 valid = mask.bool() if mask is not None else torch.ones_like(bin_ids, dtype=torch.bool)
                 interpolation_mask = None
-                if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                if self._has_interpolation_samples(sample_selection):
                     interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                     interpolation_mask = interpolation_mask & valid
                     interpolation_mask = interpolation_mask[valid]
@@ -454,7 +454,7 @@ class Trainer:
             else:
                 intrinsic = self.model.mlp(inputs)
                 interpolation_mask = None
-                if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                if self._has_interpolation_samples(sample_selection):
                     interpolation_mask = sample_selection.to(dtype=torch.bool)
 
         previous_requires_grad = self.model.latent_vec.requires_grad
