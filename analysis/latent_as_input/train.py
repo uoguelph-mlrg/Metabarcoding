@@ -212,7 +212,9 @@ class Trainer:
         )
         
         # Pre-compute H as a torch sparse tensor for smoothness regularization in train_epoch
-        H_coo = latent_solver.H.tocoo()
+        if latent_solver.H_smooth is None:
+            raise RuntimeError("H_smooth is not initialized; call build_interpolation_matrix first")
+        H_coo = latent_solver.H_smooth.tocoo()
         H_indices = torch.LongTensor(np.vstack([H_coo.row, H_coo.col]))
         H_values = torch.FloatTensor(H_coo.data)
         self.H_torch = torch.sparse_coo_tensor(
@@ -221,7 +223,7 @@ class Trainer:
 
         # Joint optimizer: MLP and latent trained simultaneously with separate learning rates
         self.optimizer = torch.optim.AdamW([
-            {"params": self.model.mlp.parameters(), "lr": cfg.lr, "weight_decay": cfg.weight_decay},
+            {"params": self.model.mlp.parameters(), "lr": cfg.mlp_lr, "weight_decay": cfg.weight_decay},
             {"params": [self.model.latent_embedding.weight], "lr": cfg.latent_lr, "weight_decay": 0.0},
         ])
 
