@@ -223,7 +223,7 @@ class LatentSolver:
             raise ValueError("final_weights are required for embed_dim > 1")
         if latent is None or optimizer is None:
             raise ValueError("latent_param and optimizer must both be provided for persistent latent solving")
-        if latent.device != self.device:
+        if latent.device.type != self.device.type:
             raise ValueError(f"latent_param is on {latent.device}, expected {self.device}")
 
         y = y.to(device=self.device, dtype=torch.float32).reshape(-1)
