@@ -95,10 +95,11 @@ class Trainer:
         self.latent_input_dim = int(self.cfg.latent_input_dim)
         self.total_input_dim = self.feature_input_dim + self.latent_input_dim
         self.has_output_latent = bool(self.cfg.embed_dim > 0)
+        mlp_output_dim = int(self.cfg.embed_dim) if self.cfg.embed_dim > 0 else 1
         mlp_model = MLPModel(
             self.total_input_dim,
             hidden_dims=self.cfg.mlp_hidden_dims,
-            output_dim=int(self.cfg.embed_dim) if self.cfg.embed_dim > 0 else 1,
+            output_dim=mlp_output_dim,
             dropout=self.cfg.dropout,
         ).to(self.device)
 
@@ -136,7 +137,11 @@ class Trainer:
                 {"params": [self.model.latent_z], "weight_decay": 0.0},
             ]
         self.mlp_optimizer = torch.optim.AdamW(optim_params, lr=self.cfg.mlp_lr)
-        self.latent_optimizer = torch.optim.AdamW([self.model.latent_d], lr=self.cfg.latent_lr) if self.has_output_latent else None
+        self.latent_optimizer = (
+            torch.optim.AdamW([self.model.latent_d], lr=self.cfg.latent_lr)
+            if self.has_output_latent and self.model.latent_d is not None
+            else None
+        )
 
         self.loss_type: Literal["cross_entropy", "logistic"] = self.cfg.loss_type
         self.loss_mode = "sample" if self.loss_type == "cross_entropy" else "bin"
@@ -296,8 +301,12 @@ class Trainer:
         self.mlp_optimizer.load_state_dict(checkpoint["mlp_optimizer_state_dict"])
         self.mlp_scheduler.load_state_dict(checkpoint["mlp_scheduler_state_dict"])
         if self.latent_optimizer is not None and self.latent_scheduler is not None:
-            self.latent_optimizer.load_state_dict(checkpoint["latent_optimizer_state_dict"])
-            self.latent_scheduler.load_state_dict(checkpoint["latent_scheduler_state_dict"])
+            latent_opt_state = checkpoint.get("latent_optimizer_state_dict")
+            latent_sched_state = checkpoint.get("latent_scheduler_state_dict")
+            if latent_opt_state is not None:
+                self.latent_optimizer.load_state_dict(latent_opt_state)
+            if latent_sched_state is not None:
+                self.latent_scheduler.load_state_dict(latent_sched_state)
 
         self.current_epoch = int(checkpoint.get("epoch", -1))
         self.start_epoch = self.current_epoch + 1
@@ -458,6 +467,8 @@ class Trainer:
             raise RuntimeError("solve_latent is unavailable when embed_dim == 0")
 
         self.model.eval()
+        solver_device = self.model.latent_solver.device
+
         with torch.no_grad():
             inputs, targets, bin_ids, sample_ids, mask = self._to_device(batch)
             sample_selection = self._epoch_sample_selection_mask(sample_ids)
@@ -796,6 +807,7 @@ class Trainer:
         log.info(
             f"Starting training for model={self.model_name}, epochs={self.cfg.epochs}, resume={self.resume}"
         )
+
         for epoch in tqdm(range(self.start_epoch, self.cfg.epochs), desc="Epochs", leave=False):
             self.current_epoch = epoch
             epoch_start = time.perf_counter()
@@ -810,6 +822,8 @@ class Trainer:
             alpha = min(1.0, epoch / self.cfg.epochs)
             prox_weight = self.cfg.latent_init_prox_reg * (1.0 - alpha)
 
+            latent_d = self.model.latent_d.detach().cpu().numpy() if self.model.latent_d is not None else None
+
             for batch_idx, batch in enumerate(self.train_loader):
                 batch_start = time.perf_counter()
 
@@ -817,6 +831,20 @@ class Trainer:
                     latent_start = time.perf_counter()
                     latent_d, latent_timings = self.solve_latent(batch=batch, prox_weight=prox_weight)
                     latent_s = time.perf_counter() - latent_start
+                else:
+                    latent_timings = {
+                        "setup_s": 0.0,
+                        "forward_s": 0.0,
+                        "backward_s": 0.0,
+                        "optim_s": 0.0,
+                        "latent_lr": 0.0,
+                        "loss_CE": 0.0,
+                        "loss_l2": 0.0,
+                        "loss_smooth": 0.0,
+                        "loss_prox": 0.0,
+                        "loss_total": 0.0,
+                    }
+                    latent_s = 0.0
 
                 loss_value, mlp_timings = self._train_batch(batch)
                 self.mlp_scheduler.step()
@@ -824,32 +852,29 @@ class Trainer:
                 total_s = time.perf_counter() - batch_start
 
                 if use_wandb and WANDB_AVAILABLE:
-                    payload = {
+                    # timings = {"setup_s": setup_done, "epoch_logits_s": [], "epoch_loss_s": [], "epoch_backward_s": [], "epoch_optimizer_s": []}
+                    wandb.log({
                         "train/batch/loss": loss_value,
                         "train/batch/mlp_lr": self.mlp_optimizer.param_groups[0]["lr"],
+                        "train/batch/latent_lr": latent_timings["latent_lr"],
                         "timing/batch/mlp/forward_s": mlp_timings["forward_s"],
                         "timing/batch/mlp/backward_s": mlp_timings["backward_s"],
                         "timing/batch/mlp/optim_s": mlp_timings["optim_s"],
+                        "timing/batch/latent/total": latent_s,
+                        "timing/batch/latent/setup_s": latent_timings["setup_s"],
+                        "timing/batch/latent/forward_s": latent_timings["forward_s"],
+                        "timing/batch/latent/backward_s": latent_timings["backward_s"],
+                        "timing/batch/latent/optim_s": latent_timings["optim_s"],
+                        "train/batch/latent/loss_CE": latent_timings["loss_CE"],
+                        "train/batch/latent/loss_l2": latent_timings["loss_l2"],
+                        "train/batch/latent/loss_smooth": latent_timings["loss_smooth"],
+                        "train/batch/latent/loss_prox": latent_timings["loss_prox"],
+                        "train/batch/latent/loss_total": latent_timings["loss_total"],
                         "timing/batch/total_s": total_s,
                         "train/epoch": epoch,
                         "train/batch_idx": batch_idx,
                         "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
-                    }
-                    if self.has_output_latent:
-                        payload.update({
-                            "train/batch/latent_lr": latent_timings["latent_lr"],
-                            "timing/batch/latent/total": latent_s,
-                            "timing/batch/latent/setup_s": latent_timings["setup_s"],
-                            "timing/batch/latent/forward_s": latent_timings["forward_s"],
-                            "timing/batch/latent/backward_s": latent_timings["backward_s"],
-                            "timing/batch/latent/optim_s": latent_timings["optim_s"],
-                            "train/batch/latent/loss_CE": latent_timings["loss_CE"],
-                            "train/batch/latent/loss_l2": latent_timings["loss_l2"],
-                            "train/batch/latent/loss_smooth": latent_timings["loss_smooth"],
-                            "train/batch/latent/loss_prox": latent_timings["loss_prox"],
-                            "train/batch/latent/loss_total": latent_timings["loss_total"],
-                        })
-                    wandb.log(payload)
+                    })
 
             train_eval_start = time.perf_counter()
             train_loss = self.validate(split="train")
@@ -929,7 +954,6 @@ class Trainer:
             wandb.log(payload)
 
         predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
-        latent_d_vector = self.model.latent_d.detach().cpu().numpy()
         latent_z_vector = self.model.latent_z.detach().cpu().numpy()
 
         return {
@@ -941,8 +965,7 @@ class Trainer:
             "targets": targets,
             "sample_labels": sample_labels,
             "bin_labels": bin_labels,
-            "latent_vector": latent_d_vector if self.has_output_latent else latent_z_vector,  # For backward compatibility
-            "latent_d_vector": latent_d_vector if self.has_output_latent else None,
+            "latent_vector": latent_z_vector,  # Backward-compatible key now points to Z embedding.
             "latent_z_vector": latent_z_vector,
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
@@ -962,6 +985,8 @@ class Trainer:
 
     @torch.no_grad()
     def _compute_ablation_delta(self, latent_type: Literal["z", "d", "both"]) -> float:
+        if (latent_type in {"d", "both"}) and not self.has_output_latent:
+            return float("nan")
         latent_to_zero = ["z", "d"] if latent_type == "both" else [latent_type]
         if "z" in latent_to_zero:
             saved_z = self.model.latent_z.data.clone()
@@ -985,29 +1010,18 @@ class Trainer:
             # Latent metrics are computed as the average per-dimension to avoid domination by large embed_dim values.
             "latent_z_mean": float(self.model.latent_z.data.mean(dim=0).mean().item()),
             "latent_z_std": float(self.model.latent_z.data.std(dim=0).mean().item()),
-            "latent_d_mean": None,
-            "latent_d_std": None,
-            "latent_d_min": None,
-            "latent_d_max": None,
+            "latent_d_mean": float(self.model.latent_d.data.mean(dim=0).mean().item()) if self.model.latent_d is not None else None,
+            "latent_d_std": float(self.model.latent_d.data.std(dim=0).mean().item()) if self.model.latent_d is not None else None,
+            "latent_d_min": float(self.model.latent_d.data.min().item()) if self.model.latent_d is not None else None,
+            "latent_d_max": float(self.model.latent_d.data.max().item()) if self.model.latent_d is not None else None,
             "z_weight_norm_ratio": self._compute_z_weight_ratio(),
             "z_ablation_delta": self._compute_ablation_delta("z") if run_abl else None,
-            "d_ablation_delta": None,
-            "joint_ablation_delta": None,
-            "final_weight_mean": None,
-            "final_weight_std": None,
-            "final_weight_norm": None,
+            "d_ablation_delta": self._compute_ablation_delta("d") if (run_abl and self.has_output_latent) else None,
+            "joint_ablation_delta": self._compute_ablation_delta("both") if (run_abl and self.has_output_latent) else None,
+            "final_weight_mean": float(self.model.final_linear.weight.data.mean().item()) if self.cfg.embed_dim > 1 else None,
+            "final_weight_std": float(self.model.final_linear.weight.data.std().item()) if self.cfg.embed_dim > 1 else None,
+            "final_weight_norm": float(self.model.final_linear.weight.data.norm().item()) if self.cfg.embed_dim > 1 else None,
         }
-        if self.has_output_latent and self.model.latent_d is not None:
-            diag["latent_d_mean"] = float(self.model.latent_d.data.mean().item())
-            diag["latent_d_std"] = float(self.model.latent_d.data.std().item())
-            diag["latent_d_min"] = float(self.model.latent_d.data.min().item())
-            diag["latent_d_max"] = float(self.model.latent_d.data.max().item())
-            diag["d_ablation_delta"] = self._compute_ablation_delta("d") if run_abl else None
-            diag["joint_ablation_delta"] = self._compute_ablation_delta("both") if run_abl else None
-        if self.cfg.embed_dim > 1:
-            diag["final_weight_mean"] = float(self.model.final_linear.weight.data.mean().item())
-            diag["final_weight_std"] = float(self.model.final_linear.weight.data.std().item())
-            diag["final_weight_norm"] = float(self.model.final_linear.weight.data.norm().item())
         return diag
 
     def _to_device(
