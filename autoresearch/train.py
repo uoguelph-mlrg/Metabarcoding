@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import argparse
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast, Set, Callable, Iterable, Type
 import os
 
@@ -69,12 +69,12 @@ class Config:
     interpolation_method: Literal["nw", "llr"] = "nw"  # interpolation method for latent solver: "nw" for Nadaraya-Watson, "llr" for locally linear regression
 
     # DNA embedding settings (used when use_embedding=True)
-    embedding_path: Optional[str] = None        # path to precomputed embeddings (.npy dict: bin_uri->vector)
+    embedding_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "embeddings.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
     barcode_data_path: Optional[str] = None     # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
     # MLP - architecture & optimization settings
-    mlp_hidden_dims : List[int] = [128, 128, 128, 128]  # Hidden layer dimensions for MLP
+    mlp_hidden_dims : List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
     mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
     weight_decay: float = 1e-5                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
@@ -1859,7 +1859,9 @@ class Trainer:
         self.resume = resume
         self._validate_interpolation_config()
 
-        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and self.cfg.embedding_path is None:
+        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and (
+            self.cfg.embedding_path is None or not os.path.exists(self.cfg.embedding_path)
+        ):
             self.cfg.barcode_data_path = self.cfg.data_path
 
         self.start_epoch = 0
