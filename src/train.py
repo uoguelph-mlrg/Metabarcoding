@@ -52,7 +52,9 @@ class Trainer:
         self.resume = resume
         self._validate_interpolation_config()
 
-        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and self.cfg.embedding_path is None:
+        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and (
+            self.cfg.embedding_path is None or not os.path.exists(self.cfg.embedding_path)
+        ):
             self.cfg.barcode_data_path = self.cfg.data_path
 
         self.start_epoch = 0
