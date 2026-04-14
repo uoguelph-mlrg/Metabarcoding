@@ -11,3 +11,5 @@ Metabarcoding/analysis/data_curation/results/
 **/__pycache__
 **slogs/
 **.slurm_jobs/
+data/embeddings.npy
+autoresearch/results.tsv
