@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from scipy import sparse
 from tqdm import tqdm
 
-from config import Config, cpu_if_mps
+from config import Config
 from gating_functions import make_gating_function
 from neighbor_graph import NeighbourGraph
 
@@ -52,7 +52,7 @@ class LatentSolver:
                 epsilon=cfg.gating_epsilon,
             )
 
-        self.device = cpu_if_mps(torch.device(self.cfg.device))  # sparse CSR ops are unstable on MPS
+        self.device = torch.device(self.cfg.device)
 
         self.H_smooth: Optional[sparse.csr_matrix] = None               # Smoothness operator matrix built from neighbor graph; H_smooth @ h gives neighbor-interpolated latent
         self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None       # Precompute I - H_smooth for efficient regularization; (I - H_smooth) @ h gives difference between latent and neighbor interpolation used for smoothness regularization
@@ -76,15 +76,12 @@ class LatentSolver:
             base = base + sparse.identity(self.n_bins, format="csr")
         return self._row_normalize_csr(base.tocsr())
 
-    def get_interpolation_operator(self, include_self_in_interpolation: bool, device: Optional[torch.device] = None) -> torch.Tensor:
+    def get_interpolation_operator(self, include_self_in_interpolation: bool) -> torch.Tensor:
         op = self.H_interp.get(include_self_in_interpolation)
         if op is None:
             raise RuntimeError("Interpolation operators are not built; call build_interpolation_matrix first")
 
-        target_device = cpu_if_mps(self.device if device is None else device)
-        if op.device == target_device:
-            return op
-        return op.to(target_device)
+        return op
 
     def _compute_logits_from_latent_values(
         self,
@@ -165,17 +162,35 @@ class LatentSolver:
     def _csr_to_torch(self, mat: Optional[sparse.csr_matrix]) -> torch.Tensor:
         if mat is None:
             raise ValueError("mat cannot be None")
-        crow = torch.as_tensor(mat.indptr.astype(np.int64), device=self.device)
-        col = torch.as_tensor(mat.indices.astype(np.int64), device=self.device)
-        vals = torch.as_tensor(mat.data.astype(np.float32), device=self.device)
+        # Sparse CSR tensors don't support MPS; always create on CPU
+        sparse_device = torch.device("cpu") if self.device.type == "mps" else self.device
+        crow = torch.as_tensor(mat.indptr.astype(np.int64), device=sparse_device)
+        col = torch.as_tensor(mat.indices.astype(np.int64), device=sparse_device)
+        vals = torch.as_tensor(mat.data.astype(np.float32), device=sparse_device)
         return torch.sparse_csr_tensor(
             crow,
             col,
             vals,
             size=mat.shape,
             dtype=torch.float32,
-            device=self.device,
+            device=sparse_device,
         )
+
+    def _sparse_mm_with_device_transfer(
+        self, sparse_mat: torch.Tensor, dense_mat: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Perform sparse @ dense matrix multiplication, handling device mismatches.
+        When sparse_mat is on CPU (due to MPS limitations) but dense_mat is on a different device,
+        moves dense_mat to CPU, performs the operation, and moves result back to original device.
+        """
+        original_device = dense_mat.device
+        if sparse_mat.device != dense_mat.device:
+            dense_mat = dense_mat.to(device=sparse_mat.device)
+        result = torch.sparse.mm(sparse_mat, dense_mat)
+        if result.device != original_device:
+            result = result.to(device=original_device)
+        return result
 
     def solve(
         self,
@@ -271,7 +286,7 @@ class LatentSolver:
         if float(self.cfg.latent_smooth_reg) > 0:
             # Cache baseline smoothness term once; per-step updates only need the
             # active-set correction through L_RA @ (h_active - h_anchor_active).
-            frozen_smooth_contribution = torch.sparse.mm(L_rows, anchor_latent)
+            frozen_smooth_contribution = self._sparse_mm_with_device_transfer(L_rows, anchor_latent)
 
         setup_done = time.perf_counter() - solve_start
         timings = {
@@ -329,7 +344,7 @@ class LatentSolver:
                 if frozen_smooth_contribution is None:
                     raise RuntimeError("frozen_smooth_contribution was not initialized")
                 # L_RA @ active_latent = smoothness diff of new latents with active BINs + neighbors
-                active_correction = torch.sparse.mm(L_RA, active_latent_update)
+                active_correction = self._sparse_mm_with_device_transfer(L_RA, active_latent_update)
                 diff = frozen_smooth_contribution + active_correction
                 smooth_term = 0.5 * smooth_coef * torch.sum(diff * diff)
 
@@ -530,8 +545,8 @@ class LatentSolver:
             return own_logits
 
         latent_2d = latent_source.unsqueeze(-1) if latent_source.ndim == 1 else latent_source
-        interp_operator = self.get_interpolation_operator(self.cfg.include_self_in_interpolation, device=latent_2d.device)
-        interpolated_full = torch.sparse.mm(interp_operator, latent_2d)
+        interp_operator = self.get_interpolation_operator(self.cfg.include_self_in_interpolation)
+        interpolated_full = self._sparse_mm_with_device_transfer(interp_operator, latent_2d)
         interpolated_obs = interpolated_full[bin_ids]
         interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic, final_weights)
 
