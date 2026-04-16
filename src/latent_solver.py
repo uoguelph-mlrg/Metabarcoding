@@ -57,9 +57,11 @@ class LatentSolver:
         self.H_smooth: Optional[sparse.csr_matrix] = None               # Smoothness operator matrix built from neighbor graph; H_smooth @ h gives neighbor-interpolated latent
         self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None       # Precompute I - H_smooth for efficient regularization; (I - H_smooth) @ h gives difference between latent and neighbor interpolation used for smoothness regularization
         self._I_minus_H_smooth_csc: Optional[sparse.csc_matrix] = None  # CSC format of I - H_smooth for efficient column slicing when building row closure
+        self._I_minus_H_smooth_dense: Optional[torch.Tensor] = None     # Dense version for MPS devices (faster than sparse + device transfers)
         self._graph_neighbors: Optional[List[np.ndarray]] = None        # List of neighbor arrays for each node, used to build active set on each solve call
         self.H_interp: Dict[bool, Optional[torch.Tensor]] = {False: None, True: None}
         self._H_interp_csr: Dict[bool, Optional[sparse.csr_matrix]] = {False: None, True: None}
+        self._H_interp_dense: Dict[bool, Optional[torch.Tensor]] = {False: None, True: None}  # Dense versions for MPS
 
     def _row_normalize_csr(self, mat: sparse.csr_matrix) -> sparse.csr_matrix:
         row_sums = np.asarray(mat.sum(axis=1)).reshape(-1).astype(np.float64, copy=False)
@@ -162,19 +164,46 @@ class LatentSolver:
     def _csr_to_torch(self, mat: Optional[sparse.csr_matrix]) -> torch.Tensor:
         if mat is None:
             raise ValueError("mat cannot be None")
-        # Sparse CSR tensors don't support MPS; always create on CPU
-        sparse_device = torch.device("cpu") if self.device.type == "mps" else self.device
-        crow = torch.as_tensor(mat.indptr.astype(np.int64), device=sparse_device)
-        col = torch.as_tensor(mat.indices.astype(np.int64), device=sparse_device)
-        vals = torch.as_tensor(mat.data.astype(np.float32), device=sparse_device)
-        return torch.sparse_csr_tensor(
-            crow,
-            col,
-            vals,
-            size=mat.shape,
-            dtype=torch.float32,
-            device=sparse_device,
-        )
+        # For MPS, convert to dense for better performance (no device transfer overhead)
+        # For CUDA/CPU, keep sparse
+        if self.device.type == "mps":
+            dense_mat = torch.tensor(mat.toarray(), dtype=torch.float32, device=self.device)
+            return dense_mat
+        else:
+            sparse_device = self.device
+            crow = torch.as_tensor(mat.indptr.astype(np.int64), device=sparse_device)
+            col = torch.as_tensor(mat.indices.astype(np.int64), device=sparse_device)
+            vals = torch.as_tensor(mat.data.astype(np.float32), device=sparse_device)
+            return torch.sparse_csr_tensor(
+                crow,
+                col,
+                vals,
+                size=mat.shape,
+                dtype=torch.float32,
+                device=sparse_device,
+            )
+
+    def _dense_mm(self, dense_mat1: torch.Tensor, dense_mat2: torch.Tensor) -> torch.Tensor:
+        """Dense matrix multiplication (used when operators are dense for MPS)."""
+        return torch.mm(dense_mat1, dense_mat2)
+
+    def _operator_mm(self, operator: torch.Tensor, dense_mat: torch.Tensor) -> torch.Tensor:
+        """
+        Matrix multiplication that handles both sparse and dense operators.
+        - If operator is sparse, does sparse @ dense with device transfers
+        - If operator is dense, does dense @ dense on the same device
+        """
+        if operator.is_sparse:
+            return self._sparse_mm_with_device_transfer(operator, dense_mat)
+        else:
+            # Dense operator - ensure both on same device
+            if operator.device != dense_mat.device:
+                dense_mat = dense_mat.to(device=operator.device)
+            result = self._dense_mm(operator, dense_mat)
+            # Move back to original device if needed
+            if operator.device.type == "mps" and dense_mat.device.type == "mps":
+                return result  # Already on MPS
+            return result
 
     def _sparse_mm_with_device_transfer(
         self, sparse_mat: torch.Tensor, dense_mat: torch.Tensor
@@ -286,7 +315,7 @@ class LatentSolver:
         if float(self.cfg.latent_smooth_reg) > 0:
             # Cache baseline smoothness term once; per-step updates only need the
             # active-set correction through L_RA @ (h_active - h_anchor_active).
-            frozen_smooth_contribution = self._sparse_mm_with_device_transfer(L_rows, anchor_latent)
+            frozen_smooth_contribution = self._operator_mm(L_rows, anchor_latent)
 
         setup_done = time.perf_counter() - solve_start
         timings = {
@@ -344,7 +373,7 @@ class LatentSolver:
                 if frozen_smooth_contribution is None:
                     raise RuntimeError("frozen_smooth_contribution was not initialized")
                 # L_RA @ active_latent = smoothness diff of new latents with active BINs + neighbors
-                active_correction = self._sparse_mm_with_device_transfer(L_RA, active_latent_update)
+                active_correction = self._operator_mm(L_RA, active_latent_update)
                 diff = frozen_smooth_contribution + active_correction
                 smooth_term = 0.5 * smooth_coef * torch.sum(diff * diff)
 
@@ -546,7 +575,7 @@ class LatentSolver:
 
         latent_2d = latent_source.unsqueeze(-1) if latent_source.ndim == 1 else latent_source
         interp_operator = self.get_interpolation_operator(self.cfg.include_self_in_interpolation)
-        interpolated_full = self._sparse_mm_with_device_transfer(interp_operator, latent_2d)
+        interpolated_full = self._operator_mm(interp_operator, latent_2d)
         interpolated_obs = interpolated_full[bin_ids]
         interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic, final_weights)
 
