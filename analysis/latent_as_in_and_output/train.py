@@ -958,12 +958,60 @@ class Trainer:
 
     @torch.no_grad()
     def _compute_z_weight_ratio(self) -> float:
-        W = self.model.mlp.net[0].weight.data # type: ignore
+        if self.latent_input_dim <= 0 or self.feature_input_dim <= 0:
+            return 0.0
+
+        W = self.model.mlp.net[0].weight.data  # type: ignore
         W_feat = W[:, :self.feature_input_dim]
         W_latent = W[:, self.feature_input_dim: self.feature_input_dim + self.latent_input_dim]
-        feat_col_mean = W_feat.norm(p="fro").item() / max(1, self.feature_input_dim)
-        latent_col_mean = W_latent.norm(p="fro").item() / max(1, self.latent_input_dim)
-        return float(latent_col_mean / (feat_col_mean + 1e-12))
+
+        use_interpolation = bool(self.cfg.inference_with_interpolation)
+        ratio_parts: List[torch.Tensor] = []
+        was_training = self.model.training
+        self.model.eval()
+
+        for batch in self.val_loader:
+            inputs, _, bin_idx, sample_idx, mask = self._to_device(batch)
+
+            if self.loss_mode == "sample":
+                bsz, max_bins, n_feat = inputs.shape
+                inputs_flat = inputs.view(bsz * max_bins, n_feat)
+                bin_idx_flat = bin_idx.view(bsz * max_bins)
+                if mask is not None:
+                    valid = mask.bool().view(-1)
+                    inputs_flat = inputs_flat[valid]
+                    bin_idx_flat = bin_idx_flat[valid]
+                if inputs_flat.numel() == 0:
+                    continue
+                interpolation_mask = None
+                if use_interpolation:
+                    interpolation_mask = torch.ones_like(bin_idx_flat, dtype=torch.bool)
+                z_obs = self.model._lookup_input_latent(
+                    bin_idx_flat,
+                    interpolation_mask=interpolation_mask,
+                )
+                feat_contrib = inputs_flat @ W_feat.t()
+            else:
+                interpolation_mask = torch.ones_like(sample_idx, dtype=torch.bool) if use_interpolation else None
+                z_obs = self.model._lookup_input_latent(
+                    bin_idx,
+                    interpolation_mask=interpolation_mask,
+                )
+                feat_contrib = inputs @ W_feat.t()
+
+            latent_contrib = z_obs @ W_latent.t()
+            feat_norm = torch.linalg.vector_norm(feat_contrib, dim=1)
+            latent_norm = torch.linalg.vector_norm(latent_contrib, dim=1)
+            ratio_parts.append(latent_norm / (feat_norm + 1e-12))
+
+        if was_training:
+            self.model.train()
+
+        if not ratio_parts:
+            return 0.0
+
+        ratio_tensor = torch.cat(ratio_parts, dim=0)
+        return float(ratio_tensor.mean().item())
 
     @torch.no_grad()
     def _compute_ablation_delta(self, latent_type: Literal["z", "d", "both"]) -> float:
@@ -994,6 +1042,7 @@ class Trainer:
             "latent_d_std": None,
             "latent_d_min": None,
             "latent_d_max": None,
+            # Backward-compatible key name: now tracks val-set activation contribution ratio.
             "z_weight_norm_ratio": self._compute_z_weight_ratio(),
             "z_ablation_delta": self._compute_ablation_delta("z") if run_abl else None,
             "d_ablation_delta": None,
