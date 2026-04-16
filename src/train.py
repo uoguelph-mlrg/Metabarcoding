@@ -959,7 +959,7 @@ class Trainer:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Metabarcoding training entrypoint")
-    parser.add_argument("--model", type=str, required=True, help="Name of the model variant being trained")
+    parser.add_argument("--model", type=str, default="default_src", help="Name of the model variant being trained")
     parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()

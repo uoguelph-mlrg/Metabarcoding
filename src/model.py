@@ -2,7 +2,6 @@ from typing import Any, Dict, Optional, Literal, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from config import cpu_if_mps
 from gating_functions import make_gating_function
 
 class Model(nn.Module):
@@ -62,8 +61,7 @@ class Model(nn.Module):
         self.H_interp: Optional[torch.Tensor] = None
 
         if interpolation_enabled:
-            interp_device = cpu_if_mps(self.device)
-            self.H_interp = latent_solver.get_interpolation_operator(include_self_in_interpolation, device=interp_device)
+            self.H_interp = latent_solver.get_interpolation_operator(include_self_in_interpolation)
 
         if embed_dim > 1:
             self.gating_fn = gating_fn
