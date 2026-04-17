@@ -72,8 +72,8 @@ class Config:
 
     # MLP - architecture & optimization settings
     mlp_hidden_dims : List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
-    mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
-    weight_decay: float = 1e-5                  # Weight decay for MLP parameters
+    mlp_lr: float = 2e-3                        # Learning rate for MLP parameters
+    weight_decay: float = 1e-4                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
     mlp_warmup_frac: float = 0.1                # Fraction of total training steps used for MLP LR warmup
     mlp_lr_eta_min: float = 1e-6                # Minimum MLP LR reached by cosine decay
