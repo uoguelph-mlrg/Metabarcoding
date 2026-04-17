@@ -110,7 +110,14 @@ class Config:
     gating_epsilon: float = 0.693               # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
 
-from prepare import MBDataset, collate_samples, load, load_or_preprocess, Loss, TIME_BUDGET
+# Guard against circular import: prepare.py imports Config from train, which triggers a fresh
+# import of train as a module while prepare is mid-initialization. Skip the prepare import in
+# that case — prepare only needs Config, not MBDataset/Loss etc.
+import sys as _sys
+_prepare_in_init = 'prepare' in _sys.modules and not hasattr(_sys.modules['prepare'], 'MBDataset')
+if not _prepare_in_init:
+    from prepare import MBDataset, collate_samples, load, load_or_preprocess, Loss, TIME_BUDGET
+del _sys, _prepare_in_init
 
 
 def cpu_if_mps(device: torch.device) -> torch.device:
