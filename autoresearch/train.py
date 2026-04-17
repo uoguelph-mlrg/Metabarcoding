@@ -895,6 +895,7 @@ class MLPModel(nn.Module):
         prev = input_dim
         for h in hidden_dims:
             layers.append(nn.Linear(prev, h))
+            layers.append(nn.BatchNorm1d(h))
             layers.append(nn.ReLU())
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
