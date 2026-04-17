@@ -1894,16 +1894,7 @@ class Trainer:
         self.sample_index = sample_index
         self.split_indices = split_indices
 
-        self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
-        self.neighbour_graph.build()
-
-        latent_solver = LatentSolver(
-            self.cfg,
-            self.neighbour_graph,
-            embed_dim=self.cfg.embed_dim,
-            gating_fn=self.cfg.gating_fn,
-        )
-        latent_solver.build_interpolation_matrix()
+        self.neighbour_graph, latent_solver = self._build_or_load_graph(bins_df)
 
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
@@ -1983,6 +1974,67 @@ class Trainer:
 
         if self.resume:
             self._resume_from_latest()
+
+    def _graph_cache_path(self) -> str:
+        cfg = self.cfg
+        key = (
+            f"K{cfg.K}_mode{cfg.neighbor_mode}"
+            f"_emb{int(cfg.use_embedding)}_tax{int(cfg.use_taxonomy)}"
+            f"_metric{cfg.emb_distance_metric}"
+            f"_interp{cfg.interpolation_method}"
+            f"_q{cfg.kernel_q}_r{cfg.emb_radius}_dt{cfg.dist_thres}"
+        )
+        cache_dir = os.path.join(os.path.dirname(cfg.data_path), "graph_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, f"{key}.pkl")
+
+    def _build_or_load_graph(self, bins_df: pd.DataFrame):
+        cache_path = self._graph_cache_path()
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "rb") as f:
+                    cached = pickle.load(f)
+                ng = NeighbourGraph(self.cfg, bins_df)
+                ng.neighbours = cached["neighbours"]
+                ng.distances = cached["distances"]
+                if len(ng.neighbours) != ng.n_bins:
+                    raise ValueError("Cache bin count mismatch")
+                ls = LatentSolver(self.cfg, ng, embed_dim=self.cfg.embed_dim, gating_fn=self.cfg.gating_fn)
+                ls.H_smooth = cached["H_smooth"]
+                ls.I_minus_H_smooth = cached["I_minus_H_smooth"]
+                ls._I_minus_H_smooth_csc = cached["I_minus_H_smooth_csc"]
+                ls._graph_neighbors = ls._build_graph_active_neighbors()
+                ls._H_interp_csr = {False: cached["H_interp_csr_F"], True: cached["H_interp_csr_T"]}
+                ls.H_interp = {
+                    False: ls._csr_to_torch(ls._H_interp_csr[False]),
+                    True: ls._csr_to_torch(ls._H_interp_csr[True]),
+                }
+                log.info(f"Loaded graph+H matrix from cache: {cache_path}")
+                return ng, ls
+            except Exception as e:
+                log.warning(f"Graph cache load failed ({e}); rebuilding from scratch.")
+
+        ng = NeighbourGraph(self.cfg, bins_df)
+        ng.build()
+        ls = LatentSolver(self.cfg, ng, embed_dim=self.cfg.embed_dim, gating_fn=self.cfg.gating_fn)
+        ls.build_interpolation_matrix()
+
+        try:
+            with open(cache_path, "wb") as f:
+                pickle.dump({
+                    "neighbours": ng.neighbours,
+                    "distances": ng.distances,
+                    "H_smooth": ls.H_smooth,
+                    "I_minus_H_smooth": ls.I_minus_H_smooth,
+                    "I_minus_H_smooth_csc": ls._I_minus_H_smooth_csc,
+                    "H_interp_csr_F": ls._H_interp_csr[False],
+                    "H_interp_csr_T": ls._H_interp_csr[True],
+                }, f, protocol=pickle.HIGHEST_PROTOCOL)
+            log.info(f"Saved graph+H matrix to cache: {cache_path}")
+        except Exception as e:
+            log.warning(f"Failed to save graph cache ({e}).")
+
+        return ng, ls
 
     def _validate_interpolation_config(self) -> None:
         fraction = float(self.cfg.interpolated_sample_fraction)
