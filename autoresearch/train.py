@@ -29,9 +29,6 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from prepare import MBDataset, collate_samples, load, load_or_preprocess, Loss, TIME_BUDGET
-
-
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 @dataclass
@@ -112,6 +109,9 @@ class Config:
     gating_kappa: float = 0.5                   # Scaling factor for tanh gating
     gating_epsilon: float = 0.693               # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
+
+from prepare import MBDataset, collate_samples, load, load_or_preprocess, Loss, TIME_BUDGET
+
 
 def cpu_if_mps(device: torch.device) -> torch.device:
     """Return CPU when device is MPS.
