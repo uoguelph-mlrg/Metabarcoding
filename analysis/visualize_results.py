@@ -39,11 +39,15 @@ Required per-model keys:
 Optional per-model keys (used when present):
     - "latent_vector":  np.ndarray with latent values per BIN (used for latent
                         comparison plots when at least two models provide it)
-    - "train_losses", "val_losses": list of (cycle, epoch, loss) tuples
+    - "train_losses", "val_losses": list of (epoch, loss) tuples
     - "timeline_train_losses", "timeline_val_losses": list of (phase, cycle, step, loss)
     - "cycle_train_losses", "cycle_val_losses": list of (cycle, loss) tuples
-    - "latent_diagnostics": list of dicts with 'epoch', 'weight_norm_ratio',
-                            'embedding_std', 'ablation_delta' keys
+    - "latent_diagnostics": schema depends on trainer variant:
+        - src/train.py style keys include: 'epoch', 'latent_mean', 'latent_std', 'ablation_loss', 
+        and optional final-weight stats.
+        - analysis/latent_as_in_and_output/train.py style keys include: 'epoch', 'latent_z_mean', 
+        'latent_z_std', optional 'latent_d_mean', optional 'latent_d_std', 'z_weight_norm_ratio', 
+        and ablation losses ('z_ablation_loss', 'd_ablation_loss', 'joint_ablation_loss').
 """
 from __future__ import annotations
 
@@ -66,28 +70,26 @@ from matplotlib.colors import Normalize
 from matplotlib.patches import Patch, Rectangle
 from matplotlib.lines import Line2D
 
-# ============================================================================
-# Default color palette (used as fallback for unknown keys)
-# ============================================================================
-
-def _default_colors(labels: Dict[str, str]) -> Dict[str, str]:
-    """Generate a default color mapping for *n* models, using *labels* if available."""
-    palette = np.concatenate([["#95a5a6"], sns.color_palette("tab10").as_hex(), np.column_stack([
-        sns.color_palette("pastel").as_hex(), sns.color_palette("dark").as_hex()
-    ]).flatten()])
-    keys = list(labels.keys())
-    return {k: palette[i % len(palette)] for i, k in enumerate(keys)}
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
+DEFAULT_PALETTE = np.concatenate([["#95a5a6"], sns.color_palette("tab10").as_hex(), np.column_stack([
+    sns.color_palette("pastel").as_hex(), sns.color_palette("dark").as_hex()
+]).flatten()])
+
+def _default_colors(labels: Dict[str, str]) -> Dict[str, str]:
+    """Generate a default color mapping for *n* models, using *labels* if available."""
+    keys = list(labels.keys())
+    return {k: DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)] for i, k in enumerate(keys)}
+
+
 def get_color(key: str, colors: Optional[Dict[str, str]]) -> str:
     """Return a hex color for *key*, falling back to the default palette."""
     if colors and key in colors:
         return colors[key]
-    palette = ["#95a5a6", "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#34495e"]
-    return palette[abs(hash(key)) % len(palette)]
+    return DEFAULT_PALETTE[abs(hash(key)) % len(DEFAULT_PALETTE)]
 
 
 def get_label(key: str, labels: Optional[Dict[str, str]] = None) -> str:
@@ -155,7 +157,7 @@ def _fit_r2_intercept(x: np.ndarray, y: np.ndarray) -> Tuple[Optional[float], Op
     return r2, i0
 
 
-def _safe_spearman_rho(x: np.ndarray, y: np.ndarray) -> Optional[float]:
+def _spearman_rho(x: np.ndarray, y: np.ndarray) -> Optional[float]:
     """Compute Spearman rho and return None if undefined."""
     x_arr = np.asarray(x, dtype=float).reshape(-1)
     y_arr = np.asarray(y, dtype=float).reshape(-1)
@@ -172,7 +174,7 @@ def _safe_spearman_rho(x: np.ndarray, y: np.ndarray) -> Optional[float]:
     return rho if np.isfinite(rho) else None
 
 
-def _bootstrap_shannon_fit_ci(
+def _bootstrap_r2_intercept_ci(
     shannon_true: np.ndarray,
     shannon_pred: np.ndarray,
     n_bootstrap: int = 1000,
@@ -204,10 +206,6 @@ def _bootstrap_shannon_fit_ci(
 
     return _ci(r2_vals), _ci(intercept_vals)
 
-
-# ============================================================================
-# Bootstrap CI
-# ============================================================================
 
 def compute_95ci_bootstrap(errors: np.ndarray, n_bootstrap: int = 1000) -> Tuple[float, float]:
     """Compute 95 % CI of the mean via bootstrap resampling.
@@ -331,7 +329,7 @@ def compute_extended_metrics(
                 shannon_pred_per.append(shannon_pred)
 
             if len(true_s) > 1:
-                rho = _safe_spearman_rho(true_s, pred_s)
+                rho = _spearman_rho(true_s, pred_s)
                 if rho is not None:
                     spearman_per.append(rho)
 
@@ -489,7 +487,7 @@ def plot_metrics_comparison(
                     shannon_true_per_s.append(shannon_true)
                     shannon_pred_per_s.append(shannon_pred)
                 if len(true_s) > 1:
-                    rho = _safe_spearman_rho(true_s, pred_s)
+                    rho = _spearman_rho(true_s, pred_s)
                     if rho is not None:
                         spearman_per_s.append(rho)
         else:
@@ -497,7 +495,7 @@ def plot_metrics_comparison(
             y_tn = (y_true + 1e-10) / (y_true + 1e-10).sum()
             y_pn = (y_pred + 1e-10) / (y_pred + 1e-10).sum()
             kl_div_per_s.append(float(np.sum(y_tn * np.log(y_tn / y_pn))))
-        mae_per_s, kl_div_per_s = np.array(mae_per_s), np.array(kl_div_per_s)
+        mae_per_s, kl_div_per_s, spearman_per_s = np.array(mae_per_s), np.array(kl_div_per_s), np.array(spearman_per_s)
         
         # Get masks for zero vs non-zero true values (used for subgroup CI computation)
         nz = y_true != 0
@@ -507,16 +505,10 @@ def plot_metrics_comparison(
         # Get micro metrics for CI computation
         abs_err = np.abs(y_true - y_pred)
 
-        shannon_r2_ci, shannon_intercept_ci = _bootstrap_shannon_fit_ci(
+        shannon_r2_ci, shannon_intercept_ci = _bootstrap_r2_intercept_ci(
             np.asarray(shannon_true_per_s, dtype=float),
             np.asarray(shannon_pred_per_s, dtype=float),
         )
-        if len(spearman_per_s) > 1:
-            spearman_ci = compute_95ci_bootstrap(np.asarray(spearman_per_s, dtype=float))
-        elif len(spearman_per_s) == 1:
-            spearman_ci = (spearman_per_s[0], spearman_per_s[0])
-        else:
-            spearman_ci = None
         
         cis[model] = {
             'MAE (macro)': compute_95ci_bootstrap(mae_per_s),
@@ -525,7 +517,7 @@ def plot_metrics_comparison(
             "KL Divergence": compute_95ci_bootstrap(kl_div_per_s),
             "MAE (zeros)": compute_95ci_bootstrap(abs_err[zero_m]),
             "MAE (non-zeros)": compute_95ci_bootstrap(abs_err[nonzero_m]),
-            "Spearman Rho (macro)": spearman_ci,
+            "Spearman Rho (macro)": compute_95ci_bootstrap(spearman_per_s),
             "R² (Shannon diversity)": shannon_r2_ci,
             "Shannon intercept": shannon_intercept_ci,
             "R² (log + 1)": None,
@@ -1265,81 +1257,220 @@ def plot_training_progress_comparison(
 # Plot 11 – Latent importance diagnostics (optional, specific to latent models)
 # ============================================================================
 
-def plot_latent_importance_diagnostics(
+def plot_latent_diagnostics(
     results: Dict[str, Any],
     output_dir: str,
-    model_key: str = "latent_as_input",
 ) -> None:
     """Visualise whether the MLP actually uses the latent embedding.
 
-    Three panels:
-      1. Weight norm ratio (latent columns vs feature columns in MLP first layer).
-      2. Latent embedding std over training.
-      3. Ablation delta (optional) — val-loss increase when latent is zeroed.
-
-    Silently skipped when *model_key* is absent or has no ``latent_diagnostics``.
+    Each model gets its own row. Three to four panels per row depending on available diagnostics:
+    1. Latent distribution over epochs (mean line with std band).
+    2. Z weight-ratio trend (only if the ratio key exists).
+    3. Validation and ablation losses over epochs.
+    4. Delta bars (validation loss minus ablated loss).
     """
-    if model_key not in results:
-        log.info(f"  (Skipping latent diagnostics — key '{model_key}' not in results.)")
-        return
-    diagnostics = results[model_key].get("latent_diagnostics", [])
-    if not diagnostics:
-        log.info("  (Skipping latent diagnostics — no 'latent_diagnostics' data recorded.)")
+    model_keys = [
+        key for key in results if isinstance(results.get(key), dict) and results[key].get("latent_diagnostics")
+    ]
+    if not model_keys:
+        log.info("  (Skipping latent diagnostics — no model provides latent_diagnostics.)")
         return
 
+    def _epoch_loss_map(items: Any) -> Dict[int, float]:
+        out: Dict[int, float] = {}
+        for item in items or []:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            try:
+                epoch = int(item[0])
+                loss = float(item[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if np.isfinite(loss):
+                out[epoch] = loss
+        return out
+
+    def _series(diags: List[Dict[str, Any]], keys: List[str]) -> List[Tuple[int, float]]:
+        series: List[Tuple[int, float]] = []
+        for diag in diags:
+            epoch_raw = diag.get("epoch")
+            if epoch_raw is None:
+                continue
+            try:
+                epoch = int(epoch_raw)
+            except (TypeError, ValueError):
+                continue
+            value = None
+            for key in keys:
+                raw = diag.get(key)
+                if raw is None:
+                    continue
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(value):
+                    break
+                value = None
+            if value is not None:
+                series.append((epoch, value))
+        series.sort(key=lambda pair: pair[0])
+        return series
+
+    def _with_std(mean_series: List[Tuple[int, float]], std_series: List[Tuple[int, float]]) -> Tuple[List[int], List[float], List[float]]:
+        std_map = {epoch: value for epoch, value in std_series}
+        xs: List[int] = []
+        means: List[float] = []
+        stds: List[float] = []
+        for epoch, mean in mean_series:
+            std = std_map.get(epoch)
+            if std is not None:
+                xs.append(epoch)
+                means.append(mean)
+                stds.append(std)
+        return xs, means, stds
+
+    def _delta_series(val_map: Dict[int, float], ab_map: Dict[int, float]) -> List[Tuple[int, float]]:
+        return [(epoch, val_map[epoch] - ab_map[epoch]) for epoch in sorted(val_map) if epoch in ab_map]
+
+    rows: List[Dict[str, Any]] = []
+    any_ratio = False
+    for key in model_keys:
+        model_results = results[key]
+        diags = [diag for diag in model_results.get("latent_diagnostics", []) if isinstance(diag, dict)]
+        if not diags:
+            continue
+
+        val_map = _epoch_loss_map(model_results.get("val_losses", []))
+        ratio = _series(diags, ["z_weight_norm_ratio"])
+        any_ratio = any_ratio or bool(ratio)
+
+        z_mean = _series(diags, ["latent_z_mean"])
+        z_std = _series(diags, ["latent_z_std"])
+        d_mean = _series(diags, ["latent_d_mean", "latent_mean"])
+        d_std = _series(diags, ["latent_d_std", "latent_std"])
+
+        ablation_z = _series(diags, ["z_ablation_loss"])
+        ablation_d = _series(diags, ["d_ablation_loss"])
+        ablation_joint = _series(diags, ["joint_ablation_loss", "ablation_loss"])
+
+        rows.append({
+            "model": key,
+            "label": get_label(key, labels),
+            "val_map": val_map,
+            "ratio": ratio,
+            "z": _with_std(z_mean, z_std),
+            "d": _with_std(d_mean, d_std),
+            "ablation_z": ablation_z,
+            "ablation_d": ablation_d,
+            "ablation_joint": ablation_joint,
+        })
+
+    if not rows:
+        log.info("  (Skipping latent diagnostics — no valid latent diagnostics rows found.)")
+        return
+
+    n_cols = 4 if any_ratio else 3
     set_style()
-    epochs = [d["epoch"] for d in diagnostics]
-    ratios = [d["weight_norm_ratio"] for d in diagnostics]
-    emb_stds = [d["embedding_std"] for d in diagnostics]
-    ab_epochs = [d["epoch"] for d in diagnostics if d.get("ablation_delta") is not None]
-    ab_deltas = [d["ablation_delta"] for d in diagnostics if d.get("ablation_delta") is not None]
+    fig, axes = plt.subplots(len(rows), n_cols, figsize=(6 * n_cols, 4.2 * len(rows)), squeeze=False)
+    fig.suptitle("Latent Importance Diagnostics", fontsize=13, y=0.995)
 
-    n_panels = 3 if ab_epochs else 2
-    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
-    if n_panels == 2:
-        axes = list(axes)
-    fig.suptitle("Latent-as-Input: Does the MLP Actually Use the Latent?", fontsize=13, y=1.01)
+    for row_idx, row in enumerate(rows):
+        label = row["label"]
+        val_map: Dict[int, float] = row["val_map"]
+        ratio = row["ratio"]
+        z_x, z_m, z_s = row["z"]
+        d_x, d_m, d_s = row["d"]
+        ablation_z = row["ablation_z"]
+        ablation_d = row["ablation_d"]
+        ablation_joint = row["ablation_joint"]
 
-    ax = axes[0]
-    ax.plot(epochs, ratios, color="steelblue", lw=1.8, label="latent/feat ratio")
-    ax.axhline(1.0, color="gray", ls="--", lw=1, alpha=0.7, label="ratio = 1")
-    ax.fill_between(epochs, 0, ratios, alpha=0.12, color="steelblue")
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel("Epoch"); ax.set_ylabel("Per-column mean weight norm ratio")
-    ax.set_title("Latent vs Feature Weight Activity\nin MLP First Layer")
-    ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
-    ax.annotate(f"{ratios[0]:.3f}", xy=(epochs[0], ratios[0]), xytext=(8, 8),
-                textcoords="offset points", fontsize=8, color="steelblue")
-    ax.annotate(f"{ratios[-1]:.3f}", xy=(epochs[-1], ratios[-1]), xytext=(-30, 8),
-                textcoords="offset points", fontsize=8, color="steelblue")
+        col = 0
 
-    ax = axes[1]
-    ax.plot(epochs, emb_stds, color="darkorange", lw=1.8, label="embedding std")
-    ax.fill_between(epochs, 0, emb_stds, alpha=0.12, color="darkorange")
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel("Epoch"); ax.set_ylabel("Std of latent embedding weights")
-    ax.set_title("Latent Embedding Activity\n(≈ 0 → embedding collapsed / not used)")
-    ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
-    ax.annotate(f"{emb_stds[0]:.4f}", xy=(epochs[0], emb_stds[0]), xytext=(8, 8),
-                textcoords="offset points", fontsize=8, color="darkorange")
-    ax.annotate(f"{emb_stds[-1]:.4f}", xy=(epochs[-1], emb_stds[-1]), xytext=(-40, 8),
-                textcoords="offset points", fontsize=8, color="darkorange")
-
-    if ab_epochs:
-        ax = axes[2]
-        bar_colors = ["#2ca02c" if d >= 0 else "#d62728" for d in ab_deltas]
-        w = max(1, (ab_epochs[-1] - ab_epochs[0]) / max(len(ab_epochs), 1) * 0.8) if len(ab_epochs) > 1 else 5
-        ax.bar(ab_epochs, ab_deltas, color=bar_colors, alpha=0.75, width=w)
-        ax.axhline(0.0, color="gray", ls="--", lw=1, alpha=0.7)
-        ax.set_xlabel("Epoch"); ax.set_ylabel("Δ Val loss (zeroed latent − normal)")
-        ax.set_title("Latent Ablation Delta\n(> 0 → latent reduces loss; ≈ 0 → MLP ignores it)")
+        ax = axes[row_idx, col]
+        col += 1
+        if z_x:
+            ax.plot(z_x, z_m, color="steelblue", lw=1.8, label="latent z mean")
+            ax.fill_between(z_x, np.array(z_m) - np.array(z_s), np.array(z_m) + np.array(z_s),
+                            color="steelblue", alpha=0.18, label="latent z ±1 std")
+        if d_x:
+            ax.plot(d_x, d_m, color="#2ca02c", lw=1.8, label="latent d mean")
+            ax.fill_between(d_x, np.array(d_m) - np.array(d_s), np.array(d_m) + np.array(d_s),
+                            color="#2ca02c", alpha=0.18, label="latent d ±1 std")
+        ax.set_title(f"{label}: latent distributions")
+        ax.set_ylabel("latent value")
         ax.grid(True, alpha=0.3)
-        ax.legend(handles=[
-            Rectangle((0, 0), 1, 1, color="#2ca02c", alpha=0.75, label="latent helps (Δ > 0)"),
-            Rectangle((0, 0), 1, 1, color="#d62728", alpha=0.75, label="latent hurts (Δ < 0)"),
-        ], fontsize=9)
+        if row_idx == len(rows) - 1:
+            ax.set_xlabel("epoch")
+        if row_idx == 0:
+            ax.legend(fontsize=8)
 
-    plt.tight_layout()
+        if n_cols == 4:
+            ax = axes[row_idx, col]
+            col += 1
+            if ratio:
+                rx = [epoch for epoch, _ in ratio]
+                ry = [value for _, value in ratio]
+                ax.plot(rx, ry, color="purple", lw=1.8, label="z_weight_norm_ratio")
+                ax.axhline(1.0, color="gray", ls="--", lw=1, alpha=0.7)
+                ax.fill_between(rx, 0, ry, color="purple", alpha=0.12)
+                ax.set_ylim(bottom=0)
+                ax.set_title("z weight norm ratio")
+                ax.grid(True, alpha=0.3)
+                if row_idx == len(rows) - 1:
+                    ax.set_xlabel("epoch")
+                if row_idx == 0:
+                    ax.legend(fontsize=8)
+            else:
+                ax.axis("off")
+
+        ax = axes[row_idx, col]
+        col += 1
+        if val_map:
+            epochs = sorted(val_map)
+            ax.plot(epochs, [val_map[e] for e in epochs], color="black", lw=2.0, label="validation loss")
+        if ablation_joint:
+            ax.plot([e for e, _ in ablation_joint], [v for _, v in ablation_joint], color="#d62728", lw=1.9,
+                    marker="o", ms=4, label="latent ablation loss")
+        elif ablation_z:
+            ax.plot([e for e, _ in ablation_z], [v for _, v in ablation_z], color="steelblue", lw=1.9,
+                    marker="o", ms=4, label="z-only ablation loss")
+        elif ablation_d:
+            ax.plot([e for e, _ in ablation_d], [v for _, v in ablation_d], color="#2ca02c", lw=1.9,
+                    marker="o", ms=4, label="d-only ablation loss")
+        ax.set_title("validation and ablation losses")
+        ax.set_ylabel("loss")
+        ax.grid(True, alpha=0.3)
+        if row_idx == len(rows) - 1:
+            ax.set_xlabel("epoch")
+        if row_idx == 0:
+            ax.legend(fontsize=8)
+
+        ax = axes[row_idx, col]
+        delta_pairs: List[Tuple[int, float]] = []
+        if ablation_joint:
+            ab_map = {epoch: loss for epoch, loss in ablation_joint}
+            delta_pairs = _delta_series(val_map, ab_map)
+            delta_label = "validation - latent ablation"
+        if delta_pairs:
+            dx = [epoch for epoch, _ in delta_pairs]
+            dy = [value for _, value in delta_pairs]
+            colors = ["#2ca02c" if value >= 0 else "#d62728" for value in dy]
+            width = max(1, (dx[-1] - dx[0]) / max(len(dx), 1) * 0.8) if len(dx) > 1 else 5
+            ax.bar(dx, dy, width=width, color=colors, alpha=0.8)
+            ax.axhline(0.0, color="gray", ls="--", lw=1, alpha=0.8)
+        ax.set_title("delta bars")
+        ax.set_ylabel(delta_label if delta_pairs else "delta")
+        ax.grid(True, alpha=0.3)
+        if row_idx == len(rows) - 1:
+            ax.set_xlabel("epoch")
+        if row_idx == 0 and delta_pairs:
+            ax.legend(handles=[
+                Patch(facecolor="#2ca02c", edgecolor="white", label="latent helps (delta > 0)"),
+                Patch(facecolor="#d62728", edgecolor="white", label="latent hurts (delta < 0)"),
+            ], fontsize=8)
+
+    plt.tight_layout(rect=(0, 0, 1, 0.985))
     plt.savefig(os.path.join(output_dir, "latent_importance_diagnostics.png"), dpi=150, bbox_inches="tight")
     plt.close()
     log.info("  ✓ Saved: latent_importance_diagnostics.png")
@@ -1658,7 +1789,7 @@ def create_all_visualizations(
     plot_training_progress_comparison(results, output_dir, colors, labels)
 
     log.info("11. Latent importance diagnostics (if available)...")
-    plot_latent_importance_diagnostics(results, output_dir, model_key=latent_model_key)
+    plot_latent_diagnostics(results, output_dir)
 
     log.info("12. Latent vector comparison (if available)...")
     plot_latent_comparison(results, output_dir, colors, labels)
