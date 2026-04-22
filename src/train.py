@@ -31,7 +31,7 @@ from loss import Loss
 from mlp import MLPModel
 from model import Model
 from neighbor_graph import NeighbourGraph
-from utils import load
+from utils import load, PREPROCESSING_STATE_FILENAME
 
 
 class Trainer:
@@ -68,17 +68,26 @@ class Trainer:
         self.base_artifact_dir = os.path.abspath(os.path.join(self.cfg.results_dir, self.model_name))
         self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.preprocessing_state_path = self._checkpoint_path(PREPROCESSING_STATE_FILENAME)
 
-        data, bins_df, bin_index, sample_index, split_indices = load(
+        if self.resume and not os.path.exists(self.preprocessing_state_path):
+            raise ValueError(
+                "Resume requested but preprocessing artifact is missing: "
+                f"{self.preprocessing_state_path}."
+            )
+
+        data, bins_df, bin_index, sample_index, split_indices, preprocessing_state_path = load(
             self.cfg,
             save_data=False,
             fixed_split_indices=fixed_split_indices,
+            preprocessing_state_path=self.preprocessing_state_path,
         )
 
         self.data = data
         self.bin_index = bin_index
         self.sample_index = sample_index
         self.split_indices = split_indices
+        self.preprocessing_state_path = preprocessing_state_path
 
         self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
         self.neighbour_graph.build()
@@ -228,6 +237,7 @@ class Trainer:
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "latent_diagnostics": self.latent_diagnostics,
+            "preprocessing_state_path": self.preprocessing_state_path,
             "rng_numpy": np.random.get_state(),
             "rng_torch": torch.get_rng_state(),
             "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -331,6 +341,7 @@ class Trainer:
             interpolation_mask = None
             if self.cfg.train_MLP_with_interpolation and self._has_interpolation_samples(sample_selection):
                 # Expand sample-level selection to observation-level and drop padded bins.
+                assert sample_selection is not None
                 interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                 if mask is not None:
                     interpolation_mask = interpolation_mask & mask.bool()
@@ -445,6 +456,7 @@ class Trainer:
                 valid = mask.bool() if mask is not None else torch.ones_like(bin_ids, dtype=torch.bool)
                 interpolation_mask = None
                 if self._has_interpolation_samples(sample_selection):
+                    assert sample_selection is not None
                     interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                     interpolation_mask = interpolation_mask & valid
                     interpolation_mask = interpolation_mask[valid]
@@ -457,6 +469,7 @@ class Trainer:
                 intrinsic = self.model.mlp(inputs)
                 interpolation_mask = None
                 if self._has_interpolation_samples(sample_selection):
+                    assert sample_selection is not None
                     interpolation_mask = sample_selection.to(dtype=torch.bool)
 
         previous_requires_grad = self.model.latent_vec.requires_grad
@@ -920,13 +933,12 @@ class Trainer:
         }
 
     @torch.no_grad()
-    def _compute_ablation_delta(self) -> float:
+    def _compute_ablation_loss(self) -> float:
         saved = self.model.latent_vec.data.clone()
         self.model.latent_vec.data.zero_()
         loss_no_latent = self.validate(split="val")
         self.model.latent_vec.data.copy_(saved)
-        loss_with_latent = self.validate(split="val")
-        return float(loss_no_latent - loss_with_latent)
+        return float(loss_no_latent)
 
     def _collect_diagnostics(self, epoch: int, run_abl: bool = False) -> Dict[str, Any]:
         diag: Dict[str, Any] = {
@@ -936,7 +948,7 @@ class Trainer:
             "latent_std": float(self.model.latent_vec.data.std(dim=0).mean().item()),
             "latent_min": float(self.model.latent_vec.data.min().item()),
             "latent_max": float(self.model.latent_vec.data.max().item()),
-            "ablation_delta": self._compute_ablation_delta() if run_abl else None,
+            "ablation_loss": self._compute_ablation_loss() if run_abl else None,
             "final_weight_mean": float(self.model.final_linear.weight.data.mean().item()) if self.cfg.embed_dim > 1 else None,
             "final_weight_std": float(self.model.final_linear.weight.data.std().item()) if self.cfg.embed_dim > 1 else None,
             "final_weight_norm": float(self.model.final_linear.weight.data.norm().item()) if self.cfg.embed_dim > 1 else None,

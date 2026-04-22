@@ -1,6 +1,8 @@
 # Features to use in MLP (observation-level + computed bin-level)
-from typing import Tuple, Dict, Any, Literal, Optional
+from typing import Tuple, Dict, Any, Literal, Optional, List
 import os
+import pickle
+import tempfile
 import pandas as pd
 import numpy as np
 from config import Config
@@ -13,11 +15,11 @@ OBSERVATION_FEATURES = [
     "latitude", 
     "longitude",
     "Excess",
-    "Bulk_Sample_wet_weight",
+    #"Bulk_Sample_wet_weight",
     "SumExcessSpecimens",
     "ExcessNumberTaxa",
-    "length_min_mm", 
-    "length_max_mm",
+    #"length_min_mm", 
+    #"length_max_mm",
     # Computed bin-level features
     "collection_day",   # derived from collection_start_date
     "total_reads_norm", # total_reads normalized by sample total
@@ -27,29 +29,56 @@ OBSERVATION_FEATURES = [
 ]
 
 TAXONOMY_FEATURES = [
-    "kingdom",
+    #"kingdom",
     "phylum",
     "class",
     "order",
     "family",
-    "subfamily",
+    #"subfamily",
     "genus",
     "species"
 ]
 
+PREPROCESSING_STATE_FILENAME = "preprocessing_state.pkl"
+
+
+def _default_preprocessing_state_path(config: Config, filename: str = PREPROCESSING_STATE_FILENAME) -> str:
+    data_dir = os.path.abspath(config.results_dir)
+    return os.path.join(data_dir, filename)
+
+def save_preprocessing_state(path: str, state: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", delete=False, dir=os.path.dirname(path)) as tmp:
+        pickle.dump(state, tmp, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp_path = tmp.name
+    os.replace(tmp_path, path)
+
+def load_preprocessing_state(path: str) -> Dict[str, Any]:
+    with open(path, "rb") as fh:
+        state = pickle.load(fh)
+    if not isinstance(state, dict):
+        raise ValueError(f"Invalid preprocessing state in {path}: expected dict")
+    return state
+
 def load(
     config: Config, 
     save_data: bool = True,
-    fixed_split_indices: Optional[Dict[str, np.ndarray]] = None
-) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
+    fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
+    preprocessing_state_path: Optional[str] = None,
+    preprocessing_state_filename: str = PREPROCESSING_STATE_FILENAME,
+) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str]:
     """
     Load and preprocess the CSV data.
 
     Args:
         config: Configuration object with train_frac, val_frac
         save_data: Whether to save split CSVs to disk
-        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing
-                            sample indices for reproducible splits across different calls
+        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample 
+            indices for reproducible splits across different calls
+        preprocessing_state_path: Optional path to preprocessing state file; used for replay mode 
+            when the file already exists. If missing, preprocessing is computed and the artifact is 
+            written there.
+        preprocessing_state_filename: Artifact filename used when writing default state
 
     Returns:
     Tuple containing:
@@ -58,7 +87,15 @@ def load(
         - bin_index: mapping bin_uri -> col index
         - sample_index: mapping sample_id -> row index
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
+        - preprocessing_state_path: path to the saved preprocessing state artifact 
     """
+    replay_state: Optional[Dict[str, Any]] = None
+    if preprocessing_state_path is not None and os.path.exists(preprocessing_state_path):
+        replay_state = load_preprocessing_state(preprocessing_state_path)
+
+    default_state_path = _default_preprocessing_state_path(config, preprocessing_state_filename)
+    resolved_state_path = os.path.abspath(preprocessing_state_path) if preprocessing_state_path else default_state_path
+
     df = pd.read_csv(config.data_path)
 
     # Rename columns to match expected format
@@ -143,7 +180,18 @@ def load(
 
     # Build df_long with required columns + features
     base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
-    feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
+    if replay_state is not None:
+        feature_cols_present = list(replay_state.get("feature_cols_present", []))
+        if not feature_cols_present:
+            raise ValueError("Preprocessing replay failed: missing 'feature_cols_present' in artifact")
+        replay_missing = [c for c in feature_cols_present if c not in df.columns]
+        if replay_missing:
+            raise ValueError(
+                "Preprocessing replay failed: expected feature columns are missing from input data: "
+                + ", ".join(replay_missing)
+            )
+    else:
+        feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
     df_long = df[base_cols + feature_cols_present].copy()
 
     # Build taxonomic_data with taxonomy and features
@@ -152,9 +200,9 @@ def load(
     # Ensure taxonomic_data is ordered by bin_index
     taxonomic_data["_idx"] = taxonomic_data["bin_uri"].map(bin_index)
     taxonomic_data = taxonomic_data.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
-
-    # Create train/val/test splits at sample level
-    # Use fixed indices if provided for reproducibility across calls
+    
+    # Create train/val/test splits at sample level.
+    # Use fixed indices if provided for reproducibility across calls.
     if fixed_split_indices is not None:
         train_sample_idx = fixed_split_indices["train"]
         val_sample_idx = fixed_split_indices["val"]
@@ -169,7 +217,7 @@ def load(
             )
             fixed_split_indices = None
 
-    if fixed_split_indices is None:
+    else:
         sample_indices = np.arange(n_samples)
         np.random.shuffle(sample_indices)
 
@@ -187,26 +235,68 @@ def load(
         "test": test_sample_idx,
     }
 
-    # Fill missing numeric features with their median values given the BIN in the training set
-    X = df_long.loc[
-        df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), feature_cols_present + ["bin_uri"]
-    ]
-    bin_medians = X.groupby("bin_uri").median()
+    if replay_state is not None:
+        train_feature_means = dict(replay_state.get("train_feature_means", {}))
+        train_feature_stds = dict(replay_state.get("train_feature_stds", {}))
+        bin_medians = pd.DataFrame(replay_state.get("bin_medians", {}))
+        feature_medians = pd.Series(replay_state.get("feature_medians", {}))
+    else:
+        # Fill missing numeric features with their median values given the BIN in the training set.
+        X = df_long.loc[
+            df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), feature_cols_present + ["bin_uri"]
+        ]
+        train_feature_means = X.mean().to_dict()
+        train_feature_stds = X.std(ddof=0).to_dict()
+        bin_medians = X.groupby("bin_uri").median()
+        feature_medians = X.median()
+
     for col in feature_cols_present:
-        if col not in bin_medians.columns:
-            continue
-        median_map = bin_medians[col].to_dict()
+        median_map = dict(bin_medians.get(col, {}))
         # First pass: fill NaNs with the BIN-specific train-set median (vectorized).
         missing = df_long[col].isna()
         df_long.loc[missing, col] = df_long.loc[missing, "bin_uri"].map(median_map)
         # Second pass: global fallback for BINs with no usable train median.
-        df_long[col] = df_long[col].fillna(df_long[col].median())
-    
-    # Normalize based on training set statistics
-    for col in feature_cols_present:
-        # Avoid division by zero by stabilizing the denominator (not by shifting the standardized feature)
-        std = float(X[col].std(ddof=0))
-        df_long[col] = (df_long[col] - float(X[col].mean())) / (std + 1e-10)
+        if col not in feature_medians:
+            raise ValueError(f"Preprocessing replay failed: missing global median for feature '{col}'")
+        df_long[col] = df_long[col].fillna(float(feature_medians[col]))
+
+        if col not in train_feature_means or col not in train_feature_stds:
+            raise ValueError(f"Preprocessing replay failed: missing mean/std for feature '{col}'")
+        std = float(train_feature_stds[col])
+        mean = float(train_feature_means[col])
+        df_long[col] = (df_long[col] - mean) / (std + 1e-10)
+        
+
+    if replay_state is None:
+        # Store the sample IDs corresponding to each split for reproducibility and downstream use.
+        split_sample_ids = {
+            "train": unique_samples[train_sample_idx].tolist(),
+            "val": unique_samples[val_sample_idx].tolist(),
+            "test": unique_samples[test_sample_idx].tolist(),
+        }
+        state = {
+            "source_data_path": os.path.abspath(config.data_path),
+            "feature_cols_present": feature_cols_present,
+            "log_transform_columns": [
+                c for c in ["total_reads_per_sample", "total_reads_norm", "avg_reads_norm", "max_reads_norm", "min_reads_norm"]
+                if c in feature_cols_present
+            ],
+            "train_feature_means": train_feature_means,
+            "train_feature_stds": train_feature_stds,
+            "feature_medians": feature_medians.to_dict(),
+            "bin_medians": bin_medians.to_dict(),
+            "split_indices": {
+                "train": train_sample_idx.astype(np.int64).tolist(),
+                "val": val_sample_idx.astype(np.int64).tolist(),
+                "test": test_sample_idx.astype(np.int64).tolist(),
+            },
+            "split_sample_ids": split_sample_ids,
+            "sample_filter": {
+                "enabled": len(sample_reads) > 0,
+                "threshold": float(reads_threshold) if len(sample_reads) > 0 else None,
+            },
+        }
+        save_preprocessing_state(resolved_state_path, state)
 
     # Get train, val, test data
     def compute_data_split(df_long, sample_idx):
@@ -235,11 +325,13 @@ def load(
             pd.Series(y).to_csv(f"{data_path}/y_{split}.csv", index=False)
         taxonomic_data.to_csv(f"{data_path}/taxonomic_data.csv", index=False)
 
-    return {
+    result = ({
         "train": {"X": X_train, "y": y_train, "y_prob": y_train},
         "val": {"X": X_val, "y": y_val, "y_prob": y_val},
         "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-    }, taxonomic_data, bin_index, sample_index, split_indices
+    }, taxonomic_data, bin_index, sample_index, split_indices, resolved_state_path)
+
+    return result
 
 
 def load_processed(
