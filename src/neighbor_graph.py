@@ -121,16 +121,10 @@ class NeighbourGraph:
         Returns:
             Dict[str, np.ndarray]: {bin_uri: np.ndarray of shape [hidden_dim]}
         """
-        try:
-            from transformers import AutoTokenizer, AutoModel
-            import torch
-        except ImportError as e:
-            raise ImportError(
-                "BarcodeBERT inference requires the 'transformers' and 'torch' packages. "
-                "Install them with: pip install transformers torch"
-            ) from e
+        from transformers import AutoTokenizer, AutoModel
+        import torch
 
-        MODEL_NAME = "bioscan-ml/BarcodeBERT"
+        MODEL_NAME = "emmabhl/BarcodeBERT_finetuned"
         log.info(f"Loading BarcodeBERT from HuggingFace ({MODEL_NAME}) ...")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
         model = AutoModel.from_pretrained(MODEL_NAME, trust_remote_code=True)
