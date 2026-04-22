@@ -26,7 +26,7 @@ class Config:
         "cpu"
     )
     batch_size_bin: int = 1024                  # Batch size (in number of observations not samples)
-    batch_size_sample: int = 8                  # Batch size in number of samples
+    batch_size_sample: int = 16                 # Batch size in number of samples
     epochs: int = 200                           # Epochs per training phase
     grad_clip: Optional[float] = 1.0            # Gradient clipping value (None to disable)
 
@@ -47,11 +47,11 @@ class Config:
 
     # MLP - architecture & optimization settings
     mlp_hidden_dims : List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
-    mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
-    weight_decay: float = 1e-5                  # Weight decay for MLP parameters
+    mlp_lr: float = 7e-4                        # Learning rate for MLP parameters
+    weight_decay: float = 1e-4                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
     mlp_warmup_frac: float = 0.1                # Fraction of total training steps used for MLP LR warmup
-    mlp_lr_eta_min: float = 1e-6                # Minimum MLP LR reached by cosine decay
+    mlp_lr_eta_min: float = 1e-4                # Minimum MLP LR reached by cosine decay
     dropout: float = 0.15                       # Dropout rate in MLP
 
     # Latent solver - regularization settings
