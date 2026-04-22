@@ -1014,7 +1014,7 @@ class Trainer:
         return float(ratio_tensor.mean().item())
 
     @torch.no_grad()
-    def _compute_ablation_delta(self, latent_type: Literal["z", "d", "both"]) -> float:
+    def _compute_ablation_loss(self, latent_type: Literal["z", "d", "both"]) -> float:
         latent_to_zero = ["z", "d"] if latent_type == "both" else [latent_type]
         if "z" in latent_to_zero:
             saved_z = self.model.latent_z.data.clone()
@@ -1029,8 +1029,7 @@ class Trainer:
             self.model.latent_z.data.copy_(saved_z)
         if "d" in latent_to_zero:
             self.model.latent_d.data.copy_(saved_d)
-        loss_with_latent = self.validate(split="val")
-        return float(loss_no_latent - loss_with_latent)
+        return float(loss_no_latent)
 
     def _collect_diagnostics(self, epoch: int, run_abl: bool = False) -> Dict[str, Any]:
         diag: Dict[str, Any] = {
@@ -1044,9 +1043,9 @@ class Trainer:
             "latent_d_max": None,
             # Backward-compatible key name: now tracks val-set activation contribution ratio.
             "z_weight_norm_ratio": self._compute_z_weight_ratio(),
-            "z_ablation_delta": self._compute_ablation_delta("z") if run_abl else None,
-            "d_ablation_delta": None,
-            "joint_ablation_delta": None,
+            "z_ablation_loss": self._compute_ablation_loss("z") if run_abl else None,
+            "d_ablation_loss": None,
+            "joint_ablation_loss": None,
             "final_weight_mean": None,
             "final_weight_std": None,
             "final_weight_norm": None,
@@ -1056,8 +1055,8 @@ class Trainer:
             diag["latent_d_std"] = float(self.model.latent_d.data.std().item())
             diag["latent_d_min"] = float(self.model.latent_d.data.min().item())
             diag["latent_d_max"] = float(self.model.latent_d.data.max().item())
-            diag["d_ablation_delta"] = self._compute_ablation_delta("d") if run_abl else None
-            diag["joint_ablation_delta"] = self._compute_ablation_delta("both") if run_abl else None
+            diag["d_ablation_loss"] = self._compute_ablation_loss("d") if run_abl else None
+            diag["joint_ablation_loss"] = self._compute_ablation_loss("both") if run_abl else None
         if self.cfg.embed_dim > 1:
             diag["final_weight_mean"] = float(self.model.final_linear.weight.data.mean().item())
             diag["final_weight_std"] = float(self.model.final_linear.weight.data.std().item())
