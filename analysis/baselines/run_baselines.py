@@ -181,35 +181,6 @@ def run_all_baselines(
             print(f"Error training {name}: {e}")
             continue
 
-    # =============================
-    # Add Latent+MLP (Cross-Entropy)
-    # =============================
-    try:
-        import sys
-        import importlib
-        sys.path.insert(0, '../../src')
-        config_mod = importlib.import_module('config')
-        train_mod = importlib.import_module('train')
-        set_seed = getattr(config_mod, 'set_seed')
-        Config = getattr(config_mod, 'Config')
-        Trainer = getattr(train_mod, 'Trainer')
-        set_seed(14)
-        cfg = Config()
-        latent_trainer = Trainer(cfg)
-        latent_results = latent_trainer.run(use_wandb=False)
-        # Compute metrics using baselines' compute_metrics
-        from evaluate import compute_metrics, compute_sample_level_metrics
-        y_pred = latent_results["predictions"]
-        y_true = latent_results["targets"]
-        val_metrics = compute_metrics(y_true, y_pred)  # Use test split for fair comparison
-        # No sample-level metrics for now (unless needed)
-        test_results["latent_mlp"] = val_metrics
-        all_results["latent_mlp"] = {"val": val_metrics, "test": val_metrics}
-        unified_results["latent_mlp"] = latent_results
-        print("\nLatent+MLP (cross-entropy) model evaluated and added to results.")
-    except Exception as e:
-        print(f"Error training latent+MLP model: {e}")
-
     # Print comparison table
     print_metrics_table(test_results)
     

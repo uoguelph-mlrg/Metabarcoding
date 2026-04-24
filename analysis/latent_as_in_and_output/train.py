@@ -31,7 +31,7 @@ from loss import Loss
 from mlp import MLPModel
 from model import Model
 from neighbor_graph import NeighbourGraph
-from utils import load
+from utils import load, PREPROCESSING_STATE_FILENAME
 
 
 class Trainer:
@@ -52,7 +52,9 @@ class Trainer:
         self.resume = resume
         self._validate_interpolation_config()
 
-        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and self.cfg.embedding_path is None:
+        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and (
+            self.cfg.embedding_path is None or not os.path.exists(self.cfg.embedding_path)
+        ):
             self.cfg.barcode_data_path = self.cfg.data_path
 
         self.start_epoch = 0
@@ -66,17 +68,26 @@ class Trainer:
         self.base_artifact_dir = os.path.abspath(os.path.join(self.cfg.results_dir, self.model_name))
         self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.preprocessing_state_path = self._checkpoint_path(PREPROCESSING_STATE_FILENAME)
 
-        data, bins_df, bin_index, sample_index, split_indices = load(
+        if self.resume and not os.path.exists(self.preprocessing_state_path):
+            raise ValueError(
+                "Resume requested but preprocessing artifact is missing: "
+                f"{self.preprocessing_state_path}."
+            )
+
+        data, bins_df, bin_index, sample_index, split_indices, preprocessing_state_path = load(
             self.cfg,
             save_data=False,
             fixed_split_indices=fixed_split_indices,
+            preprocessing_state_path=self.preprocessing_state_path,
         )
 
         self.data = data
         self.bin_index = bin_index
         self.sample_index = sample_index
         self.split_indices = split_indices
+        self.preprocessing_state_path = preprocessing_state_path
 
         self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
         self.neighbour_graph.build()
@@ -247,6 +258,7 @@ class Trainer:
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "latent_diagnostics": self.latent_diagnostics,
+            "preprocessing_state_path": self.preprocessing_state_path,
             "rng_numpy": np.random.get_state(),
             "rng_torch": torch.get_rng_state(),
             "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -324,6 +336,13 @@ class Trainer:
 
         log.info(f"Resumed from checkpoint: {ckpt_path} (epoch {self.current_epoch})")
 
+    @staticmethod
+    def _has_interpolation_samples(sample_selection: Optional[torch.Tensor]) -> bool:
+        """Return True iff sample_selection is non-None and contains at least one True entry."""
+        if sample_selection is None or sample_selection.numel() == 0:
+            return False
+        return bool(torch.any(sample_selection).item())
+
     def _train_batch(self, batch: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, float]]:
         """Run one MLP optimization step and return loss plus timing breakdown.
 
@@ -342,8 +361,9 @@ class Trainer:
             inputs_flat = inputs.view(bsz * max_bins, n_feat)
             bin_idx_flat = bin_idx.view(bsz * max_bins)
             interpolation_mask = None
-            if self.cfg.train_MLP_with_interpolation and sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+            if self.cfg.train_MLP_with_interpolation and self._has_interpolation_samples(sample_selection):
                 # Expand sample-level selection to observation-level and drop padded bins.
+                assert sample_selection is not None
                 interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                 if mask is not None:
                     interpolation_mask = interpolation_mask & mask.bool()
@@ -359,7 +379,7 @@ class Trainer:
             loss = self.criterion(outputs, targets, mask)
         else:
             interpolation_mask = None
-            if self.cfg.train_MLP_with_interpolation and sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+            if self.cfg.train_MLP_with_interpolation and self._has_interpolation_samples(sample_selection):
                 interpolation_mask = sample_selection
             outputs = self.model(
                 inputs,
@@ -474,7 +494,8 @@ class Trainer:
                 sample_grid = sample_ids.unsqueeze(1).expand(-1, max_bins)
                 valid = mask.bool() if mask is not None else torch.ones_like(bin_ids, dtype=torch.bool)
                 interpolation_mask = None
-                if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                if self._has_interpolation_samples(sample_selection):
+                    assert sample_selection is not None
                     interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                     interpolation_mask = interpolation_mask & valid
                     interpolation_mask = interpolation_mask[valid]
@@ -491,7 +512,8 @@ class Trainer:
                 intrinsic = self.model.mlp(torch.cat([inputs_flat, z_obs], dim=-1))
             else:
                 interpolation_mask = None
-                if sample_selection is not None and bool(torch.any(sample_selection).item() if sample_selection.numel() else False):
+                if self._has_interpolation_samples(sample_selection):
+                    assert sample_selection is not None
                     interpolation_mask = sample_selection.to(dtype=torch.bool)
                 z_obs = self.model._lookup_input_latent(
                     bin_ids,
@@ -618,14 +640,24 @@ class Trainer:
         )
 
 
-    def compute_metrics(self, split: Literal["train", "val", "test"]) -> Dict[str, float]:
+    def compute_metrics(
+        self,
+        split: Literal["train", "val", "test"],
+        predictions: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None,
+    ) -> Dict[str, float]:
         """Compute per-observation and per-sample evaluation metrics.
 
         Micro metrics are computed on all observations pooled together. Macro metrics
         are computed per sample first and then averaged to avoid domination by samples
         with many observed BINs.
+
+        Args:
+            split: Dataset split to evaluate.
+            predictions: Optional pre-computed output of get_predictions(). When
+                provided the forward pass is skipped, avoiding a redundant computation
+                that would otherwise double the inference cost at each epoch.
         """
-        y_pred, y_true, sample_labels, _ = self.get_predictions(split=split)
+        y_pred, y_true, sample_labels, _ = predictions if predictions is not None else self.get_predictions(split=split)
 
         y_true = np.asarray(y_true, dtype=float)
         y_pred = np.asarray(y_pred, dtype=float)
@@ -857,19 +889,21 @@ class Trainer:
                     wandb.log(payload)
 
             train_eval_start = time.perf_counter()
+            train_preds = self.get_predictions(split="train")
             train_loss = self.validate(split="train")
             train_eval_s = time.perf_counter() - train_eval_start
 
             val_eval_start = time.perf_counter()
+            val_preds = self.get_predictions(split="val")
             val_loss = self.validate(split="val")
             val_eval_s = time.perf_counter() - val_eval_start
-            
+
             train_metric_start = time.perf_counter()
-            train_metrics = self.compute_metrics(split="train")
+            train_metrics = self.compute_metrics(split="train", predictions=train_preds)
             train_metric_s = time.perf_counter() - train_metric_start
 
             val_metric_start = time.perf_counter()
-            val_metrics = self.compute_metrics(split="val")
+            val_metrics = self.compute_metrics(split="val", predictions=val_preds)
             val_metric_s = time.perf_counter() - val_metric_start
             self.last_val_metrics = val_metrics
 
@@ -923,7 +957,8 @@ class Trainer:
         self._plot_training_progress()
 
         test_loss = self.validate(split="test")
-        test_metrics = self.compute_metrics(split="test")
+        test_preds = self.get_predictions(split="test")
+        test_metrics = self.compute_metrics(split="test", predictions=test_preds)
 
         if use_wandb and WANDB_AVAILABLE:
             payload = {
@@ -933,7 +968,7 @@ class Trainer:
                 payload[f"test/metrics/{self._metric_key(metric_name)}"] = metric_value
             wandb.log(payload)
 
-        predictions, targets, sample_labels, bin_labels = self.get_predictions(split="test")
+        predictions, targets, sample_labels, bin_labels = test_preds
         latent_d_vector = self.model.latent_d.detach().cpu().numpy()
         latent_z_vector = self.model.latent_z.detach().cpu().numpy()
 

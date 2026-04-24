@@ -28,10 +28,10 @@ COLORS_JSON_OVERRIDE=""
 declare -a TARGETS=()
 declare -a DEFAULT_TARGETS=(
   "BarcodeBERT"
+  "baselines_comparison"
   "interpolated_latent"
   "location_embedding"
-  "latent_as_input"
-  "latent_as_input_V2"
+  "latent_as_in_and_output"
   "ablation_study"
   "loss_comparison"
   "optimal_K"
@@ -53,7 +53,7 @@ Usage:
 Options:
   --target PATH            Subanalysis folder path under analysis/
   --all                    Submit all default targets
-  --baseline-train         Train baseline model once (from Metabarcoding/)
+  --baseline-train         Train src baseline model once (from Metabarcoding/src/train.py)
   --list-targets           Print supported targets and exit
   --baseline-results PATH  Path to one reusable baseline pickle from src/train.py
   --baseline-key KEY       Model key to use for baseline in merged visualization (default: baseline)
@@ -73,10 +73,10 @@ Options:
 
 Supported targets (first batch):
   BarcodeBERT
+  baselines_comparison
   interpolated_latent
   location_embedding
-  latent_as_input
-  latent_as_input_V2
+  latent_as_in_and_output
   ablation_study
   loss_comparison
   optimal_K
@@ -180,10 +180,10 @@ fi
 if [[ "$LIST_TARGETS" == "1" ]]; then
   cat <<'EOF'
 BarcodeBERT
+baselines_comparison
 interpolated_latent
 location_embedding
-latent_as_input
-latent_as_input_V2
+latent_as_in_and_output
 ablation_study
 loss_comparison
 optimal_K
@@ -234,6 +234,15 @@ resolve_target() {
       DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","taxonomy":"#9b59b6"}'
       DEFAULT_TIME="2:00:00"
       ;;
+    baselines_comparison)
+      TARGET_DIR="baselines"
+      TRAIN_CMD_TEMPLATE='python run_baselines.py --data_path __PROJECT_ROOT__/data/ecuador_training_data.csv --output_dir results'
+      RESULTS_PATTERNS='baselines/results/baseline_model_comparison_results_*.pkl'
+      FIGURES_DIR='figures/baselines_comparison'
+      DEFAULT_LABELS_JSON='{"mean":"Mean","zero":"Zero","linear_regression":"Linear Regression","ridge":"Ridge","elasticnet":"ElasticNet","decision_tree":"Decision Tree","random_forest":"Random Forest","gradient_boosting":"Gradient Boosting","knn":"KNN","two_stage":"Two-Stage","zero_inflated_ridge":"Zero-Inflated Ridge","tweedie":"Tweedie","log_transform":"Log-Transform","quantile_rf":"Quantile RF"}'
+      DEFAULT_COLORS_JSON='{"mean":"#808080","zero":"#4d4d4d","linear_regression":"#f28e2b","ridge":"#4e79a7","elasticnet":"#e15759","decision_tree":"#76b7b2","random_forest":"#59a14f","gradient_boosting":"#edc948","knn":"#b07aa1","two_stage":"#9c755f","zero_inflated_ridge":"#bab0ab","tweedie":"#ff9da7","log_transform":"#8cd17d","quantile_rf":"#af7aa1"}'
+      DEFAULT_TIME="2:00:00"
+      ;;
     interpolated_latent)
       TARGET_DIR="interpolated_latent"
       TRAIN_CMD_TEMPLATE='python interpolated_latent.py __NO_WANDB__'
@@ -252,23 +261,14 @@ resolve_target() {
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","satclip":"#e74c3c","range":"#3498db","geoclip":"#2ecc71","alphaearth":"#f39c12"}'
       DEFAULT_TIME="8:00:00"
       ;;
-    latent_as_input)
-      TARGET_DIR='latent_as_input'
-      TRAIN_CMD_TEMPLATE='python latent_as_input.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='latent_as_input/results/latent_as_input_*.pkl'
-      FIGURES_DIR='figures/latent_as_input'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent as Input"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","latent_as_input":"#e67e22"}'
-      DEFAULT_TIME="2:00:00"
-      ;;
-    latent_as_input_V2)
-      TARGET_DIR='latent_as_input_V2'
-      TRAIN_CMD_TEMPLATE='python latent_as_input.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='latent_as_input_V2/results/latent_as_input_v2_*.pkl'
-      FIGURES_DIR='figures/latent_as_input_V2'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline (Latent + MLP)","latent_as_input":"Latent as In-&-Output"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","latent_as_input":"#e67e22"}'
-      DEFAULT_TIME="2:00:00"
+    latent_as_in_and_output)
+      TARGET_DIR='latent_as_in_and_output'
+      TRAIN_CMD_TEMPLATE='python latent_as_in_and_output.py __NO_WANDB__ --output_dir results'
+      RESULTS_PATTERNS='latent_as_in_and_output/results/latent_as_in_and_output_*.pkl'
+      FIGURES_DIR='figures/latent_as_in_and_output'
+      DEFAULT_LABELS_JSON='{"baseline":"Baseline","both_dim_5":"Latent In+Out (dim=5)","input_only_dim_10":"Latent Input Only (dim=10)"}'
+      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","both_dim_5":"#e74c3c","input_only_dim_10":"#3498db"}'
+      DEFAULT_TIME="4:00:00"
       ;;
     ablation_study)
       TARGET_DIR='ablation_study'
@@ -429,6 +429,7 @@ submit_target() {
     wandb_arg="--no_wandb"
   fi
   train_cmd="${train_cmd//__NO_WANDB__/$wandb_arg}"
+  train_cmd="${train_cmd//__PROJECT_ROOT__/$PROJECT_ROOT}"
 
   local walltime="$DEFAULT_TIME"
   if [[ -n "$TIME_OVERRIDE" ]]; then
@@ -466,6 +467,9 @@ export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src:\${PYTHONPATH:-}"
 
 cd "$target_dir_abs"
 echo "[$(date)] Target: $target"
+if [[ "$target" == "baselines_comparison" ]]; then
+  echo "[$(date)] Running baselines_comparison (analysis/baselines); this is separate from --baseline-train (src/train.py --model baseline)"
+fi
 echo "[$(date)] Train command: $train_cmd"
 $train_cmd
 
