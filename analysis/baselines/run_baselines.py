@@ -4,9 +4,9 @@ Main training and evaluation script for baseline models.
 Trains all baseline models and compares their performance.
 
 Usage:
-    python run_baselines.py --data_path data/ecuador_training_data.csv
-    python run_baselines.py --data_path data/ecuador_training_data.csv --models two_stage ridge random_forest
-    python run_baselines.py --data_path data/ecuador_training_data.csv --zero_inflated_only
+    python run_baselines.py --data_path data/data_merged.csv
+    python run_baselines.py --data_path data/data_merged.csv --models two_stage ridge random_forest
+    python run_baselines.py --data_path data/data_merged.csv --zero_inflated_only
 """
 import os
 import sys
@@ -122,7 +122,7 @@ def run_all_baselines(
     Run all baseline models and return comparison results.
     
     Args:
-        data_path: Path to ecuador_training_data.csv
+        data_path: Path to data_merged.csv
         model_names: List of model names to run (None = all)
         zero_inflated_only: Only run zero-inflated models
         output_dir: Directory to save results
@@ -268,8 +268,8 @@ def main():
     parser.add_argument(
         "--data_path", 
         type=str, 
-        default="../../data/ecuador_training_data.csv",
-        help="Path to the ecuador_training_data.csv file"
+        default="../../data/data_merged.csv",
+        help="Path to the data_merged.csv file"
     )
     parser.add_argument(
         "--models",
@@ -306,7 +306,7 @@ def main():
     # Check if data file exists
     if not os.path.exists(args.data_path):
         print(f"Error: Data file not found: {args.data_path}")
-        print("Please provide the correct path to ecuador_training_data.csv")
+        print("Please provide the correct path to data_merged.csv")
         sys.exit(1)
     
     # Run baselines
