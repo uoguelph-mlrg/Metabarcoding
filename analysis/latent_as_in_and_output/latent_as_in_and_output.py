@@ -88,10 +88,10 @@ def run_comparison(
 	with variant_wandb_run(
 		use_wandb=use_wandb,
 		wandb_module=wandb,
-		analysis_name="latent_as_input_v2",
+		analysis_name="latent_as_in_and_output",
 		variant_name="in-&-out",
 		run_group=run_group,
-		tags=["latent_as_input_v2", "variant_only", "in-&-out-latent"],
+		tags=["latent_as_in_and_output", "variant_only", "in-&-out-latent"],
 	):
 		local_trainer = LocalTrainer(local_cfg)
 		local_results = local_trainer.run(use_wandb=use_wandb)
@@ -127,7 +127,7 @@ if __name__ == "__main__":
 	log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
 	use_wandb = WANDB_AVAILABLE and not args.no_wandb
-	run_group = make_run_group("latent_as_input_v2_comparison")
+	run_group = make_run_group("latent_as_in_and_output_comparison")
 
 	# Run comparison
 	results = run_comparison(use_wandb=use_wandb, run_group=run_group)
@@ -135,7 +135,7 @@ if __name__ == "__main__":
 	# Save results
 
 	output_dir = make_output_dir(__file__, args.output_dir)
-	results_path = save_variant_result(output_dir, "latent_as_input_v2", "in-&-out", results["in-&-out"])
+	results_path = save_variant_result(output_dir, "latent_as_in_and_output", "in-&-out", results["in-&-out"])
 	print(f"[INFO] Saving results to: {os.path.abspath(results_path)}")
 
 	log.info(f"\n{'='*70}")
