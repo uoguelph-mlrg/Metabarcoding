@@ -674,7 +674,7 @@ def run_ablation_study(
     
     # Create splits using the SAME preprocessing as the latent model (utils.load)
     # We only use this call to determine split indices deterministically.
-    _, _, _, _, split_indices = load(cfg.data_path, cfg, save_data=False)
+    _, _, _, _, split_indices, _ = load(cfg, save_data=False)
     
     # ========================================================================
     # Step 2: Build non-taxonomy data once for all ablation variants
