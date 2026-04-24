@@ -119,7 +119,7 @@ def _scatter_grid(n: int) -> Tuple[int, int]:
     Rule: n_rows = ceil(n / 4)
     """
     n_rows = math.ceil(n / 4)
-    n_cols = n - 4 * (n_rows - 1) if n_rows > 1 else n
+    n_cols = 4 if n > 3 else n
     return n_rows, n_cols
 
 
@@ -448,8 +448,7 @@ def plot_metrics_comparison(
 
     metrics_to_plot = [
         "MAE (macro)", "MAE (micro)", "Absolute Relative Error", "KL Divergence", 
-        "MAE (zeros)", "MAE (non-zeros)", "Spearman Rho (macro)",
-        "R² (Shannon diversity)", "Shannon intercept", "R² (log + 1)"
+        "MAE (zeros)", "MAE (non-zeros)", "R² (log + 1)"
     ]
     n_metrics = len(metrics_to_plot)
 
@@ -1486,6 +1485,11 @@ def plot_latent_comparison(
 
     If more than two models include ``latent_vector``, the first two are used,
     prioritizing ("taxonomy", "barcodebert") when both are present.
+    
+    Performance optimizations:
+    - Samples large datasets (>10k points) for KDE computation
+    - Reduces histogram bins for faster rendering
+    - Skips KDE for very large datasets (>100k points)
     """
     latent_models = [m for m in results if isinstance(results[m], dict) and results[m].get("latent_vector") is not None]
     if len(latent_models) < 2:
@@ -1505,6 +1509,20 @@ def plot_latent_comparison(
         )
         return
 
+    n_points = len(lv1)
+    use_kde = n_points <= 100000  # Skip KDE for extremely large datasets
+    kde_sample_size = min(10000, n_points) if n_points > 10000 else n_points
+    
+    # Determine if we need to sample for KDE computation
+    if n_points > 10000 and use_kde:
+        sample_idx = np.random.choice(n_points, size=kde_sample_size, replace=False)
+        lv1_kde = lv1[sample_idx]
+        lv2_kde = lv2[sample_idx]
+        log.info(f"  (Sampling {kde_sample_size:,} / {n_points:,} points for KDE computation)")
+    else:
+        lv1_kde = lv1
+        lv2_kde = lv2
+
     set_style()
     fig, axes = plt.subplots(1, 3, figsize=(21, 5))
 
@@ -1513,10 +1531,11 @@ def plot_latent_comparison(
     color1 = get_color(m1, colors)
     color2 = get_color(m2, colors)
 
-    # Panel 1: Overlapping latent distributions.
+    # Panel 1: Overlapping latent distributions (reduced bins for speed).
     ax = axes[0]
-    sns.histplot(lv1, bins=50, kde=True, stat="density", color=color1, alpha=0.35, edgecolor="none", ax=ax, label=label1)
-    sns.histplot(lv2, bins=50, kde=True, stat="density", color=color2, alpha=0.35, edgecolor="none", ax=ax, label=label2)
+    bins = 30 if n_points > 50000 else 40
+    sns.histplot(lv1, bins=bins, kde=use_kde, stat="density", color=color1, alpha=0.35, edgecolor="none", ax=ax, label=label1)
+    sns.histplot(lv2, bins=bins, kde=use_kde, stat="density", color=color2, alpha=0.35, edgecolor="none", ax=ax, label=label2)
     ax.axvline(lv1.mean(), color=color1, linestyle="--", linewidth=1.5, alpha=0.9)
     ax.axvline(lv2.mean(), color=color2, linestyle="--", linewidth=1.5, alpha=0.9)
     ax.set_xlabel("Latent value")
@@ -1525,10 +1544,10 @@ def plot_latent_comparison(
     ax.legend(frameon=False)
     sns.despine(ax=ax)
 
-    # Panel 2: Distribution of latent differences.
+    # Panel 2: Distribution of latent differences (reduced bins for speed).
     ax = axes[1]
     diff = lv2 - lv1
-    sns.histplot(diff, bins=50, kde=True, stat="density", color="#4a90d9", alpha=0.8, edgecolor="none", ax=ax)
+    sns.histplot(diff, bins=bins, kde=use_kde, stat="density", color="#4a90d9", alpha=0.8, edgecolor="none", ax=ax)
     ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.7)
     ax.axvline(diff.mean(), color="#e74c3c", linestyle="-", linewidth=1.5, alpha=0.9)
     ax.set_xlabel(f"Difference ({label2} - {label1})")
@@ -1536,14 +1555,31 @@ def plot_latent_comparison(
     ax.set_title("Latent Difference Distribution", fontsize=13, fontweight="bold")
     sns.despine(ax=ax)
 
-    # Panel 3: Per-bin scatter with density coloring.
+    # Panel 3: Per-bin scatter with optional density coloring.
     ax = axes[2]
-    try:
-        xy = np.vstack([lv1, lv2]) + np.random.normal(0, 1e-8, (2, len(lv1)))
-        density = gaussian_kde(xy)(xy)
-    except Exception:
+    if use_kde and len(lv1_kde) > 1:
+        try:
+            xy = np.vstack([lv1_kde, lv2_kde]) + np.random.normal(0, 1e-8, (2, len(lv1_kde)))
+            density = gaussian_kde(xy)(xy)
+            # Map density back to all points if we sampled
+            if n_points > 10000:
+                # Use nearest-neighbor approximation for unsampled points
+                from scipy.spatial import cKDTree
+                tree = cKDTree(xy.T)
+                xy_all = np.vstack([lv1, lv2])
+                distances, indices = tree.query(xy_all.T, k=1)
+                density_all = density[indices]
+                density_all[distances > 0.1] = np.median(density)  # Cap outliers
+                density = density_all
+            order = np.argsort(density)
+        except Exception as e:
+            log.debug(f"KDE computation failed: {e}; using no density coloring")
+            density = np.ones(len(lv1))
+            order = np.arange(len(lv1))
+    else:
         density = np.ones(len(lv1))
-    order = np.argsort(density)
+        order = np.arange(len(lv1))
+    
     sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis", s=10, alpha=0.65, edgecolors="none")
     lo = min(lv1.min(), lv2.min())
     hi = max(lv1.max(), lv2.max())
@@ -1554,7 +1590,7 @@ def plot_latent_comparison(
     ax.set_title(f"Per-BIN Latent Comparison (r={corr:.3f})", fontsize=13, fontweight="bold")
     sns.despine(ax=ax)
     cbar = fig.colorbar(sc, ax=ax, shrink=0.85)
-    cbar.set_label("Point Density")
+    cbar.set_label("Point Density" if use_kde else "Uniform")
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "latent_comparison.png"), dpi=150, bbox_inches="tight")
