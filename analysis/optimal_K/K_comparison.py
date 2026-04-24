@@ -110,8 +110,8 @@ if __name__ == "__main__":
         "--k_values",
         type=int,
         nargs="+",
-        default=[5, 100, 1000],
-        help="K values to train as variants (default: 5, 100, 1000)",
+        default=[5, 100, 500],
+        help="K values to train as variants (default: 5, 100, 500)",
     )
     args = parser.parse_args()
     
