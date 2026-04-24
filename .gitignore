@@ -13,3 +13,5 @@ Metabarcoding/analysis/data_curation/results/
 **.slurm_jobs/
 data/embeddings*.npy
 autoresearch/results.tsv
+analysis/google-cloud-cli-linux-x86_64.tar.gz
+autoresearch/.claude/scheduled_tasks.lock
