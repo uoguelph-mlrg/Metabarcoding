@@ -462,7 +462,7 @@ class Trainer:
                     interpolation_mask = interpolation_mask[valid]
 
                 intrinsic = intrinsic[valid]
-                y = targets[valid]
+                targets = targets[valid]
                 bin_ids = bin_ids[valid]
                 sample_ids = sample_grid[valid]
             else:
@@ -478,7 +478,7 @@ class Trainer:
 
         try:
             latent_vec, timings = self.model.latent_solver.solve(
-                y=y,
+                y=targets,
                 intrinsic=intrinsic,
                 final_weights=self.model.final_linear.weight if self.cfg.embed_dim > 1 else None,
                 bin_ids=bin_ids,
