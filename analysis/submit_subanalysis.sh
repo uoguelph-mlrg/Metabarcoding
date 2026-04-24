@@ -31,7 +31,7 @@ declare -a DEFAULT_TARGETS=(
   "interpolated_latent"
   "location_embedding"
   "latent_as_input"
-  "latent_as_input_V2"
+  "latent_as_in_and_output"
   "ablation_study"
   "loss_comparison"
   "optimal_K"
