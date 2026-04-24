@@ -9,8 +9,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 @dataclass
 class Config:
     # Run configuration
-    data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
-    results_dir: str = "../results"             # Directory where run artifacts are saved
+    data_path: str = os.path.join(PROJECT_ROOT, "data", "ecuador_training_data.csv")  # Path to raw data CSV file
+    results_dir: str = "../results/ecuador_data"             # Directory where run artifacts are saved
     checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
 
@@ -26,7 +26,7 @@ class Config:
         "cpu"
     )
     batch_size_bin: int = 1024                  # Batch size (in number of observations not samples)
-    batch_size_sample: int = 8                  # Batch size in number of samples
+    batch_size_sample: int = 16                 # Batch size in number of samples
     epochs: int = 200                           # Epochs per training phase
     grad_clip: Optional[float] = 1.0            # Gradient clipping value (None to disable)
 
@@ -41,14 +41,14 @@ class Config:
     interpolation_method: Literal["nw", "llr"] = "nw"  # interpolation method for latent solver: "nw" for Nadaraya-Watson, "llr" for locally linear regression
 
     # DNA embedding settings (used when use_embedding=True)
-    embedding_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "embeddings.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
+    embedding_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "embeddings_ecuador.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
     barcode_data_path: Optional[str] = None     # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
     # MLP - architecture & optimization settings
     mlp_hidden_dims : List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
-    mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
-    weight_decay: float = 1e-5                  # Weight decay for MLP parameters
+    mlp_lr: float = 7e-4                        # Learning rate for MLP parameters
+    weight_decay: float = 1e-4                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
     mlp_warmup_frac: float = 0.1                # Fraction of total training steps used for MLP LR warmup
     mlp_lr_eta_min: float = 1e-6                # Minimum MLP LR reached by cosine decay
