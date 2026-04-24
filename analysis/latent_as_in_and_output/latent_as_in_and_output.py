@@ -1,19 +1,21 @@
 """
-Latent-as-Input Variant Runner
+Latent Variant Runner
 
-This script trains only the latent-as-input variant
-(no baseline retraining in this analysis script).
-Results are saved as one variant pickle for later comparison.
+This script trains two variants:
+1) latent as input and output with both dimensions set to 5
+2) latent as input only with input dimension set to 10
+
+No baseline retraining is performed in this analysis script.
+Results are saved as one variant pickle per variant for later comparison.
 
 Usage:
-	python latent_as_input.py --no_wandb
+	python latent_as_in_and_output.py --no_wandb
 """
 from __future__ import annotations
 
 import argparse
 import importlib
 import os
-import pickle
 import sys
 import logging as log
 from typing import Dict, Any
@@ -71,46 +73,71 @@ def run_comparison(
 	use_wandb: bool = True,
 	run_group: str | None = None,
 ) -> Dict[str, Any]:
-	"""Train latent-as-input variant and return result dict keyed by variant name."""
+	"""Train requested latent variants and return result dict keyed by variant name."""
 	results: Dict[str, Any] = {}
+	analysis_name = "latent_as_in_and_output"
 
 	root_dir = os.path.dirname(os.path.abspath(__file__))
 	src_path = os.path.abspath(os.path.join(root_dir, "..", "..", "src"))
 
-	# ---------------- Latent-as-input (local) ----------------
-	log.info("\n" + "=" * 70)
-	log.info("TRAINING LATENT-AS-INPUT VARIANT")
-	log.info("=" * 70)
-
 	LocalTrainer, LocalConfig, local_set_seed = load_variant_trainer(root_dir, src_path)
-	local_set_seed(14)
-	local_cfg = LocalConfig()
-	with variant_wandb_run(
-		use_wandb=use_wandb,
-		wandb_module=wandb,
-		analysis_name="latent_as_input_v2",
-		variant_name="in-&-out",
-		run_group=run_group,
-		tags=["latent_as_input_v2", "variant_only", "in-&-out-latent"],
-	):
-		local_trainer = LocalTrainer(local_cfg)
-		local_results = local_trainer.run(use_wandb=use_wandb)
-		results["in-&-out"] = local_results
+
+	variant_specs = [
+		{
+			"variant_name": "both_dim_5",
+			"latent_input_dim": 5,
+			"embed_dim": 5,
+			"tags": ["latent_as_in_and_output", "variant_only", "input_and_output", "dim_5"],
+		},
+		{
+			"variant_name": "input_only_dim_10",
+			"latent_input_dim": 10,
+			"embed_dim": 0,
+			"tags": ["latent_as_in_and_output", "variant_only", "input_only", "dim_10"],
+		},
+	]
+
+	for variant in variant_specs:
+		variant_name = variant["variant_name"]
+		latent_input_dim = variant["latent_input_dim"]
+		embed_dim = variant["embed_dim"]
+
+		log.info("\n" + "=" * 70)
+		log.info(
+			"TRAINING VARIANT %s (latent_input_dim=%s, embed_dim=%s)",
+			variant_name,
+			latent_input_dim,
+			embed_dim,
+		)
+		log.info("=" * 70)
+
+		local_set_seed(14)
+		local_cfg = LocalConfig()
+		local_cfg.latent_input_dim = int(latent_input_dim)
+		local_cfg.embed_dim = int(embed_dim)
+
+		with variant_wandb_run(
+			use_wandb=use_wandb,
+			wandb_module=wandb,
+			analysis_name=analysis_name,
+			variant_name=variant_name,
+			run_group=run_group,
+			tags=variant["tags"],
+			config={
+				"latent_input_dim": int(latent_input_dim),
+				"embed_dim": int(embed_dim),
+			},
+		):
+			local_trainer = LocalTrainer(local_cfg, model_name=variant_name)
+			local_results = local_trainer.run(use_wandb=use_wandb)
+			results[variant_name] = local_results
 
 	return results
 
 
-def save_results(results: Dict[str, Any], output_path: str) -> None:
-	"""Save results to pickle file."""
-	os.makedirs(os.path.dirname(output_path), exist_ok=True)
-	with open(output_path, "wb") as f:
-		pickle.dump(results, f)
-	log.info(f"Results saved to {output_path}")
-
-
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(
-		description="Model Comparison: Baseline vs Latent-as-Input"
+		description="Latent variants: in-and-output dim=5 and input-only dim=10"
 	)
 	parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
 	parser.add_argument("--no_wandb", action="store_true", help="Disable Weights & Biases logging")
@@ -127,18 +154,19 @@ if __name__ == "__main__":
 	log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
 	use_wandb = WANDB_AVAILABLE and not args.no_wandb
-	run_group = make_run_group("latent_as_input_v2_comparison")
+	run_group = make_run_group("latent_as_in_and_output_comparison")
 
 	# Run comparison
 	results = run_comparison(use_wandb=use_wandb, run_group=run_group)
 
-	# Save results
-
+	# Save one pickle per variant
 	output_dir = make_output_dir(__file__, args.output_dir)
-	results_path = save_variant_result(output_dir, "latent_as_input_v2", "in-&-out", results["in-&-out"])
-	print(f"[INFO] Saving results to: {os.path.abspath(results_path)}")
+	analysis_name = "latent_as_in_and_output"
+	for variant_name, variant_result in results.items():
+		results_path = save_variant_result(output_dir, analysis_name, variant_name, variant_result)
+		print(f"[INFO] Saved {variant_name} results to: {os.path.abspath(results_path)}")
 
 	log.info(f"\n{'='*70}")
 	log.info("VARIANT TRAINING COMPLETE")
 	log.info(f"{'='*70}")
-	log.info(f"Results saved to: {results_path}")
+	log.info(f"Results saved to directory: {output_dir}")

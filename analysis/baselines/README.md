@@ -34,18 +34,31 @@ This folder contains a set of baseline models for predicting relative abundance 
 ### Run All Models
 ```bash
 cd baselines
-python run_baselines.py --data_path data/ecuador_training_data.csv
+python run_baselines.py --data_path ../../data/ecuador_training_data.csv
 ```
 
 ### Run Specific Models
 ```bash
-python run_baselines.py --data_path data/ecuador_training_data.csv --models ridge random_forest two_stage
+python run_baselines.py --data_path ../../data/ecuador_training_data.csv --models ridge random_forest two_stage
 ```
 
 ### Run Only Zero-Inflated Models
 ```bash
-python run_baselines.py --data_path data/ecuador_training_data.csv --zero_inflated_only
+python run_baselines.py --data_path ../../data/ecuador_training_data.csv --zero_inflated_only
 ```
+
+### Run Through submit_subanalysis.sh
+From `Metabarcoding/analysis/`, you can launch this comparison target via:
+
+```bash
+./submit_subanalysis.sh --target baselines_comparison
+```
+
+This target is included in `--all`.
+
+Note: `baselines_comparison` is intentionally separate from `--baseline-train`.
+- `baselines_comparison`: sklearn-style baseline comparisons from `analysis/baselines/`
+- `--baseline-train`: trains the src baseline model via `src/train.py --model baseline`
 
 ### Command Line Options
 ```
@@ -63,6 +76,7 @@ Results are saved to the `results/` directory:
 - `baseline_results_test_TIMESTAMP.csv`: Test set metrics for all models
 - `baseline_results_val_TIMESTAMP.csv`: Validation set metrics
 - `baseline_summary_TIMESTAMP.txt`: Human-readable summary report
+- `baseline_model_comparison_results_TIMESTAMP.pkl`: Unified payload consumed by `analysis/visualize_results.py`
 
 ## Metrics Computed
 

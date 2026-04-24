@@ -12,7 +12,7 @@ class Config:
     data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
     results_dir: str = "../results"             # Directory where run artifacts are saved
     checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
-    diag_ablation_interval: int = 20            # Compute Z ablation delta every N epochs (0 = disabled)
+    diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
 
     # Train / val / test split
     train_frac: float = 0.8
@@ -41,7 +41,7 @@ class Config:
     interpolation_method: Literal["nw", "llr"] = "nw"  # interpolation method for latent solver: "nw" for Nadaraya-Watson, "llr" for locally linear regression
 
     # DNA embedding settings (used when use_embedding=True)
-    embedding_path: Optional[str] = None        # path to precomputed embeddings (.npy dict: bin_uri->vector)
+    embedding_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "embeddings.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
     barcode_data_path: Optional[str] = None     # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
@@ -57,14 +57,14 @@ class Config:
     # Latent solver - regularization settings
     latent_smooth_reg: float = 1e-3             # Smoothness regularization (parameter λ_smooth)
     latent_present_only: bool = False           # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
-    latent_l2_reg: float = 1e-3                 # L2 norm regularization on D (parameter r)
+    latent_l2_reg: float = 1e-2                 # L2 norm regularization on D (parameter r)
     z_smooth_reg: float = 1e-4                  # Smoothness regularization on input latent Z during Phase B
     z_l2_reg: float = 0.0                       # Optional L2 regularization on input latent Z during Phase B
-    latent_init_prox_reg: float = 0.0           # Initial proximal regularization weight; annealed to 0 across epochs to stabilize early active-set latent updates.
+    latent_init_prox_reg: float = 0.01          # Initial proximal regularization weight; annealed to 0 across epochs to stabilize early active-set latent updates.
 
     # Latent solver - optimization settings
-    latent_optim_steps: int = 15                # Number of latent optimization steps per batch / solver call
-    latent_lr: float = 1e-2                     # Learning rate for the latent AdamW optimizer
+    latent_optim_steps: int = 1                 # Number of latent optimization steps per batch / solver call
+    latent_lr: float = 1e-3                     # Learning rate for the latent AdamW optimizer
     latent_init_std: float = 0.0                # Standard deviation for initializing latent embeddings (0 for zeros, >0 for Gaussian noise)
     latent_warmup_start_factor: float = 1e-3    # Initial multiplier for latent LR warmup
     latent_warmup_frac: float = 0.2             # Fraction of total latent solves used for warmup
@@ -80,13 +80,14 @@ class Config:
     include_self_in_interpolation: bool = False # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
 
     # Sizes and combination modalities for latent and intrinsic vectors
-    latent_input_dim: int = 4                   # Dimension of input latent embedding Z per BIN
+    latent_input_dim: int = 10                  # Dimension of input latent embedding Z per BIN
     embed_dim: int = 10                         # Embedding dimension d for output latent D and intrinsic vectors (set to 1 for scalar D, 0 to disable output latent D)
     gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid"  # Gating function for combining latent and intrinsic vectors
     gating_alpha: float = 0.5                   # Scaling factor for scaled_exp gating (in (0,1])
     gating_kappa: float = 0.5                   # Scaling factor for tanh gating
     gating_epsilon: float = 0.693               # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
+
 
 def set_seed(seed: int = 42) -> None:
     np.random.seed(seed)
