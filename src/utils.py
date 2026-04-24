@@ -194,6 +194,12 @@ def load(
         feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
     df_long = df[base_cols + feature_cols_present].copy()
 
+    # Ensure feature columns are numeric; non-numeric values become NaN and are imputed later.
+    for col in feature_cols_present:
+        if not pd.api.types.is_numeric_dtype(df_long[col]):
+            log.warning(f"Feature column '{col}' is not numeric; attempting to coerce to numeric with NaN for invalid values.")
+            df_long[col] = pd.to_numeric(df_long[col], errors="coerce")
+
     # Build taxonomic_data with taxonomy and features
     taxonomic_data = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
 
@@ -245,10 +251,11 @@ def load(
         X = df_long.loc[
             df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), feature_cols_present + ["bin_uri"]
         ]
-        train_feature_means = X.mean().to_dict()
-        train_feature_stds = X.std(ddof=0).to_dict()
-        bin_medians = X.groupby("bin_uri").median()
-        feature_medians = X.median()
+        X_features = X[feature_cols_present]
+        train_feature_means = X_features.mean().to_dict()
+        train_feature_stds = X_features.std(ddof=0).to_dict()
+        bin_medians = X.groupby("bin_uri")[feature_cols_present].median()
+        feature_medians = X_features.median()
 
     for col in feature_cols_present:
         median_map = dict(bin_medians.get(col, {}))
