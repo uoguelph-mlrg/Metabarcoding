@@ -33,7 +33,7 @@ Where:
 
 #### Phase A — Latent Update
 - Freeze MLP parameters θ
-- Optimize Z using gradient descent (AdamW) for `latent_steps` iterations
+- Optimize Z using gradient descent (AdamW) for `latent_optim_steps` iterations
 - Minimizes: `L_CE(θ_fixed, Z) + λ_smooth * R_smooth(Z) + λ_norm * ||Z||²`
 - Only updates BINs present in training batches (efficient)
 - Gradient computation uses PyTorch autograd
@@ -50,8 +50,8 @@ Where:
    - `latent_input_dim`: Embedding dimension (default: 1)
    - `latent_init_std`: Initialization std (default: 1e-3)
    - `latent_lr`: Learning rate for Phase A (default: 1e-3)
-   - `latent_steps`: Gradient steps per EM cycle (default: 5)
-   - `latent_norm_reg`: λ_norm weight (default: 1e-2)
+   - `latent_optim_steps`: Gradient steps per EM cycle (default: 5)
+   - `z_l2_reg`: λ_norm weight (default: 1e-2)
    - `latent_smooth_reg`: λ_smooth weight (default: 1e-3)
 
 2. **model.py**: Latent-as-input architecture
@@ -113,7 +113,7 @@ All hyperparameters are configured in `config.py`. No command-line arguments nee
 
 - **latent_input_dim**: Start with 1, increase if underfitting (try 2, 4, 8)
 - **latent_init_std**: Keep small (1e-3 to 1e-2) to avoid initialization issues
-- **latent_steps**: Balance accuracy vs. speed (1-5 steps recommended)
+- **latent_optim_steps**: Balance accuracy vs. speed (1-5 steps recommended)
 - **latent_lr**: Typically lower than MLP lr (1e-4 to 1e-3)
 - **λ_smooth**: Controls neighbor similarity (1e-4 to 1e-2)
 - **λ_norm**: Prevents unbounded growth (1e-3 to 1e-1)
