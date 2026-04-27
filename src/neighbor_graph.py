@@ -6,6 +6,7 @@ from sklearn.neighbors import NearestNeighbors, BallTree
 from sklearn.preprocessing import normalize
 from config import Config
 import logging as log
+from utils import TAXONOMY_FEATURES
 
 class NeighbourGraph:
     """
@@ -29,160 +30,17 @@ class NeighbourGraph:
         self.n_bins = len(self.bins)
 
         # taxonomy columns expected: species, genus, subfamily, family, order, class, phylum
-        self.tax_levels = ["species", "genus", "subfamily", "family", "order", "class", "phylum", "kingdom"]
+        self.tax_levels = TAXONOMY_FEATURES
 
         # output structures
         self.neighbours: List[List[int]] = [[] for _ in range(self.n_bins)]
         self.distances: List[np.ndarray] = [np.array([]) for _ in range(self.n_bins)]
-
-        # Load (or compute) embeddings when embedding mode is requested
-        self.embeddings: Optional[np.ndarray] = None  # shape [n_bins, emb_dim]
-        self.bins_with_embedding: np.ndarray = np.zeros(self.n_bins, dtype=bool)  # True where embedding exists
+        
         if self.cfg.use_embedding:
-            self._load_or_compute_embeddings()
+            self.embeddings: Optional[np.ndarray] = bins_df.get("embedding", None)
+            self.bins_with_embedding: np.ndarray = bins_df.get("has_embedding", np.ones(self.n_bins, dtype=bool)).values
 
-    # ------------------------------------------------------------------ #
-    # Embedding loading / computation                                      #
-    # ------------------------------------------------------------------ #
 
-    def _load_or_compute_embeddings(self) -> None:
-        """
-        Populate self.embeddings (shape [n_bins, emb_dim]) and self.bins_with_embedding.
-
-        Priority:
-            1. Load from cfg.embedding_path if the file exists.
-            2. Otherwise compute via BarcodeBERT using cfg.barcode_data_path and save to 
-            cfg.embedding_path (if provided) so future runs skip inference.
-            3. If neither path is usable, raise a descriptive error.
-
-        Bins with no sequence get a zero vector and bins_with_embedding[i] = False;
-        those bins will fall back to taxonomy-based neighbours at build time.
-        """
-        embedding_path = self.cfg.embedding_path
-        barcode_data_path = self.cfg.barcode_data_path
-
-        emb_dict: Dict[str, np.ndarray] = {}  # bin_uri -> np.ndarray
-
-        if embedding_path is not None and os.path.exists(embedding_path):
-            log.info(f"Loading precomputed embeddings from {embedding_path}")
-            emb_dict = np.load(embedding_path, allow_pickle=True).item()
-        elif barcode_data_path is not None:
-            log.info(
-                f"Precomputed embeddings not found; running BarcodeBERT inference "
-                f"on {barcode_data_path}"
-            )
-            emb_dict = self._compute_barcodebert_embeddings(barcode_data_path)
-            # Cache to disk for future runs
-            if embedding_path is not None:
-                os.makedirs(os.path.dirname(os.path.abspath(embedding_path)), exist_ok=True)
-                np.save(embedding_path, np.array(emb_dict, dtype=object), allow_pickle=True)
-                log.info(f"Saved computed embeddings to {embedding_path}")
-        else:
-            raise ValueError(
-                "use_embedding=True requires at least one of:\n"
-                "  cfg.embedding_path  — path to a precomputed .npy embedding file\n"
-                "  cfg.barcode_data_path — path to a TSV with 'bin_uri' and 'seq' columns"
-            )
-
-        # Determine embedding dimension from first available vector
-        emb_dim = next(iter(emb_dict.values())).shape[0]
-        self.embeddings = np.zeros((self.n_bins, emb_dim), dtype=np.float32)
-
-        for row_i, row in self.bins.iterrows():
-            uri = row["bin_uri"]
-            row_idx = int(row_i) # pyright: ignore[reportArgumentType]
-            if uri in emb_dict:
-                self.embeddings[row_idx] = emb_dict[uri].astype(np.float32)
-                self.bins_with_embedding[row_idx] = True
-
-        n_missing = int((~self.bins_with_embedding).sum())
-        n_present = int(self.bins_with_embedding.sum())
-        log.info(
-            f"Embeddings loaded: {n_present}/{self.n_bins} bins have sequences; "
-            f"{n_missing} will use taxonomy fallback."
-        )
-
-    def _compute_barcodebert_embeddings(
-        self,
-        barcode_data_path: str,
-        batch_size: int = 64,
-    ) -> Dict[str, np.ndarray]:
-        """
-        Run BarcodeBERT inference on sequences in barcode_data_path and return a
-        dict mapping bin_uri -> mean-pooled embedding vector (numpy float32).
-
-        The function uses mean-pooling of the last hidden state across all token
-        positions (recommended by the BarcodeBERT authors).
-
-        Args:
-            barcode_data_path: Path to TSV/CSV with 'bin_uri' and 'seq' columns.
-            batch_size: Number of sequences per inference batch.
-
-        Returns:
-            Dict[str, np.ndarray]: {bin_uri: np.ndarray of shape [hidden_dim]}
-        """
-        from transformers import AutoTokenizer, AutoModel
-        import torch
-
-        MODEL_NAME = "emmabhl/BarcodeBERT_finetuned"
-        log.info(f"Loading BarcodeBERT from HuggingFace ({MODEL_NAME}) ...")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        model = AutoModel.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        device = torch.device(self.cfg.device)
-        model = model.to(device).eval()
-
-        # Read data: one consensus sequence per BIN
-        sep = "\t" if barcode_data_path.endswith(".tsv") else ","
-        df = pd.read_csv(barcode_data_path, sep=sep)
-        if "bin_uri" not in df.columns or "seq" not in df.columns:
-            raise ValueError(
-                f"{barcode_data_path} must contain 'bin_uri' and 'seq' columns. "
-                f"Found: {list(df.columns)}"
-            )
-
-        # Aggregate: take the first (consensus) sequence per BIN
-        bin_seqs = df.groupby("bin_uri")["seq"].first().to_dict()
-        uris = list(bin_seqs.keys())
-        sequences = [bin_seqs[u] for u in uris]
-
-        log.info(f"Running BarcodeBERT inference on {len(sequences)} BINs (batch_size={batch_size}) ...")
-
-        emb_dict: Dict[str, np.ndarray] = {}
-        with torch.no_grad():
-            for start in range(0, len(sequences), batch_size):
-                batch_seqs = sequences[start : start + batch_size]
-                batch_uris = uris[start : start + batch_size]
-
-                # KmerTokenizer is single-sequence only: encode each one individually
-                # and stack — safe because padding makes all outputs the same length
-                batch_input_ids = []
-                batch_attention_mask = []
-                for seq in batch_seqs:
-                    encoded = tokenizer(seq, padding=True)
-                    batch_input_ids.append(encoded["input_ids"])
-                    batch_attention_mask.append(encoded["attention_mask"])
-
-                input_ids = torch.tensor(batch_input_ids, dtype=torch.long).to(device)
-                attention_mask = torch.tensor(batch_attention_mask, dtype=torch.long).to(device)
-
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                # last_hidden_state: [B, seq_len, hidden_dim]
-                last_hidden = outputs.last_hidden_state
-                # Mean-pool over non-padding token positions
-                mask_exp = attention_mask.unsqueeze(-1).float()  # [B, seq_len, 1]
-                sum_hidden = (last_hidden * mask_exp).sum(dim=1) # [B, hidden_dim]
-                count = mask_exp.sum(dim=1).clamp(min=1e-9)      # [B, 1]
-                mean_pooled = (sum_hidden / count).cpu().numpy()  # [B, hidden_dim]
-
-                for uri, emb in zip(batch_uris, mean_pooled):
-                    emb_dict[str(uri)] = emb.astype(np.float32)
-
-                if (start // batch_size) % 10 == 0:
-                    log.debug(f"  Processed {start + len(batch_seqs)}/{len(sequences)} sequences")
-
-        log.info("BarcodeBERT inference complete.")
-        return emb_dict
-    
     def build_taxonomy_neighbors_knn(self, K: int) -> None:
         """
         Populate neighbours using taxonomic discrete distance with KNN.
@@ -500,7 +358,10 @@ class NeighbourGraph:
             K: Number of nearest neighbors to select.
         """
         if self.embeddings is None:
-            raise ValueError("embeddings not available — call _load_or_compute_embeddings() first")
+            raise ValueError(
+                "embeddings not available — config.use_embedding=True but no embeddings were "
+                "provided to NeighbourGraph.__init__()"
+            )
 
         emb_indices = np.where(self.bins_with_embedding)[0]
         fallback_indices = np.where(~self.bins_with_embedding)[0]
@@ -554,7 +415,10 @@ class NeighbourGraph:
             radius: Maximum embedding distance to include as neighbor.
         """
         if self.embeddings is None:
-            raise ValueError("embeddings not available — call _load_or_compute_embeddings() first")
+            raise ValueError(
+                "embeddings not available — config.use_embedding=True but no embeddings were "
+                "provided to NeighbourGraph.__init__()"
+            )
 
         emb_indices = np.where(self.bins_with_embedding)[0]
         fallback_indices = np.where(~self.bins_with_embedding)[0]

@@ -2,7 +2,7 @@
 """
 fetch_bin_sequences_from_bold.py
 
-Reads taxonomic_data.csv with columns:
+Reads bins_data.csv with columns:
 bin_uri,phylum,class,order,family,subfamily,genus,species
 
 For each unique BIN URI this script:
@@ -27,7 +27,7 @@ import requests
 # -----------------------
 # User-editable settings
 # -----------------------
-INPUT_CSV = "Metabarcoding/data/taxonomic_data.csv"          # your input (must contain bin_uri)
+INPUT_CSV = "Metabarcoding/data/bins_data.csv"          # your input (must contain bin_uri)
 OUTPUT_CSV = "Metabarcoding/data/BIN_data.csv"               # output with sequences added
 CACHE_CSV = "bin_sequences_cache.csv"     # incremental cache to resume
 BOLD_SEQUENCE_URL = "https://v3.boldsystems.org/index.php/API_Public/sequence"

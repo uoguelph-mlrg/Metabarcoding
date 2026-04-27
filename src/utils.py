@@ -14,10 +14,10 @@ OBSERVATION_FEATURES = [
     "repl_w_reads_fractn",
     "latitude", 
     "longitude",
-    "Excess",
+    #"Excess",
     #"Bulk_Sample_wet_weight",
-    "SumExcessSpecimens",
-    "ExcessNumberTaxa",
+    #"SumExcessSpecimens",
+    #"ExcessNumberTaxa",
     #"length_min_mm", 
     #"length_max_mm",
     # Computed bin-level features
@@ -29,14 +29,14 @@ OBSERVATION_FEATURES = [
 ]
 
 TAXONOMY_FEATURES = [
-    #"kingdom",
-    "phylum",
-    "class",
-    "order",
-    "family",
-    #"subfamily",
+    "species",
     "genus",
-    "species"
+    #"subfamily",
+    "family",
+    "order",
+    "class",
+    "phylum",
+    #"kingdom",
 ]
 
 PREPROCESSING_STATE_FILENAME = "preprocessing_state.pkl"
@@ -59,6 +59,159 @@ def load_preprocessing_state(path: str) -> Dict[str, Any]:
     if not isinstance(state, dict):
         raise ValueError(f"Invalid preprocessing state in {path}: expected dict")
     return state
+
+
+def _compute_barcodebert_embeddings(
+    config: Config,
+    barcode_data_path: str,
+    batch_size: int = 64,
+) -> Dict[str, np.ndarray]:
+    """
+    Run BarcodeBERT inference on sequences in barcode_data_path and return a
+    dict mapping bin_uri -> mean-pooled embedding vector (numpy float32).
+
+    The function uses mean-pooling of the last hidden state across all token
+    positions (recommended by the BarcodeBERT authors).
+
+    Args:
+        config: Configuration object with device settings.
+        barcode_data_path: Path to TSV/CSV with 'bin_uri' and 'seq' columns.
+        batch_size: Number of sequences per inference batch.
+
+    Returns:
+        Dict[str, np.ndarray]: {bin_uri: np.ndarray of shape [hidden_dim]}
+    """
+    from transformers import AutoTokenizer, AutoModel
+    import torch
+
+    MODEL_NAME = "emmabhl/BarcodeBERT_finetuned"
+    log.info(f"Loading BarcodeBERT from HuggingFace ({MODEL_NAME}) ...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    model = AutoModel.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    device = torch.device(config.device)
+    model = model.to(device).eval()
+
+    # Read data: one consensus sequence per BIN
+    sep = "\t" if barcode_data_path.endswith(".tsv") else ","
+    df = pd.read_csv(barcode_data_path, sep=sep)
+    if "bin_uri" not in df.columns or "seq" not in df.columns:
+        raise ValueError(
+            f"{barcode_data_path} must contain 'bin_uri' and 'seq' columns. "
+            f"Found: {list(df.columns)}"
+        )
+
+    # Aggregate: take the first (consensus) sequence per BIN
+    bin_seqs = df.groupby("bin_uri")["seq"].first().to_dict()
+    uris = list(bin_seqs.keys())
+    sequences = [bin_seqs[u] for u in uris]
+
+    log.info(f"Running BarcodeBERT inference on {len(sequences)} BINs (batch_size={batch_size}) ...")
+
+    emb_dict: Dict[str, np.ndarray] = {}
+    with torch.no_grad():
+        for start in range(0, len(sequences), batch_size):
+            batch_seqs = sequences[start : start + batch_size]
+            batch_uris = uris[start : start + batch_size]
+
+            # KmerTokenizer is single-sequence only: encode each one individually
+            # and stack — safe because padding makes all outputs the same length
+            batch_input_ids = []
+            batch_attention_mask = []
+            for seq in batch_seqs:
+                encoded = tokenizer(seq, padding=True)
+                batch_input_ids.append(encoded["input_ids"])
+                batch_attention_mask.append(encoded["attention_mask"])
+
+            input_ids = torch.tensor(batch_input_ids, dtype=torch.long).to(device)
+            attention_mask = torch.tensor(batch_attention_mask, dtype=torch.long).to(device)
+
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            # last_hidden_state: [B, seq_len, hidden_dim]
+            last_hidden = outputs.last_hidden_state
+            # Mean-pool over non-padding token positions
+            mask_exp = attention_mask.unsqueeze(-1).float()  # [B, seq_len, 1]
+            sum_hidden = (last_hidden * mask_exp).sum(dim=1)  # [B, hidden_dim]
+            count = mask_exp.sum(dim=1).clamp(min=1e-9)  # [B, 1]
+            mean_pooled = (sum_hidden / count).cpu().numpy()  # [B, hidden_dim]
+
+            for uri, emb in zip(batch_uris, mean_pooled):
+                emb_dict[str(uri)] = emb.astype(np.float32)
+
+            if (start // batch_size) % 10 == 0:
+                log.debug(f"  Processed {start + len(batch_seqs)}/{len(sequences)} sequences")
+
+    log.info("BarcodeBERT inference complete.")
+    return emb_dict
+
+
+def _load_or_compute_embeddings(
+    config: Config,
+    bin_uris_ordered: List[str],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Load or compute DNA sequence embeddings for BINs.
+
+    Priority:
+        1. Load from config.embedding_path if the file exists.
+        2. Otherwise compute via BarcodeBERT using config.barcode_data_path and save to 
+            config.embedding_path (if provided) so future runs skip inference.
+        3. If neither path is usable, raise a descriptive error.
+
+    Args:
+        config: Configuration object with embedding_path, barcode_data_path, and device settings.
+        bin_uris_ordered: List of bin URIs in the order they appear in bins_df.
+
+    Returns:
+        Tuple containing:
+        - embeddings: np.ndarray of shape [n_bins, emb_dim]
+        - bins_with_embedding: np.ndarray of shape [n_bins] (bool) indicating which bins have valid embeddings
+    """
+    embedding_path = config.embedding_path
+    barcode_data_path = config.barcode_data_path
+    n_bins = len(bin_uris_ordered)
+
+    emb_dict: Dict[str, np.ndarray] = {}  # bin_uri -> np.ndarray
+
+    if embedding_path is not None and os.path.exists(embedding_path):
+        log.info(f"Loading precomputed embeddings from {embedding_path}")
+        emb_dict = np.load(embedding_path, allow_pickle=True).item()
+    elif barcode_data_path is not None:
+        log.info(
+            f"Precomputed embeddings not found; running BarcodeBERT inference "
+            f"on {barcode_data_path}"
+        )
+        emb_dict = _compute_barcodebert_embeddings(config, barcode_data_path)
+        # Cache to disk for future runs
+        if embedding_path is not None:
+            os.makedirs(os.path.dirname(os.path.abspath(embedding_path)), exist_ok=True)
+            np.save(embedding_path, np.array(emb_dict, dtype=object), allow_pickle=True)
+            log.info(f"Saved computed embeddings to {embedding_path}")
+    else:
+        raise ValueError(
+            "use_embedding=True requires at least one of:\n"
+            "  config.embedding_path  — path to a precomputed .npy embedding file\n"
+            "  config.barcode_data_path — path to a TSV with 'bin_uri' and 'seq' columns"
+        )
+
+    # Determine embedding dimension from first available vector
+    emb_dim = next(iter(emb_dict.values())).shape[0]
+    embeddings = np.zeros((n_bins, emb_dim), dtype=np.float32)
+    bins_with_embedding = np.zeros(n_bins, dtype=bool)
+
+    for idx, uri in enumerate(bin_uris_ordered):
+        if uri in emb_dict:
+            embeddings[idx] = emb_dict[uri].astype(np.float32)
+            bins_with_embedding[idx] = True
+
+    n_missing = int((~bins_with_embedding).sum())
+    n_present = int(bins_with_embedding.sum())
+    log.info(
+        f"Embeddings loaded: {n_present}/{n_bins} bins have sequences; "
+        f"{n_missing} will use taxonomy fallback."
+    )
+
+    return embeddings, bins_with_embedding
+
 
 def load(
     config: Config, 
@@ -83,7 +236,7 @@ def load(
     Returns:
     Tuple containing:
         - splits: dict with 'train', 'val', 'test' keys mapping to dicts with 'X', 'y', 'sample_ids'
-        - bins_df: DataFrame with bin features and taxonomy
+        - bins_df: DataFrame with bin features and taxonomy or embedding info
         - bin_index: mapping bin_uri -> col index
         - sample_index: mapping sample_id -> row index
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
@@ -98,13 +251,14 @@ def load(
 
     df = pd.read_csv(config.data_path)
 
-    # Rename columns to match expected format
     df = df.rename(columns={
         "sample-eventid": "sample_id"
     })
 
-    # Sample-level curation: keep samples with enough total reads.
-    # Threshold is defined as min(5th percentile, 50000) on raw (non-log) read counts.
+    ################################################################################################
+    # Data curation
+    ################################################################################################
+    # Keep samples with enough total reads. Threshold = min(5th percentile, 50k) on raw read counts.
     if "total_reads_per_sample" in df.columns:
         sample_reads = pd.to_numeric(
             df.groupby("sample_id")["total_reads_per_sample"].first(),
@@ -147,7 +301,9 @@ def load(
             dropped_samples,
         )
 
-    # Parse date and extract day of year as numeric feature
+    ################################################################################################
+    # Feature engineering and preprocessing
+    ################################################################################################
     if "collection_start_date" in df.columns:
         df["collection_day"] = pd.to_datetime(df["collection_start_date"], format="%m/%d/%Y", errors="coerce").dt.dayofyear
         df["collection_day"] = df["collection_day"].fillna(0)
@@ -173,10 +329,62 @@ def load(
     df["max_reads_norm"] = np.log1p(df["max_reads"])
     df["min_reads_norm"] = np.log1p(df["min_reads"])
     
-    # Log a warning if any expected features are missing
-    missing_features = [c for c in OBSERVATION_FEATURES + TAXONOMY_FEATURES if c not in df.columns]
+    ################################################################################################
+    # Train/val/test split
+    ################################################################################################
+    if fixed_split_indices is not None:
+        # Use fixed indices if provided for reproducibility across calls.
+        train_sample_idx = fixed_split_indices["train"]
+        val_sample_idx = fixed_split_indices["val"]
+        test_sample_idx = fixed_split_indices["test"]
+        if (
+            train_sample_idx.max(initial=-1) >= n_samples
+            or val_sample_idx.max(initial=-1) >= n_samples
+            or test_sample_idx.max(initial=-1) >= n_samples
+        ):
+            log.warning(
+                "Provided fixed_split_indices are incompatible with current filtered samples; falling back to random split."
+            )
+            fixed_split_indices = None
+    elif config.remove_excess:
+        # If removing excess samples from train/val, build test set only from excess samples and split the rest randomly.
+        excess_samples = df[df["Excess"] > 0]["sample_id"].unique()
+        non_excess_samples = df[df["Excess"] <= 0]["sample_id"].unique()
+        
+        n_non_excess = len(non_excess_samples)
+        n_val = int(n_non_excess * config.val_frac)
+        n_train = n_non_excess - n_val
+        
+        np.random.shuffle(non_excess_samples)
+        train_sample_idx = np.array([sample_index[s] for s in non_excess_samples[:n_train]])
+        val_sample_idx = np.array([sample_index[s] for s in non_excess_samples[n_train:n_train + n_val]])
+        test_sample_idx = np.array([sample_index[s] for s in excess_samples])
+        
+    else:
+        # Randomly split samples into train/val/test according to config fractions.
+        sample_indices = np.arange(n_samples)
+        np.random.shuffle(sample_indices)
+
+        n_train = int(n_samples * config.train_frac)
+        n_val = int(n_samples * config.val_frac)
+
+        train_sample_idx = sample_indices[:n_train]
+        val_sample_idx = sample_indices[n_train:n_train + n_val]
+        test_sample_idx = sample_indices[n_train + n_val:]
+    
+    split_indices = {
+        "train": train_sample_idx,
+        "val": val_sample_idx,
+        "test": test_sample_idx,
+    }
+    
+    ###
+    missing_features = [c for c in OBSERVATION_FEATURES if c not in df.columns]
     if missing_features:
         log.warning(f"Missing features in dataset: {', '.join(missing_features)}.")
+    missing_features = [c for c in TAXONOMY_FEATURES if c not in df.columns]
+    if config.use_taxonomy and missing_features:
+        log.warning(f"Missing taxonomy features in dataset: {', '.join(missing_features)}.")
 
     # Build df_long with required columns + features
     base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
@@ -200,65 +408,43 @@ def load(
             log.warning(f"Feature column '{col}' is not numeric; attempting to coerce to numeric with NaN for invalid values.")
             df_long[col] = pd.to_numeric(df_long[col], errors="coerce")
 
-    # Build taxonomic_data with taxonomy and features
-    taxonomic_data = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
-
-    # Ensure taxonomic_data is ordered by bin_index
-    taxonomic_data["_idx"] = taxonomic_data["bin_uri"].map(bin_index)
-    taxonomic_data = taxonomic_data.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
-    
-    # Create train/val/test splits at sample level.
-    # Use fixed indices if provided for reproducibility across calls.
-    if fixed_split_indices is not None:
-        train_sample_idx = fixed_split_indices["train"]
-        val_sample_idx = fixed_split_indices["val"]
-        test_sample_idx = fixed_split_indices["test"]
-        if (
-            train_sample_idx.max(initial=-1) >= n_samples
-            or val_sample_idx.max(initial=-1) >= n_samples
-            or test_sample_idx.max(initial=-1) >= n_samples
-        ):
-            log.warning(
-                "Provided fixed_split_indices are incompatible with current filtered samples; falling back to random split."
-            )
-            fixed_split_indices = None
-    elif config.remove_excess:
-        excess_samples = df_long[df_long["Excess"] > 0]["sample_id"].unique()
-        non_excess_samples = df_long[df_long["Excess"] <= 0]["sample_id"].unique()
-        
-        n_non_excess = len(non_excess_samples)
-        n_val = int(n_non_excess * config.val_frac)
-        n_train = n_non_excess - n_val
-        
-        # Shuffle non-excess samples for random train/val split
-        np.random.shuffle(non_excess_samples)
-        train_sample_idx = np.array([sample_index[s] for s in non_excess_samples[:n_train]])
-        val_sample_idx = np.array([sample_index[s] for s in non_excess_samples[n_train:n_train + n_val]])
-        test_sample_idx = np.array([sample_index[s] for s in excess_samples])
-        
+    # Build bins_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
+    if config.use_taxonomy:
+        bins_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
     else:
-        sample_indices = np.arange(n_samples)
-        np.random.shuffle(sample_indices)
+        bins_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
 
-        n_train = int(n_samples * config.train_frac)
-        n_val = int(n_samples * config.val_frac)
+    # Ensure bins_df is ordered by bin_index
+    bins_df["_idx"] = bins_df["bin_uri"].map(bin_index)
+    bins_df = bins_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
 
-        train_sample_idx = sample_indices[:n_train]
-        val_sample_idx = sample_indices[n_train:n_train + n_val]
-        test_sample_idx = sample_indices[n_train + n_val:]
-    
-    # Store split indices for reuse
-    split_indices = {
-        "train": train_sample_idx,
-        "val": val_sample_idx,
-        "test": test_sample_idx,
-    }
+    # Load or compute embeddings if needed
+    embeddings_array: Optional[np.ndarray] = None
+    bins_with_embedding_arr: Optional[np.ndarray] = None
+    if config.use_embedding:
+        embeddings_array, bins_with_embedding_arr = _load_or_compute_embeddings(config, bins_df["bin_uri"].tolist())
+        # Add embedding columns to bins_df
+        bins_df["embedding"] = [embeddings_array[i] for i in range(len(bins_df))]
+        bins_df["has_embedding"] = bins_with_embedding_arr
 
     if replay_state is not None:
         train_feature_means = dict(replay_state.get("train_feature_means", {}))
         train_feature_stds = dict(replay_state.get("train_feature_stds", {}))
         bin_medians = pd.DataFrame(replay_state.get("bin_medians", {}))
         feature_medians = pd.Series(replay_state.get("feature_medians", {}))
+        # Restore embeddings from replay state if available
+        if config.use_embedding and "embeddings_dict" in replay_state:
+            cached_emb_dict = replay_state.get("embeddings_dict", {})
+            embeddings_array = np.zeros((len(bins_df), len(next(iter(cached_emb_dict.values())))), dtype=np.float32)
+            bins_with_embedding_arr = np.zeros(len(bins_df), dtype=bool)
+            for idx, uri in enumerate(bins_df["bin_uri"]):
+                if uri in cached_emb_dict:
+                    embeddings_array[idx] = np.array(cached_emb_dict[uri], dtype=np.float32)
+                    bins_with_embedding_arr[idx] = True
+            # Update bins_df with restored embeddings
+            bins_df["embedding"] = [embeddings_array[i] for i in range(len(bins_df))]
+            bins_df["has_embedding"] = bins_with_embedding_arr
+            log.info(f"Restored embeddings from preprocessing state")
     else:
         # Fill missing numeric features with their median values given the BIN in the training set.
         X = df_long.loc[
@@ -316,6 +502,16 @@ def load(
                 "threshold": float(reads_threshold) if len(sample_reads) > 0 else None,
             },
         }
+        # Add embeddings to state if computed
+        if config.use_embedding and embeddings_array is not None:
+            # Store embeddings dict for reproducibility on resume
+            embeddings_dict = {
+                uri: embeddings_array[idx].tolist()
+                for idx, uri in enumerate(bins_df["bin_uri"])
+            }
+            state["embeddings_dict"] = embeddings_dict
+            state["embedding_path"] = config.embedding_path
+            state["use_embedding"] = True
         save_preprocessing_state(resolved_state_path, state)
 
     # Get train, val, test data
@@ -343,13 +539,13 @@ def load(
         for X, y, split in [(X_train,y_train,"train"), (X_val,y_val,"val"), (X_test,y_test,"test")]:
             X.to_csv(f"{data_path}/X_{split}.csv")
             pd.Series(y).to_csv(f"{data_path}/y_{split}.csv", index=False)
-        taxonomic_data.to_csv(f"{data_path}/taxonomic_data.csv", index=False)
+        bins_df.to_csv(f"{data_path}/bins_data.csv", index=False)
 
     result = ({
         "train": {"X": X_train, "y": y_train, "y_prob": y_train},
         "val": {"X": X_val, "y": y_val, "y_prob": y_val},
         "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-    }, taxonomic_data, bin_index, sample_index, split_indices, resolved_state_path)
+    }, bins_df, bin_index, sample_index, split_indices, resolved_state_path)
 
     return result
 
@@ -363,7 +559,7 @@ def load_processed(
     Expected files in `data_dir`:
     - X_train.csv, X_val.csv, X_test.csv (MultiIndex: sample_id, bin_uri)
     - y_train.csv, y_val.csv, y_test.csv (single column, aligned to X_*.csv row order)
-    - taxonomic_data.csv (must include bin_uri and taxonomy columns)
+    - bins_data.csv (must include bin_uri and taxonomy or embedding columns)
 
     Returns the same objects as `load()`, except `split_indices` is empty
     (since the original sample-index permutation is not recoverable from files alone).
@@ -397,10 +593,10 @@ def load_processed(
     y_val = _read_y("val", len(X_val))
     y_test = _read_y("test", len(X_test))
 
-    tax_path = os.path.join(data_dir, "taxonomic_data.csv")
-    bins_df = pd.read_csv(tax_path)
+    bins_path = os.path.join(data_dir, "bins_data.csv")
+    bins_df = pd.read_csv(bins_path)
     if "bin_uri" not in bins_df.columns:
-        raise ValueError(f"{tax_path} must contain 'bin_uri'")
+        raise ValueError(f"{bins_path} must contain 'bin_uri'")
 
     # Build index mappings from the processed splits (ensures consistency)
     unique_samples = pd.Index(
