@@ -361,6 +361,9 @@ def load(
         test_sample_idx = np.array([sample_index[s] for s in excess_samples])
         
     else:
+        # WARNING: to be updated once we corrected the excess
+        df = df[df["Excess"] <= 0]
+        
         # Randomly split samples into train/val/test according to config fractions.
         sample_indices = np.arange(n_samples)
         np.random.shuffle(sample_indices)
