@@ -44,7 +44,7 @@ PYTHONPATH=../../src python utils_test.py --data_path data/ecuador_training_data
 This will create three subdirectories in `data/` (original, normalized, logarithm), each containing:
 - X_train.csv, X_val.csv, X_test.csv
 - y_train.csv, y_val.csv, y_test.csv
-- taxonomic_data.csv
+- bins_data.csv
 
 ### Step 2: Train Models on All Preprocessing Versions
 
