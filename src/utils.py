@@ -222,7 +222,20 @@ def load(
                 "Provided fixed_split_indices are incompatible with current filtered samples; falling back to random split."
             )
             fixed_split_indices = None
-
+    elif config.remove_excess:
+        excess_samples = df_long[df_long["Excess"] > 0]["sample_id"].unique()
+        non_excess_samples = df_long[df_long["Excess"] <= 0]["sample_id"].unique()
+        
+        n_non_excess = len(non_excess_samples)
+        n_val = int(n_non_excess * config.val_frac)
+        n_train = n_non_excess - n_val
+        
+        # Shuffle non-excess samples for random train/val split
+        np.random.shuffle(non_excess_samples)
+        train_sample_idx = np.array([sample_index[s] for s in non_excess_samples[:n_train]])
+        val_sample_idx = np.array([sample_index[s] for s in non_excess_samples[n_train:n_train + n_val]])
+        test_sample_idx = np.array([sample_index[s] for s in excess_samples])
+        
     else:
         sample_indices = np.arange(n_samples)
         np.random.shuffle(sample_indices)
