@@ -1,8 +1,9 @@
 # Features to use in MLP (observation-level + computed bin-level)
-from re import L
 from typing import Tuple, Dict, Any, Literal, Optional, List
 import os
 import sys
+import pickle
+import tempfile
 import pandas as pd
 import numpy as np
 
@@ -42,6 +43,28 @@ TAXONOMY_FEATURES = [
     "phylum",
     #"kingdom",
 ]
+
+PREPROCESSING_STATE_FILENAME = "preprocessing_state.pkl"
+
+
+def _default_preprocessing_state_path(config: Config, filename: str = PREPROCESSING_STATE_FILENAME) -> str:
+    data_dir = os.path.abspath(config.results_dir)
+    return os.path.join(data_dir, filename)
+
+def save_preprocessing_state(path: str, state: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", delete=False, dir=os.path.dirname(path)) as tmp:
+        pickle.dump(state, tmp, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp_path = tmp.name
+    os.replace(tmp_path, path)
+
+def load_preprocessing_state(path: str) -> Dict[str, Any]:
+    with open(path, "rb") as fh:
+        state = pickle.load(fh)
+    if not isinstance(state, dict):
+        raise ValueError(f"Invalid preprocessing state in {path}: expected dict")
+    return state
+
 
 def _compute_barcodebert_embeddings(
     config: Config,
@@ -129,23 +152,23 @@ def _compute_barcodebert_embeddings(
 def _load_or_compute_embeddings(
     config: Config,
     bin_uris_ordered: List[str],
-) -> Tuple[Optional[np.ndarray], np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load or compute DNA sequence embeddings for BINs.
 
     Priority:
         1. Load from config.embedding_path if the file exists.
         2. Otherwise compute via BarcodeBERT using config.barcode_data_path and save to 
-           config.embedding_path (if provided) so future runs skip inference.
+            config.embedding_path (if provided) so future runs skip inference.
         3. If neither path is usable, raise a descriptive error.
 
     Args:
         config: Configuration object with embedding_path, barcode_data_path, and device settings.
-        bin_uris_ordered: List of bin URIs in the order they appear in bins_df.
+        bin_uris_ordered: List of bin URIs in the order they appear in taxonomy_df.
 
     Returns:
         Tuple containing:
-        - embeddings: np.ndarray of shape [n_bins, emb_dim] or None if no embeddings loaded
+        - embeddings: np.ndarray of shape [n_bins, emb_dim]
         - bins_with_embedding: np.ndarray of shape [n_bins] (bool) indicating which bins have valid embeddings
     """
     embedding_path = config.embedding_path
@@ -199,35 +222,101 @@ def load(
     config: Config, 
     save_data: bool = True,
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
-    read_count_preprocessing: str = "original"
-) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
+    read_count_preprocessing: Literal["original", "normalized", "logarithm"] = "original",
+    preprocessing_state_path: Optional[str] = None,
+    preprocessing_state_filename: str = PREPROCESSING_STATE_FILENAME,
+) -> Tuple[
+    Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray], 
+    Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str
+]:
     """
     Load and preprocess the CSV data.
 
     Args:
         config: Configuration object with train_frac, val_frac
         save_data: Whether to save split CSVs to disk
-        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing
-                            sample indices for reproducible splits across different calls
+        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample 
+            indices for reproducible splits across different calls
         read_count_preprocessing: One of "original" (no preprocessing), "normalized" (normalize per
                                 sample), or "logarithm" (only apply log transform)
+        preprocessing_state_path: Optional path to preprocessing state file; used for replay mode 
+            when the file already exists. If missing, preprocessing is computed and the artifact is 
+            written there.
+        preprocessing_state_filename: Artifact filename used when writing default state
 
     Returns:
     Tuple containing:
         - splits: dict with 'train', 'val', 'test' keys mapping to dicts with 'X', 'y', 'sample_ids'
-        - bins_df: DataFrame with bin features and taxonomy
+        - taxonomy_df: DataFrame with bin features and taxonomy or embedding info
+        - embeddings_array: np.ndarray of shape [n_bins, emb_dim] if use_embedding else None
+        - bins_with_embedding_arr: np.ndarray of shape [n_bins] bool indicating which bins have embeddings (if use_embedding) else None
         - bin_index: mapping bin_uri -> col index
         - sample_index: mapping sample_id -> row index
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
+        - preprocessing_state_path: path to the saved preprocessing state artifact 
     """
+    replay_state: Optional[Dict[str, Any]] = None
+    if preprocessing_state_path is not None and os.path.exists(preprocessing_state_path):
+        replay_state = load_preprocessing_state(preprocessing_state_path)
+
+    default_state_path = _default_preprocessing_state_path(config, preprocessing_state_filename)
+    resolved_state_path = os.path.abspath(preprocessing_state_path) if preprocessing_state_path else default_state_path
+
     df = pd.read_csv(config.data_path)
 
-    # Rename columns to match expected format
     df = df.rename(columns={
         "sample-eventid": "sample_id"
     })
 
-    # Parse date and extract day of year as numeric feature
+    ################################################################################################
+    # Data curation
+    ################################################################################################
+    # Keep samples with enough total reads. Threshold = min(5th percentile, 50k) on raw read counts.
+    if "total_reads_per_sample" in df.columns:
+        sample_reads = pd.to_numeric(
+            df.groupby("sample_id")["total_reads_per_sample"].first(),
+            errors="coerce",
+        )
+    elif "total_reads" in df.columns:
+        sample_reads = pd.to_numeric(
+            df.groupby("sample_id")["total_reads"].sum(),
+            errors="coerce",
+        )
+        log.warning(
+            "Column 'total_reads_per_sample' not found; using summed 'total_reads' per sample for filtering."
+        )
+    else:
+        sample_reads = pd.Series(dtype=float)
+        log.warning(
+            "No read-count column found for sample filtering ('total_reads_per_sample' or 'total_reads')."
+        )
+
+    if len(sample_reads) > 0:
+        q05 = float(sample_reads.quantile(0.05))
+        # Cap the read filter at 50k to avoid dropping a large tail of reasonably well-sequenced 
+        # samples (in the cases where the dataset is well curated)
+        reads_threshold = min(q05, 50000.0)
+        kept_sample_ids = sample_reads[sample_reads >= reads_threshold].index
+        dropped_samples = int((sample_reads < reads_threshold).sum())
+
+        if len(kept_sample_ids) == 0:
+            raise ValueError(
+                f"Sample filtering removed all samples at threshold {reads_threshold:.2f}."
+            )
+
+        df = df[df["sample_id"].isin(kept_sample_ids)].copy()
+        log.info(
+            "Applied sample read-count filter: threshold=min(q05=%.2f, 50000)=%.2f; kept %d/%d samples; dropped %d.",
+            q05,
+            reads_threshold,
+            len(kept_sample_ids),
+            len(sample_reads),
+            dropped_samples,
+        )
+
+    ################################################################################################
+    # Feature engineering and preprocessing
+    ################################################################################################
     if "collection_start_date" in df.columns:
         df["collection_day"] = pd.to_datetime(df["collection_start_date"], format="%m/%d/%Y", errors="coerce").dt.dayofyear
         df["collection_day"] = df["collection_day"].fillna(0)
@@ -270,41 +359,43 @@ def load(
         raise ValueError(f"Unknown read_count_preprocessing: {read_count_preprocessing}. "
                         f"Must be one of: 'original', 'normalized', 'logarithm'")
     # Log a warning if any expected features are missing
-    missing_features = [c for c in OBSERVATION_FEATURES + TAXONOMY_FEATURES if c not in df.columns]
-    if missing_features:
-        log.warning(f"Missing features in dataset: {', '.join(missing_features)}.")
-
-    # Build df_long with required columns + features
-    base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
-    feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
-    df_long = df[base_cols + feature_cols_present].copy()
-
-    # Build bins_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
-    if config.use_taxonomy:
-        bins_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
-    else:
-        bins_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
-
-    # Ensure bins_df is ordered by bin_index
-    bins_df["_idx"] = bins_df["bin_uri"].map(bin_index)
-    bins_df = bins_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
-
-    # Load or compute embeddings if needed
-    embeddings_array: Optional[np.ndarray] = None
-    bins_with_embedding_arr: Optional[np.ndarray] = None
-    if config.use_embedding:
-        embeddings_array, bins_with_embedding_arr = _load_or_compute_embeddings(config, bins_df["bin_uri"].tolist())
-        # Add embedding columns to bins_df
-        bins_df["embedding"] = [embeddings_array[i] for i in range(len(bins_df))]
-        bins_df["has_embedding"] = bins_with_embedding_arr
-
-    # Create train/val/test splits at sample level
-    # Use fixed indices if provided for reproducibility across calls
+    
+    ################################################################################################
+    # Train/val/test split
+    ################################################################################################
     if fixed_split_indices is not None:
+        # Use fixed indices if provided for reproducibility across calls.
         train_sample_idx = fixed_split_indices["train"]
         val_sample_idx = fixed_split_indices["val"]
         test_sample_idx = fixed_split_indices["test"]
+        if (
+            train_sample_idx.max(initial=-1) >= n_samples
+            or val_sample_idx.max(initial=-1) >= n_samples
+            or test_sample_idx.max(initial=-1) >= n_samples
+        ):
+            log.warning(
+                "Provided fixed_split_indices are incompatible with current filtered samples; falling back to random split."
+            )
+            fixed_split_indices = None
+    elif config.remove_excess:
+        # If removing excess samples from train/val, build test set only from excess samples and split the rest randomly.
+        excess_samples = df[df["Excess"] > 0]["sample_id"].unique()
+        non_excess_samples = df[df["Excess"] <= 0]["sample_id"].unique()
+        
+        n_non_excess = len(non_excess_samples)
+        n_val = int(n_non_excess * config.val_frac)
+        n_train = n_non_excess - n_val
+        
+        np.random.shuffle(non_excess_samples)
+        train_sample_idx = np.array([sample_index[s] for s in non_excess_samples[:n_train]])
+        val_sample_idx = np.array([sample_index[s] for s in non_excess_samples[n_train:n_train + n_val]])
+        test_sample_idx = np.array([sample_index[s] for s in excess_samples])
+        
     else:
+        # WARNING: to be updated once we corrected the excess
+        df = df[df["Excess"] <= 0]
+        
+        # Randomly split samples into train/val/test according to config fractions.
         sample_indices = np.arange(n_samples)
         np.random.shuffle(sample_indices)
 
@@ -315,34 +406,139 @@ def load(
         val_sample_idx = sample_indices[n_train:n_train + n_val]
         test_sample_idx = sample_indices[n_train + n_val:]
     
-    # Store split indices for reuse
     split_indices = {
         "train": train_sample_idx,
         "val": val_sample_idx,
         "test": test_sample_idx,
     }
-
-    # Fill missing numeric features with their median values given the BIN in the training set
-    X = df_long.loc[
-        df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), feature_cols_present + ["bin_uri"]
-    ]
-    bin_medians = X.groupby("bin_uri").median()
-    for col in feature_cols_present:
-        if col not in bin_medians.columns:
-            continue
-        median_map = bin_medians[col].to_dict()
-        df_long[col] = df_long.apply(
-            lambda row: median_map.get(row["bin_uri"], np.nan) if pd.isna(row[col]) else row[col],
-            axis=1
-        )
-        # Now fill any remaining missing values with overall median
-        df_long[col] = df_long[col].fillna(df_long[col].median())
     
-    # Normalize based on training set statistics
+    missing_features = [c for c in OBSERVATION_FEATURES if c not in df.columns]
+    if missing_features:
+        log.warning(f"Missing features in dataset: {', '.join(missing_features)}.")
+    missing_features = [c for c in TAXONOMY_FEATURES if c not in df.columns]
+    if config.use_taxonomy and missing_features:
+        log.warning(f"Missing taxonomy features in dataset: {', '.join(missing_features)}.")
+
+    # Build df_long with required columns + features
+    base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
+    if replay_state is not None:
+        feature_cols_present = list(replay_state.get("feature_cols_present", []))
+        if not feature_cols_present:
+            raise ValueError("Preprocessing replay failed: missing 'feature_cols_present' in artifact")
+        replay_missing = [c for c in feature_cols_present if c not in df.columns]
+        if replay_missing:
+            raise ValueError(
+                "Preprocessing replay failed: expected feature columns are missing from input data: "
+                + ", ".join(replay_missing)
+            )
+    else:
+        feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
+    df_long = df[base_cols + feature_cols_present].copy()
+
+    # Ensure feature columns are numeric; non-numeric values become NaN and are imputed later.
     for col in feature_cols_present:
-        # Avoid division by zero by stabilizing the denominator (not by shifting the standardized feature)
-        std = float(X[col].std(ddof=0))
-        df_long[col] = (df_long[col] - float(X[col].mean())) / (std + 1e-10)
+        if not pd.api.types.is_numeric_dtype(df_long[col]):
+            log.warning(f"Feature column '{col}' is not numeric; attempting to coerce to numeric with NaN for invalid values.")
+            df_long[col] = pd.to_numeric(df_long[col], errors="coerce")
+
+    # Build taxonomy_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
+    if config.use_taxonomy:
+        taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
+    else:
+        taxonomy_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
+
+    # Ensure taxonomy_df is ordered by bin_index
+    taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
+    taxonomy_df = taxonomy_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
+
+    # Load or compute embeddings if needed
+    embeddings_array: Optional[np.ndarray] = None
+    bins_with_embedding_arr: Optional[np.ndarray] = None
+    if config.use_embedding:
+        embeddings_array, bins_with_embedding_arr = _load_or_compute_embeddings(config, taxonomy_df["bin_uri"].tolist())
+
+    if replay_state is not None:
+        train_feature_means = dict(replay_state.get("train_feature_means", {}))
+        train_feature_stds = dict(replay_state.get("train_feature_stds", {}))
+        bin_medians = pd.DataFrame(replay_state.get("bin_medians", {}))
+        feature_medians = pd.Series(replay_state.get("feature_medians", {}))
+        # Restore embeddings from replay state if available
+        if config.use_embedding and "embeddings_dict" in replay_state:
+            cached_emb_dict = replay_state.get("embeddings_dict", {})
+            embeddings_array = np.zeros((len(taxonomy_df), len(next(iter(cached_emb_dict.values())))), dtype=np.float32)
+            bins_with_embedding_arr = np.zeros(len(taxonomy_df), dtype=bool)
+            for idx, uri in enumerate(taxonomy_df["bin_uri"]):
+                if uri in cached_emb_dict:
+                    embeddings_array[idx] = np.array(cached_emb_dict[uri], dtype=np.float32)
+                    bins_with_embedding_arr[idx] = True
+    else:
+        # Fill missing numeric features with their median values given the BIN in the training set.
+        X = df_long.loc[
+            df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), feature_cols_present + ["bin_uri"]
+        ]
+        X_features = X[feature_cols_present]
+        train_feature_means = X_features.mean().to_dict()
+        train_feature_stds = X_features.std(ddof=0).to_dict()
+        bin_medians = X.groupby("bin_uri")[feature_cols_present].median()
+        feature_medians = X_features.median()
+
+    for col in feature_cols_present:
+        median_map = dict(bin_medians.get(col, {}))
+        # First pass: fill NaNs with the BIN-specific train-set median (vectorized).
+        missing = df_long[col].isna()
+        df_long.loc[missing, col] = df_long.loc[missing, "bin_uri"].map(median_map)
+        # Second pass: global fallback for BINs with no usable train median.
+        if col not in feature_medians:
+            raise ValueError(f"Preprocessing replay failed: missing global median for feature '{col}'")
+        df_long[col] = df_long[col].fillna(float(feature_medians[col]))
+
+        if col not in train_feature_means or col not in train_feature_stds:
+            raise ValueError(f"Preprocessing replay failed: missing mean/std for feature '{col}'")
+        std = float(train_feature_stds[col])
+        mean = float(train_feature_means[col])
+        df_long[col] = (df_long[col] - mean) / (std + 1e-10)
+        
+
+    if replay_state is None:
+        # Store the sample IDs corresponding to each split for reproducibility and downstream use.
+        split_sample_ids = {
+            "train": unique_samples[train_sample_idx].tolist(),
+            "val": unique_samples[val_sample_idx].tolist(),
+            "test": unique_samples[test_sample_idx].tolist(),
+        }
+        state = {
+            "source_data_path": os.path.abspath(config.data_path),
+            "feature_cols_present": feature_cols_present,
+            "log_transform_columns": [
+                c for c in ["total_reads_per_sample", "total_reads_norm", "avg_reads_norm", "max_reads_norm", "min_reads_norm"]
+                if c in feature_cols_present
+            ],
+            "train_feature_means": train_feature_means,
+            "train_feature_stds": train_feature_stds,
+            "feature_medians": feature_medians.to_dict(),
+            "bin_medians": bin_medians.to_dict(),
+            "split_indices": {
+                "train": train_sample_idx.astype(np.int64).tolist(),
+                "val": val_sample_idx.astype(np.int64).tolist(),
+                "test": test_sample_idx.astype(np.int64).tolist(),
+            },
+            "split_sample_ids": split_sample_ids,
+            "sample_filter": {
+                "enabled": len(sample_reads) > 0,
+                "threshold": float(reads_threshold) if len(sample_reads) > 0 else None,
+            },
+        }
+        # Add embeddings to state if computed
+        if config.use_embedding and embeddings_array is not None:
+            # Store embeddings dict for reproducibility on resume
+            embeddings_dict = {
+                uri: embeddings_array[idx].tolist()
+                for idx, uri in enumerate(taxonomy_df["bin_uri"])
+            }
+            state["embeddings_dict"] = embeddings_dict
+            state["embedding_path"] = config.embedding_path
+            state["use_embedding"] = True
+        save_preprocessing_state(resolved_state_path, state)
 
     # Get train, val, test data
     def compute_data_split(df_long, sample_idx):
@@ -364,21 +560,32 @@ def load(
     
     # Save the data splits in the `data` folder
     if save_data:
-        data_dir = os.path.dirname(config.data_path)
+        data_path_root = os.path.dirname(config.data_path)
         # Create subdirectory for this preprocessing method
-        save_dir = os.path.join(data_dir, config.read_count_preprocessing)
-        os.makedirs(save_dir, exist_ok=True)
+        data_path = os.path.join(data_path_root, config.read_count_preprocessing)
+        os.makedirs(data_path, exist_ok=True)
 
         for X, y, split in [(X_train,y_train,"train"), (X_val,y_val,"val"), (X_test,y_test,"test")]:
-            X.to_csv(f"{save_dir}/X_{split}.csv")
-            pd.Series(y).to_csv(f"{save_dir}/y_{split}.csv", index=False)
-        bins_df.to_csv(f"{save_dir}/bins_data.csv", index=False)
+            X.to_csv(f"{data_path}/X_{split}.csv")
+            pd.Series(y).to_csv(f"{data_path}/y_{split}.csv", index=False)
+        taxonomy_df.to_csv(f"{data_path}/bins_data.csv", index=False)
 
-    return {
-        "train": {"X": X_train, "y": y_train, "y_prob": y_train},
-        "val": {"X": X_val, "y": y_val, "y_prob": y_val},
-        "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-    }, bins_df, bin_index, sample_index, split_indices
+    result = (
+        {
+            "train": {"X": X_train, "y": y_train, "y_prob": y_train},
+            "val": {"X": X_val, "y": y_val, "y_prob": y_val},
+            "test": {"X": X_test, "y": y_test, "y_prob": y_test},
+        }, 
+        taxonomy_df,                    # flat DataFrame: bin_uri + taxonomy only
+        embeddings_array,           # np.ndarray [n_bins, emb_dim] or None
+        bins_with_embedding_arr,    # np.ndarray [n_bins] bool or None
+        bin_index, 
+        sample_index, 
+        split_indices, 
+        resolved_state_path
+    )
+
+    return result
 
 
 def load_processed(
@@ -388,9 +595,9 @@ def load_processed(
     Load preprocessed splits saved by `load()` from a directory.
 
     Expected files in `data_dir`:
-      - X_train.csv, X_val.csv, X_test.csv (MultiIndex: sample_id, bin_uri)
-      - y_train.csv, y_val.csv, y_test.csv (single column, aligned to X_*.csv row order)
-      - bins_data.csv (must include bin_uri and taxonomy columns)
+    - X_train.csv, X_val.csv, X_test.csv (MultiIndex: sample_id, bin_uri)
+    - y_train.csv, y_val.csv, y_test.csv (single column, aligned to X_*.csv row order)
+    - bins_data.csv (must include bin_uri and taxonomy or embedding columns)
 
     Returns the same objects as `load()`, except `split_indices` is empty
     (since the original sample-index permutation is not recoverable from files alone).
@@ -410,6 +617,7 @@ def load_processed(
             y = y_df.iloc[:, 0]
         else:
             # fallback: try a known column name
+            # Contract: if rel_abundance is absent, first column is treated as target.
             y = y_df["rel_abundance"] if "rel_abundance" in y_df.columns else y_df.iloc[:, 0]
         if len(y) != n_rows:
             raise ValueError(f"{path} has {len(y)} rows but X_{split}.csv has {n_rows}")
@@ -423,10 +631,10 @@ def load_processed(
     y_val = _read_y("val", len(X_val))
     y_test = _read_y("test", len(X_test))
 
-    bin_data_path = os.path.join(data_dir, "bins_data.csv")
-    bins_df = pd.read_csv(bin_data_path)
-    if "bin_uri" not in bins_df.columns:
-        raise ValueError(f"{bin_data_path} must contain 'bin_uri'")
+    bins_path = os.path.join(data_dir, "bins_data.csv")
+    taxonomy_df = pd.read_csv(bins_path)
+    if "bin_uri" not in taxonomy_df.columns:
+        raise ValueError(f"{bins_path} must contain 'bin_uri'")
 
     # Build index mappings from the processed splits (ensures consistency)
     unique_samples = pd.Index(
@@ -447,9 +655,9 @@ def load_processed(
     )
     bin_index = {b: i for i, b in enumerate(unique_bins)}
 
-    # Reorder bins_df to match bin_index where possible
-    bins_df["_idx"] = bins_df["bin_uri"].map(bin_index)
-    bins_df = bins_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
+    # Reorder taxonomy_df to match bin_index where possible
+    taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
+    taxonomy_df = taxonomy_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
 
     # No split_indices available when loading from disk
     split_indices: Dict[str, np.ndarray] = {"train": np.array([]), "val": np.array([]), "test": np.array([])}
@@ -458,7 +666,7 @@ def load_processed(
         "train": {"X": X_train, "y": y_train, "y_prob": y_train},
         "val": {"X": X_val, "y": y_val, "y_prob": y_val},
         "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-    }, bins_df, bin_index, sample_index, split_indices
+    }, taxonomy_df, bin_index, sample_index, split_indices
 
 
 if __name__ == "__main__":
@@ -487,7 +695,7 @@ if __name__ == "__main__":
     
     # First pass: generate the split indices
     log.info("\nGenerating split indices...")
-    _, _, _, _, split_indices = load(
+    _, _, _, _, _, _, split_indices, _ = load(
         cfg, 
         save_data=False,
         read_count_preprocessing="original"

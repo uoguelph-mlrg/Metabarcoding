@@ -76,7 +76,7 @@ class Trainer:
                 f"{self.preprocessing_state_path}."
             )
 
-        data, bins_df, bin_index, sample_index, split_indices, preprocessing_state_path = load(
+        data, taxonomy_df, embeddings_array, bins_with_embedding_arr, bin_index, sample_index, split_indices, preprocessing_state_path = load(
             self.cfg,
             save_data=False,
             fixed_split_indices=fixed_split_indices,
@@ -89,7 +89,12 @@ class Trainer:
         self.split_indices = split_indices
         self.preprocessing_state_path = preprocessing_state_path
 
-        self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
+        self.neighbour_graph = NeighbourGraph(
+            self.cfg,
+            taxonomy_df,
+            embeddings=embeddings_array,
+            bins_with_embedding=bins_with_embedding_arr,
+        )
         self.neighbour_graph.build()
 
         latent_solver = LatentSolver(

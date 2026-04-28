@@ -41,7 +41,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("\n[1/5] Loading data...")
 # Load processed data (splits, features, etc.)
-splits, bins_df, bin_index, sample_index, split_indices = load_processed(data_dir)
+splits, taxonomy_df, bin_index, sample_index, split_indices = load_processed(data_dir)
 
 # Extract intrinsic features (used by MLP)
 intrinsic_features = [col for col in splits['train']['X'].columns]
@@ -49,7 +49,7 @@ print(f"   Intrinsic features: {intrinsic_features}")
 
 # Extract taxonomic features (used for latent smoothing)
 taxonomic_features = ['phylum', 'class', 'order', 'family', 'subfamily', 'genus', 'species']
-available_taxonomic = [col for col in taxonomic_features if col in bins_df.columns]
+available_taxonomic = [col for col in taxonomic_features if col in taxonomy_df.columns]
 print(f"   Taxonomic features: {available_taxonomic}")
 
 # Prepare data
@@ -120,11 +120,11 @@ print("\n[4/5] Building taxonomic feature matrix for KNN...")
 # splits['train']['X'] has MultiIndex (sample_id, bin_uri), we need to map bin_uri -> taxonomy
 
 # Create mapping from bin_uri to taxonomic features
-bin_to_taxonomy = bins_df.set_index('bin_uri')[available_taxonomic]
+bin_to_taxonomy = taxonomy_df.set_index('bin_uri')[available_taxonomic]
 
 # Encode taxonomic features as integers for KNN
 from sklearn.preprocessing import LabelEncoder
-taxonomy_encoded = bins_df[['bin_uri'] + available_taxonomic].copy()
+taxonomy_encoded = taxonomy_df[['bin_uri'] + available_taxonomic].copy()
 for col in available_taxonomic:
     le = LabelEncoder()
     taxonomy_encoded[col] = le.fit_transform(taxonomy_encoded[col].fillna('MISSING'))
