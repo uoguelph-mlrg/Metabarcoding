@@ -29,7 +29,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from prepare import MBDataset, collate_samples, load, load_or_preprocess, Loss, TIME_BUDGET
+from prepare import MBDataset, collate_samples, load, load_or_preprocess, Loss, TIME_BUDGET, TAXONOMY_FEATURES
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -45,6 +45,7 @@ class Config:
     # Train / val / test split
     train_frac: float = 0.8
     val_frac: float = 0.1
+    remove_excess: bool = False
     
     # Basic training settings
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
@@ -1162,23 +1163,33 @@ class NeighbourGraph:
     Provides functions to compute NW weights and LLR coefficients per node.
     """
 
-    def __init__(self, cfg: Config, bins_df: pd.DataFrame):
+    def __init__(self, cfg: Config, taxonomy_df: pd.DataFrame, embeddings: Optional[np.ndarray] = None, bins_with_embedding: Optional[np.ndarray] = None):
         self.cfg = cfg
-        self.bins = bins_df.copy().reset_index(drop=True)
+        self.tax_levels = TAXONOMY_FEATURES
+        
+        tax_cols_present = ["bin_uri"] + [c for c in self.tax_levels if c in taxonomy_df.columns]
+        self.bins = taxonomy_df[tax_cols_present].reset_index(drop=True)
         self.n_bins = len(self.bins)
 
-        # taxonomy columns expected: species, genus, subfamily, family, order, class, phylum
-        self.tax_levels = TAXONOMY_FEATURES
-
-        # output structures
         self.neighbours: List[List[int]] = [[] for _ in range(self.n_bins)]
         self.distances: List[np.ndarray] = [np.array([]) for _ in range(self.n_bins)]
         
-        if self.cfg.use_embedding:
-            self.embeddings: Optional[np.ndarray] = bins_df.get("embedding", None)
-            self.bins_with_embedding: np.ndarray = bins_df.get("has_embedding", np.ones(self.n_bins, dtype=bool)).values
+        if cfg.use_embedding:
+            if embeddings is None:
+                raise ValueError(
+                    "cfg.use_embedding=True but no embeddings array was passed to NeighbourGraph"
+                )
+            self.embeddings: Optional[np.ndarray] = embeddings
+            self.bins_with_embedding: np.ndarray = (
+                bins_with_embedding
+                if bins_with_embedding is not None
+                else np.ones(self.n_bins, dtype=bool)
+            )
+        else:
+            self.embeddings = None
+            self.bins_with_embedding = np.zeros(self.n_bins, dtype=bool)
 
-    
+
     def build_taxonomy_neighbors_knn(self, K: int) -> None:
         """
         Populate neighbours using taxonomic discrete distance with KNN.
@@ -1496,7 +1507,10 @@ class NeighbourGraph:
             K: Number of nearest neighbors to select.
         """
         if self.embeddings is None:
-            raise ValueError("embeddings not available — call _load_or_compute_embeddings() first")
+            raise ValueError(
+                "embeddings not available — config.use_embedding=True but no embeddings were "
+                "provided to NeighbourGraph.__init__()"
+            )
 
         emb_indices = np.where(self.bins_with_embedding)[0]
         fallback_indices = np.where(~self.bins_with_embedding)[0]
@@ -1550,7 +1564,10 @@ class NeighbourGraph:
             radius: Maximum embedding distance to include as neighbor.
         """
         if self.embeddings is None:
-            raise ValueError("embeddings not available — call _load_or_compute_embeddings() first")
+            raise ValueError(
+                "embeddings not available — config.use_embedding=True but no embeddings were "
+                "provided to NeighbourGraph.__init__()"
+            )
 
         emb_indices = np.where(self.bins_with_embedding)[0]
         fallback_indices = np.where(~self.bins_with_embedding)[0]
@@ -1728,7 +1745,7 @@ class Trainer:
         self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        data, bins_df, bin_index, sample_index, split_indices = load_or_preprocess(
+        data, taxonomy_df, bin_index, sample_index, split_indices = load_or_preprocess(
             self.cfg,
             fixed_split_indices=fixed_split_indices,
         )
@@ -1738,7 +1755,7 @@ class Trainer:
         self.sample_index = sample_index
         self.split_indices = split_indices
 
-        self.neighbour_graph = NeighbourGraph(self.cfg, bins_df)
+        self.neighbour_graph = NeighbourGraph(self.cfg, taxonomy_df)
         self.neighbour_graph.build()
 
         latent_solver = LatentSolver(
