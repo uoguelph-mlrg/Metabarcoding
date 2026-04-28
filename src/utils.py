@@ -159,7 +159,7 @@ def _load_or_compute_embeddings(
 
     Args:
         config: Configuration object with embedding_path, barcode_data_path, and device settings.
-        bin_uris_ordered: List of bin URIs in the order they appear in bins_df.
+        bin_uris_ordered: List of bin URIs in the order they appear in taxonomy_df.
 
     Returns:
         Tuple containing:
@@ -219,7 +219,10 @@ def load(
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
     preprocessing_state_path: Optional[str] = None,
     preprocessing_state_filename: str = PREPROCESSING_STATE_FILENAME,
-) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str]:
+) -> Tuple[
+    Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray], 
+    Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str
+]:
     """
     Load and preprocess the CSV data.
 
@@ -236,7 +239,9 @@ def load(
     Returns:
     Tuple containing:
         - splits: dict with 'train', 'val', 'test' keys mapping to dicts with 'X', 'y', 'sample_ids'
-        - bins_df: DataFrame with bin features and taxonomy or embedding info
+        - taxonomy_df: DataFrame with bin features and taxonomy or embedding info
+        - embeddings_array: np.ndarray of shape [n_bins, emb_dim] if use_embedding else None
+        - bins_with_embedding_arr: np.ndarray of shape [n_bins] bool indicating which bins have embeddings (if use_embedding) else None
         - bin_index: mapping bin_uri -> col index
         - sample_index: mapping sample_id -> row index
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
@@ -380,8 +385,7 @@ def load(
         "val": val_sample_idx,
         "test": test_sample_idx,
     }
-    
-    ###
+
     missing_features = [c for c in OBSERVATION_FEATURES if c not in df.columns]
     if missing_features:
         log.warning(f"Missing features in dataset: {', '.join(missing_features)}.")
@@ -411,24 +415,21 @@ def load(
             log.warning(f"Feature column '{col}' is not numeric; attempting to coerce to numeric with NaN for invalid values.")
             df_long[col] = pd.to_numeric(df_long[col], errors="coerce")
 
-    # Build bins_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
+    # Build taxonomy_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
     if config.use_taxonomy:
-        bins_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
+        taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
     else:
-        bins_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
+        taxonomy_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
 
-    # Ensure bins_df is ordered by bin_index
-    bins_df["_idx"] = bins_df["bin_uri"].map(bin_index)
-    bins_df = bins_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
+    # Ensure taxonomy_df is ordered by bin_index
+    taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
+    taxonomy_df = taxonomy_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
 
     # Load or compute embeddings if needed
     embeddings_array: Optional[np.ndarray] = None
     bins_with_embedding_arr: Optional[np.ndarray] = None
     if config.use_embedding:
-        embeddings_array, bins_with_embedding_arr = _load_or_compute_embeddings(config, bins_df["bin_uri"].tolist())
-        # Add embedding columns to bins_df
-        bins_df["embedding"] = [embeddings_array[i] for i in range(len(bins_df))]
-        bins_df["has_embedding"] = bins_with_embedding_arr
+        embeddings_array, bins_with_embedding_arr = _load_or_compute_embeddings(config, taxonomy_df["bin_uri"].tolist())
 
     if replay_state is not None:
         train_feature_means = dict(replay_state.get("train_feature_means", {}))
@@ -438,16 +439,12 @@ def load(
         # Restore embeddings from replay state if available
         if config.use_embedding and "embeddings_dict" in replay_state:
             cached_emb_dict = replay_state.get("embeddings_dict", {})
-            embeddings_array = np.zeros((len(bins_df), len(next(iter(cached_emb_dict.values())))), dtype=np.float32)
-            bins_with_embedding_arr = np.zeros(len(bins_df), dtype=bool)
-            for idx, uri in enumerate(bins_df["bin_uri"]):
+            embeddings_array = np.zeros((len(taxonomy_df), len(next(iter(cached_emb_dict.values())))), dtype=np.float32)
+            bins_with_embedding_arr = np.zeros(len(taxonomy_df), dtype=bool)
+            for idx, uri in enumerate(taxonomy_df["bin_uri"]):
                 if uri in cached_emb_dict:
                     embeddings_array[idx] = np.array(cached_emb_dict[uri], dtype=np.float32)
                     bins_with_embedding_arr[idx] = True
-            # Update bins_df with restored embeddings
-            bins_df["embedding"] = [embeddings_array[i] for i in range(len(bins_df))]
-            bins_df["has_embedding"] = bins_with_embedding_arr
-            log.info(f"Restored embeddings from preprocessing state")
     else:
         # Fill missing numeric features with their median values given the BIN in the training set.
         X = df_long.loc[
@@ -510,7 +507,7 @@ def load(
             # Store embeddings dict for reproducibility on resume
             embeddings_dict = {
                 uri: embeddings_array[idx].tolist()
-                for idx, uri in enumerate(bins_df["bin_uri"])
+                for idx, uri in enumerate(taxonomy_df["bin_uri"])
             }
             state["embeddings_dict"] = embeddings_dict
             state["embedding_path"] = config.embedding_path
@@ -542,13 +539,22 @@ def load(
         for X, y, split in [(X_train,y_train,"train"), (X_val,y_val,"val"), (X_test,y_test,"test")]:
             X.to_csv(f"{data_path}/X_{split}.csv")
             pd.Series(y).to_csv(f"{data_path}/y_{split}.csv", index=False)
-        bins_df.to_csv(f"{data_path}/bins_data.csv", index=False)
+        taxonomy_df.to_csv(f"{data_path}/bins_data.csv", index=False)
 
-    result = ({
-        "train": {"X": X_train, "y": y_train, "y_prob": y_train},
-        "val": {"X": X_val, "y": y_val, "y_prob": y_val},
-        "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-    }, bins_df, bin_index, sample_index, split_indices, resolved_state_path)
+    result = (
+        {
+            "train": {"X": X_train, "y": y_train, "y_prob": y_train},
+            "val": {"X": X_val, "y": y_val, "y_prob": y_val},
+            "test": {"X": X_test, "y": y_test, "y_prob": y_test},
+        }, 
+        taxonomy_df,                # flat DataFrame: bin_uri + taxonomy only
+        embeddings_array,           # np.ndarray [n_bins, emb_dim] or None
+        bins_with_embedding_arr,    # np.ndarray [n_bins] bool or None
+        bin_index, 
+        sample_index, 
+        split_indices, 
+        resolved_state_path
+    )
 
     return result
 
@@ -597,8 +603,8 @@ def load_processed(
     y_test = _read_y("test", len(X_test))
 
     bins_path = os.path.join(data_dir, "bins_data.csv")
-    bins_df = pd.read_csv(bins_path)
-    if "bin_uri" not in bins_df.columns:
+    taxonomy_df = pd.read_csv(bins_path)
+    if "bin_uri" not in taxonomy_df.columns:
         raise ValueError(f"{bins_path} must contain 'bin_uri'")
 
     # Build index mappings from the processed splits (ensures consistency)
@@ -620,9 +626,9 @@ def load_processed(
     )
     bin_index = {b: i for i, b in enumerate(unique_bins)}
 
-    # Reorder bins_df to match bin_index where possible
-    bins_df["_idx"] = bins_df["bin_uri"].map(bin_index)
-    bins_df = bins_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
+    # Reorder taxonomy_df to match bin_index where possible
+    taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
+    taxonomy_df = taxonomy_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
 
     # No split_indices available when loading from disk
     split_indices: Dict[str, np.ndarray] = {"train": np.array([]), "val": np.array([]), "test": np.array([])}
@@ -631,4 +637,4 @@ def load_processed(
         "train": {"X": X_train, "y": y_train, "y_prob": y_train},
         "val": {"X": X_val, "y": y_val, "y_prob": y_val},
         "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-    }, bins_df, bin_index, sample_index, split_indices
+    }, taxonomy_df, bin_index, sample_index, split_indices

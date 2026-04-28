@@ -16,6 +16,7 @@ class Config:
     # Train / val / test split
     train_frac: float = 0.8
     val_frac: float = 0.1
+    remove_excess: bool = False
     
     # Basic training settings
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"

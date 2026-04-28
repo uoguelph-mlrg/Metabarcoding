@@ -679,7 +679,7 @@ def run_ablation_study(
     # ========================================================================
     # Step 2: Build non-taxonomy data once for all ablation variants
     # ========================================================================
-    data_no_tax, bins_df, bin_index, sample_index, _, _ = load_data_with_taxonomy(
+    data_no_tax, taxonomy_df, bin_index, sample_index, _, _ = load_data_with_taxonomy(
         cfg,
         include_taxonomy=False,
         fixed_split_indices=split_indices,
