@@ -69,8 +69,8 @@ def run_comparison(
             cfg=cfg,
             model_name="taxonomy",
         )
-        results = barcode_trainer.run(use_wandb=use_wandb)
-        results["taxonomy"] = results
+        payload = barcode_trainer.run(use_wandb=use_wandb)
+        results["taxonomy"] = payload
 
     return results
 

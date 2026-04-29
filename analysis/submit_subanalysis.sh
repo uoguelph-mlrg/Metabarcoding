@@ -259,7 +259,7 @@ resolve_target() {
       FIGURES_DIR='figures/location_embedding'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (No Location Embedding)","satclip":"SatCLIP (256D)","range":"RANGE (1280D)","geoclip":"GeoCLIP (512D)","alphaearth":"AlphaEarth (64D)"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","satclip":"#e74c3c","range":"#3498db","geoclip":"#2ecc71","alphaearth":"#f39c12"}'
-      DEFAULT_TIME="8:00:00"
+      DEFAULT_TIME="1:00:00"
       ;;
     latent_as_in_and_output)
       TARGET_DIR='latent_as_in_and_output'
