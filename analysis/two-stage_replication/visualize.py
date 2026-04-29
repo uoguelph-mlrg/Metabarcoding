@@ -309,7 +309,7 @@ def plot_permutation_importance(model, X, y, n_repeats=10, save_path=None):
     print("  Computing classifier permutation importance...")
     clf_perm = permutation_importance(
         model.classifier, X_proc, y_binary, 
-        n_repeats=n_repeats, random_state=42, n_jobs=-1,
+        n_repeats=n_repeats, random_state=14, n_jobs=-1,
         scoring='f1'
     )
     
@@ -337,7 +337,7 @@ def plot_permutation_importance(model, X, y, n_repeats=10, save_path=None):
     print("  Computing regressor permutation importance...")
     reg_perm = permutation_importance(
         model.regressor, X_nonzero, y_nonzero,
-        n_repeats=n_repeats, random_state=42, n_jobs=-1,
+        n_repeats=n_repeats, random_state=14, n_jobs=-1,
         scoring='neg_root_mean_squared_error'
     )
     

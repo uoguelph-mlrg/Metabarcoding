@@ -12,7 +12,7 @@ from train import Trainer
 from utils import load
 
 def diagnose_latent_solver():
-    set_seed(14)
+    set_seed()
     cfg = Config()
     
     script_dir = os.path.dirname(os.path.abspath(__file__))

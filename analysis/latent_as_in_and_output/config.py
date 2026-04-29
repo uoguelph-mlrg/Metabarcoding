@@ -89,7 +89,7 @@ class Config:
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
 
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(seed: int = 14) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():

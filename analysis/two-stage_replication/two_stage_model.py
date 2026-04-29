@@ -68,7 +68,7 @@ class TwoStageConfig:
     
     # General settings
     n_jobs: int = -1
-    random_state: int = 42
+    random_state: int = 14
     
     # Data split fractions
     train_frac: float = 0.8
@@ -561,14 +561,13 @@ def main():
     
     # General args
     parser.add_argument("--data_dir", type=str, default="data")
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--save", action="store_true")
     
     args = parser.parse_args()
     
     # Set seed
-    set_seed(args.seed)
+    set_seed()
     
     # Create config
     config = TwoStageConfig(
@@ -578,7 +577,6 @@ def main():
         reg_n_estimators=args.reg_n_estimators,
         reg_max_depth=args.reg_max_depth,
         data_dir=args.data_dir,
-        random_state=args.seed
     )
     
     # Load data

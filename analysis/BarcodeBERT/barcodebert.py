@@ -52,7 +52,7 @@ def run_comparison(
     log.info("TRAINING TAXONOMIC DISTANCE MODEL")
     log.info("=" * 78)
 
-    set_seed(14)
+    set_seed()
 
     cfg.use_taxonomy = True
     cfg.use_embedding = False

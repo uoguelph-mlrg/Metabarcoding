@@ -38,9 +38,6 @@ VARIANTS = {
     "all_bins":     {"latent_present_only": False, "label": "All BINs"},
 }
 
-SEED = 42
-
-
 def run_comparison(
     cfg: Config,
     use_wandb: bool,
@@ -56,7 +53,7 @@ def run_comparison(
         run_cfg = copy.deepcopy(cfg)
         run_cfg.latent_present_only = variant["latent_present_only"]
 
-        set_seed(SEED)
+        set_seed()
         trainer = Trainer(run_cfg)
 
         if use_wandb and WANDB_AVAILABLE:

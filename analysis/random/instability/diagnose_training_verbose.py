@@ -460,7 +460,7 @@ def main() -> None:
                         help="Enable DEBUG logging")
     args = parser.parse_args()
 
-    set_seed(42)
+    set_seed()
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 

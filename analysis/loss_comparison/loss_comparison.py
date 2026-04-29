@@ -63,7 +63,7 @@ def run_comparison(
         log.info("="*70)
         cfg.loss_type = variant
 
-        set_seed(14)
+        set_seed()
         with variant_wandb_run(
             use_wandb=use_wandb,
             wandb_module=wandb,
@@ -113,7 +113,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Setup
-    set_seed(14)
+    set_seed()
     cfg = Config()
     if args.epochs is not None:
         cfg.epochs = args.epochs

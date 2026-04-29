@@ -12,7 +12,7 @@ from config import Config, set_seed
 from train import Trainer
 
 def final_diagnostic():
-    set_seed(14)
+    set_seed()
     cfg = Config()
     
     script_dir = os.path.dirname(os.path.abspath(__file__))

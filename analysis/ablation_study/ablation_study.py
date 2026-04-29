@@ -670,7 +670,7 @@ def run_ablation_study(
     log.info("PREPARING DATA SPLITS")
     log.info("="*70)
     
-    set_seed(14)  # Fixed seed for reproducibility
+    set_seed()  # Fixed seed for reproducibility
     
     # Create splits using the SAME preprocessing as the latent model (utils.load)
     # We only use this call to determine split indices deterministically.
@@ -692,7 +692,7 @@ def run_ablation_study(
     log.info("TRAINING MLP WITHOUT TAXONOMY")
     log.info("="*70)
     
-    set_seed(14)  # Reset seed
+    set_seed()  # Reset seed
 
     if use_wandb:
         wandb.init(
@@ -740,7 +740,7 @@ def run_ablation_study(
     log.info("TRAINING MLP WITH TAXONOMY")
     log.info("="*70)
     
-    set_seed(14)  # Reset seed
+    set_seed()  # Reset seed
 
     if use_wandb:
         wandb.init(
@@ -815,7 +815,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Setup
-    set_seed(14)
+    set_seed()
     cfg = Config()
     
     log_level = log.DEBUG if args.verbose else log.INFO

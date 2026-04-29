@@ -16,7 +16,7 @@ from two_stage_model import TwoStageConfig, TwoStageRandomForest, load_data
 
 
 def search_classifier_params(X_train: np.ndarray, y_binary: np.ndarray, 
-                             random_state: int = 42, n_jobs: int = -1):
+                             random_state: int = 14, n_jobs: int = -1):
     """
     Search for best classifier hyperparameters.
     """
@@ -63,7 +63,7 @@ def search_classifier_params(X_train: np.ndarray, y_binary: np.ndarray,
 
 
 def search_regressor_params(X_train: np.ndarray, y_train: np.ndarray,
-                            random_state: int = 42, n_jobs: int = -1):
+                            random_state: int = 14, n_jobs: int = -1):
     """
     Search for best regressor hyperparameters (on non-zero samples).
     """
@@ -115,14 +115,13 @@ def search_regressor_params(X_train: np.ndarray, y_train: np.ndarray,
 def main():
     parser = argparse.ArgumentParser(description="Hyperparameter search for Two-Stage RF")
     parser.add_argument("--data_dir", type=str, default="data")
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="results")
     parser.add_argument("--stage", type=str, choices=['classifier', 'regressor', 'both'],
                         default='both', help="Which stage to search")
     
     args = parser.parse_args()
     
-    set_seed(args.seed)
+    set_seed()
     
     # Load data
     print("Loading data...")
@@ -152,7 +151,7 @@ def main():
         print("\n" + "="*60)
         print("CLASSIFIER HYPERPARAMETER SEARCH")
         print("="*60)
-        clf_results = search_classifier_params(X_trainval_proc, y_binary, args.seed)
+        clf_results = search_classifier_params(X_trainval_proc, y_binary)
         
         print("\nTop 5 Classifier Configurations:")
         print(clf_results.head(5).to_string(index=False))
@@ -166,8 +165,8 @@ def main():
         print("\n" + "="*60)
         print("REGRESSOR HYPERPARAMETER SEARCH")
         print("="*60)
-        reg_results = search_regressor_params(X_nonzero, y_nonzero, args.seed)
-        
+        reg_results = search_regressor_params(X_nonzero, y_nonzero)
+
         print("\nTop 5 Regressor Configurations:")
         print(reg_results.head(5).to_string(index=False))
         

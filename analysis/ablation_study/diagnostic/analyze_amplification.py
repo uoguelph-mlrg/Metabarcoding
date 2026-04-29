@@ -29,7 +29,7 @@ from config import Config, set_seed
 from train import Trainer
 
 def analyze_amplification():
-    set_seed(14)
+    set_seed()
     cfg = Config()
     
     script_dir = os.path.dirname(os.path.abspath(__file__))

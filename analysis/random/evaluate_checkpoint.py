@@ -143,14 +143,13 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, help="Path to raw CSV dataset")
     parser.add_argument("--output", default=None, help="Output pickle path (default: next to checkpoint)")
     parser.add_argument("--device", default=None, choices=["cpu", "mps", "cuda"], help="Override device")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
 
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    set_seed(args.seed)
+    set_seed()
 
     checkpoint_path = _resolve_checkpoint_path(args.model)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)

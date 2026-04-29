@@ -18,7 +18,7 @@ from train import Trainer
 from utils import load
 
 def diagnose():
-    set_seed(14)
+    set_seed()
     cfg = Config()
     
     # Use absolute path

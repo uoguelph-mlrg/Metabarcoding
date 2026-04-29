@@ -1233,7 +1233,7 @@ def run_visualization(
     # ...existing code...
     data_path: str,
     output_dir: str = "figures",
-    random_state: int = 42
+    random_state: int = 14
 ) -> pd.DataFrame:
     """
     Train all models and create all visualizations.
@@ -1416,12 +1416,6 @@ def main():
         default="figures",
         help="Directory to save figures"
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed"
-    )
     
     args = parser.parse_args()
 
@@ -1440,7 +1434,6 @@ def main():
     run_visualization(
         data_path=data_path,
         output_dir=output_dir,
-        random_state=args.seed
     )
 
 

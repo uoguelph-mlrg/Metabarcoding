@@ -32,7 +32,7 @@ TAXONOMY_FEATURES = ["phylum", "class", "order", "family", "subfamily", "genus",
 class DataPreprocessor:
     """Preprocessor for metabarcoding baseline data."""
     
-    def __init__(self, random_state: int = 42):
+    def __init__(self, random_state: int = 14):
         self.random_state = random_state
         self.label_encoders: Dict[str, LabelEncoder] = {}
         self.scaler = StandardScaler()
@@ -189,7 +189,7 @@ class DataPreprocessor:
         return X_train, X_val, X_test, y_train, y_val, y_test, metadata
 
 
-def load_data(data_path: str, random_state: int = 42) -> Tuple:
+def load_data(data_path: str, random_state: int = 14) -> Tuple:
     """Convenience function to load and preprocess data."""
     preprocessor = DataPreprocessor(random_state=random_state)
     return preprocessor.load_and_preprocess(data_path)

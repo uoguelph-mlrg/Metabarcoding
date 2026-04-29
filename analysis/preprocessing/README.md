@@ -38,7 +38,7 @@ The model uses four read count features: `total_reads_norm`, `avg_reads_norm`, `
 First, generate the three versions of the dataset with different preprocessing:
 
 ```bash
-PYTHONPATH=../../src python utils_test.py --data_path data/ecuador_training_data.csv --seed 14
+PYTHONPATH=../../src python utils_test.py --data_path data/ecuador_training_data.csv
 ```
 
 This will create three subdirectories in `data/` (original, normalized, logarithm), each containing:

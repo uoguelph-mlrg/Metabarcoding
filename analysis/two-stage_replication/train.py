@@ -184,7 +184,7 @@ def train_random_forest(config: RandomForestConfig, verbose: bool = True):
     Returns:
         Trained model and feature names
     """
-    set_seed(config.random_state)
+    set_seed()
     
     # Load data
     if verbose:
@@ -316,7 +316,6 @@ def main():
     parser.add_argument("--min_samples_leaf", type=int, default=1, help="Min samples in leaf")
     parser.add_argument("--max_features", type=str, default="sqrt", help="Max features per split")
     parser.add_argument("--data_dir", type=str, default="data", help="Path to data directory")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--model", type=str, default="two_stage_replication", help="Model variant name stored in output artifacts")
     parser.add_argument("--save", action="store_false", help="Save the model")
     
@@ -330,7 +329,6 @@ def main():
         min_samples_leaf=args.min_samples_leaf,
         max_features=args.max_features,
         data_dir=args.data_dir,
-        random_state=args.seed
     )
     
     # Train model
