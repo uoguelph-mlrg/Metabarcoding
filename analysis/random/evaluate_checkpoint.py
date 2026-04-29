@@ -93,6 +93,16 @@ def _extract_fixed_split_indices(preprocessing_state_path: str) -> Optional[Dict
     return {k: np.asarray(raw[k], dtype=np.int64) for k in required}
 
 
+def _extract_bin_uris(preprocessing_state_path: str) -> Optional[list[str]]:
+    state = load_preprocessing_state(preprocessing_state_path)
+    raw = state.get("bin_uris")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("Invalid preprocessing artifact: 'bin_uris' must be a list")
+    return [str(bin_uri) for bin_uri in raw]
+
+
 def _rebuild_eval_loaders(trainer: Trainer) -> None:
     batch_size = trainer.cfg.batch_size_sample if trainer.loss_mode == "sample" else trainer.cfg.batch_size_bin
     collate_fn = collate_samples if trainer.loss_mode == "sample" else None
@@ -185,6 +195,7 @@ def main() -> None:
         log.info("Using preprocessing artifact: %s", expected_state_path)
 
     fixed_split_indices = _extract_fixed_split_indices(expected_state_path)
+    training_bin_uris = _extract_bin_uris(expected_state_path)
 
     trainer = Trainer(
         cfg=cfg,
@@ -197,8 +208,54 @@ def main() -> None:
     if "model_state_dict" not in checkpoint:
         raise ValueError("Checkpoint is missing 'model_state_dict'")
 
+    model_state_dict = dict(checkpoint["model_state_dict"])
+    checkpoint_latent = model_state_dict.get("latent_vec")
+    if checkpoint_latent is None:
+        raise ValueError("Checkpoint model_state_dict is missing 'latent_vec'")
+
+    current_latent_shape = tuple(trainer.model.latent_vec.shape)
+    checkpoint_latent_shape = tuple(checkpoint_latent.shape)
+
+    if checkpoint_latent_shape != current_latent_shape:
+        if training_bin_uris is None:
+            raise ValueError(
+                "Checkpoint latent table shape does not match the evaluation dataset, and the "
+                "preprocessing artifact does not contain 'bin_uris' to remap BIN-specific latent rows. "
+                f"checkpoint_latent={checkpoint_latent_shape}, current_latent={current_latent_shape}. "
+                "To evaluate a different BIN universe, regenerate the preprocessing artifact with BIN "
+                "identity saved, or evaluate on the original processed dataset."
+            )
+
+        if len(training_bin_uris) != checkpoint_latent_shape[0]:
+            raise ValueError(
+                "Preprocessing artifact BIN list length does not match checkpoint latent table. "
+                f"artifact_bins={len(training_bin_uris)}, checkpoint_latent={checkpoint_latent_shape[0]}"
+            )
+
+        adapted_latent = trainer.model.latent_vec.detach().clone()
+        shared_bins = 0
+        for old_idx, bin_uri in enumerate(training_bin_uris):
+            new_idx = trainer.bin_index.get(bin_uri)
+            if new_idx is None:
+                continue
+            adapted_latent[new_idx] = checkpoint_latent[old_idx].to(device=adapted_latent.device)
+            shared_bins += 1
+
+        if shared_bins == 0:
+            raise ValueError(
+                "The evaluation dataset shares no BIN URIs with the checkpoint's training BIN set. "
+                "The latent table cannot be reused without overlapping bin identities."
+            )
+
+        model_state_dict["latent_vec"] = adapted_latent.to(dtype=trainer.model.latent_vec.dtype)
+        log.info(
+            "Remapped checkpoint latent rows onto %d shared BINs (%d total evaluation BINs).",
+            shared_bins,
+            len(trainer.bin_index),
+        )
+
     try:
-        trainer.model.load_state_dict(checkpoint["model_state_dict"])
+        trainer.model.load_state_dict(model_state_dict)
     except RuntimeError as exc:
         raise ValueError(
             "Model weights are incompatible with reconstructed architecture. "
