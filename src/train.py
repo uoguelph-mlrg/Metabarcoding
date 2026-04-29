@@ -52,11 +52,6 @@ class Trainer:
         self.resume = resume
         self._validate_interpolation_config()
 
-        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and (
-            self.cfg.embedding_path is None or not os.path.exists(self.cfg.embedding_path)
-        ):
-            self.cfg.barcode_data_path = self.cfg.data_path
-
         self.start_epoch = 0
         self.current_epoch = -1
         self.best_val_loss = float("inf")
@@ -983,9 +978,12 @@ class Trainer:
 
 
 if __name__ == "__main__":
+    _default_results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results")
+
     parser = argparse.ArgumentParser(description="Metabarcoding training entrypoint")
-    parser.add_argument("--model", type=str, default="default_src", help="Name of the model variant being trained")
+    parser.add_argument("--model", type=str, default="default", help="Name of the model variant being trained")
     parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
+    parser.add_argument("--results-dir", type=str, default=_default_results_dir, help="Directory where run artifacts are saved")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
 
@@ -994,6 +992,7 @@ if __name__ == "__main__":
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
     cfg = Config()
+    cfg.results_dir = os.path.abspath(args.results_dir)
 
     run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = os.path.abspath(os.path.join(cfg.results_dir, args.model))

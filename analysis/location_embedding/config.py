@@ -43,7 +43,6 @@ class Config:
 
     # DNA embedding settings (used when use_embedding=True)
     embedding_path: Optional[str] = None #os.path.join(PROJECT_ROOT, "data", "embeddings_ecuador.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = None     # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
     # MLP - architecture & optimization settings

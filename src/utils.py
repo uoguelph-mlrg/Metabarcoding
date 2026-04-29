@@ -63,19 +63,17 @@ def load_preprocessing_state(path: str) -> Dict[str, Any]:
 
 def _compute_barcodebert_embeddings(
     config: Config,
-    barcode_data_path: str,
     batch_size: int = 64,
 ) -> Dict[str, np.ndarray]:
     """
-    Run BarcodeBERT inference on sequences in barcode_data_path and return a
+    Run BarcodeBERT inference on sequences in config.data_path and return a
     dict mapping bin_uri -> mean-pooled embedding vector (numpy float32).
 
     The function uses mean-pooling of the last hidden state across all token
     positions (recommended by the BarcodeBERT authors).
 
     Args:
-        config: Configuration object with device settings.
-        barcode_data_path: Path to TSV/CSV with 'bin_uri' and 'seq' columns.
+        config: Configuration object with data_path and device settings.
         batch_size: Number of sequences per inference batch.
 
     Returns:
@@ -92,11 +90,12 @@ def _compute_barcodebert_embeddings(
     model = model.to(device).eval()
 
     # Read data: one consensus sequence per BIN
-    sep = "\t" if barcode_data_path.endswith(".tsv") else ","
-    df = pd.read_csv(barcode_data_path, sep=sep)
+    data_path = config.data_path
+    sep = "\t" if data_path.endswith(".tsv") else ","
+    df = pd.read_csv(data_path, sep=sep)
     if "bin_uri" not in df.columns or "seq" not in df.columns:
         raise ValueError(
-            f"{barcode_data_path} must contain 'bin_uri' and 'seq' columns. "
+            f"{data_path} must contain 'bin_uri' and 'seq' columns. "
             f"Found: {list(df.columns)}"
         )
 
@@ -153,12 +152,11 @@ def _load_or_compute_embeddings(
 
     Priority:
         1. Load from config.embedding_path if the file exists.
-        2. Otherwise compute via BarcodeBERT using config.barcode_data_path and save to 
+        2. Otherwise compute via BarcodeBERT using config.data_path and save to
             config.embedding_path (if provided) so future runs skip inference.
-        3. If neither path is usable, raise a descriptive error.
 
     Args:
-        config: Configuration object with embedding_path, barcode_data_path, and device settings.
+        config: Configuration object with embedding_path, data_path, and device settings.
         bin_uris_ordered: List of bin URIs in the order they appear in taxonomy_df.
 
     Returns:
@@ -167,7 +165,6 @@ def _load_or_compute_embeddings(
         - bins_with_embedding: np.ndarray of shape [n_bins] (bool) indicating which bins have valid embeddings
     """
     embedding_path = config.embedding_path
-    barcode_data_path = config.barcode_data_path
     n_bins = len(bin_uris_ordered)
 
     emb_dict: Dict[str, np.ndarray] = {}  # bin_uri -> np.ndarray
@@ -175,23 +172,17 @@ def _load_or_compute_embeddings(
     if embedding_path is not None and os.path.exists(embedding_path):
         log.info(f"Loading precomputed embeddings from {embedding_path}")
         emb_dict = np.load(embedding_path, allow_pickle=True).item()
-    elif barcode_data_path is not None:
+    else:
         log.info(
             f"Precomputed embeddings not found; running BarcodeBERT inference "
-            f"on {barcode_data_path}"
+            f"on {config.data_path}"
         )
-        emb_dict = _compute_barcodebert_embeddings(config, barcode_data_path)
+        emb_dict = _compute_barcodebert_embeddings(config)
         # Cache to disk for future runs
         if embedding_path is not None:
             os.makedirs(os.path.dirname(os.path.abspath(embedding_path)), exist_ok=True)
             np.save(embedding_path, np.array(emb_dict, dtype=object), allow_pickle=True)
             log.info(f"Saved computed embeddings to {embedding_path}")
-    else:
-        raise ValueError(
-            "use_embedding=True requires at least one of:\n"
-            "  config.embedding_path  — path to a precomputed .npy embedding file\n"
-            "  config.barcode_data_path — path to a TSV with 'bin_uri' and 'seq' columns"
-        )
 
     # Determine embedding dimension from first available vector
     emb_dim = next(iter(emb_dict.values())).shape[0]
