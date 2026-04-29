@@ -1454,7 +1454,7 @@ def plot_latent_diagnostics(
         if delta_pairs:
             dx = [epoch for epoch, _ in delta_pairs]
             dy = [value for _, value in delta_pairs]
-            colors = ["#2ca02c" if value >= 0 else "#d62728" for value in dy]
+            colors = ["#d62728" if value >= 0 else "#2ca02c" for value in dy]
             width = max(1, (dx[-1] - dx[0]) / max(len(dx), 1) * 0.8) if len(dx) > 1 else 5
             ax.bar(dx, dy, width=width, color=colors, alpha=0.8)
             ax.axhline(0.0, color="gray", ls="--", lw=1, alpha=0.8)
@@ -1465,8 +1465,8 @@ def plot_latent_diagnostics(
             ax.set_xlabel("epoch")
         if row_idx == 0 and delta_pairs:
             ax.legend(handles=[
-                Patch(facecolor="#2ca02c", edgecolor="white", label="latent helps (delta > 0)"),
-                Patch(facecolor="#d62728", edgecolor="white", label="latent hurts (delta < 0)"),
+                Patch(facecolor="#2ca02c", edgecolor="white", label="latent helps (delta < 0)"),
+                Patch(facecolor="#d62728", edgecolor="white", label="latent hurts (delta >= 0)"),
             ], fontsize=8)
 
     plt.tight_layout(rect=(0, 0, 1, 0.985))
@@ -1481,118 +1481,133 @@ def plot_latent_comparison(
     colors: Optional[Dict[str, str]] = None,
     labels: Optional[Dict[str, str]] = None,
 ) -> None:
-    """Compare latent vectors between two models when latent vectors are available.
+    """Compare latent vectors across models.
 
-    If more than two models include ``latent_vector``, the first two are used,
-    prioritizing ("taxonomy", "barcodebert") when both are present.
-    
+    Layout strategy:
+    - ≤4 models with latent vectors: one row per unique pair (all-vs-all).
+    - >4 models: one row per model comparing the baseline (key "baseline" or
+      the first model) against every other model.
+
+    Each row has three panels: overlapping distributions, difference distribution,
+    and a per-bin scatter coloured by point density.
+
     Performance optimizations:
-    - Samples large datasets (>10k points) for KDE computation
-    - Reduces histogram bins for faster rendering
-    - Skips KDE for very large datasets (>100k points)
+    - Samples large datasets (>10k points) for KDE computation.
+    - Reduces histogram bins for faster rendering.
+    - Skips KDE for very large datasets (>100k points).
     """
     latent_models = [m for m in results if isinstance(results[m], dict) and results[m].get("latent_vector") is not None]
     if len(latent_models) < 2:
         log.info("  (Skipping latent comparison — fewer than two models provide latent vectors.)")
         return
 
-    if "taxonomy" in latent_models and "barcodebert" in latent_models:
-        m1, m2 = "taxonomy", "barcodebert"
+    # Build the list of (m1, m2) pairs to plot.
+    if len(latent_models) <= 4:
+        from itertools import combinations
+        pairs = list(combinations(latent_models, 2))
     else:
-        m1, m2 = latent_models[0], latent_models[1]
+        if "baseline" in latent_models:
+            anchor = "baseline"
+        else:
+            anchor = latent_models[0]
+        pairs = [(anchor, m) for m in latent_models if m != anchor]
 
-    lv1 = np.asarray(results[m1]["latent_vector"]).flatten()
-    lv2 = np.asarray(results[m2]["latent_vector"]).flatten()
-    if lv1.shape != lv2.shape:
-        log.warning(
-            f"Latent vectors have different shapes ({m1}: {lv1.shape}, {m2}: {lv2.shape}); skipping latent comparison."
-        )
-        return
+    def _render_row(ax_row, m1: str, m2: str, row_label: bool) -> None:
+        lv1 = np.asarray(results[m1]["latent_vector"]).flatten()
+        lv2 = np.asarray(results[m2]["latent_vector"]).flatten()
+        if lv1.shape != lv2.shape:
+            log.warning(
+                f"Latent vectors have different shapes ({m1}: {lv1.shape}, {m2}: {lv2.shape}); skipping pair."
+            )
+            for ax in ax_row:
+                ax.axis("off")
+            return
 
-    n_points = len(lv1)
-    use_kde = n_points <= 100000  # Skip KDE for extremely large datasets
-    kde_sample_size = min(10000, n_points) if n_points > 10000 else n_points
-    
-    # Determine if we need to sample for KDE computation
-    if n_points > 10000 and use_kde:
-        sample_idx = np.random.choice(n_points, size=kde_sample_size, replace=False)
-        lv1_kde = lv1[sample_idx]
-        lv2_kde = lv2[sample_idx]
-        log.info(f"  (Sampling {kde_sample_size:,} / {n_points:,} points for KDE computation)")
-    else:
-        lv1_kde = lv1
-        lv2_kde = lv2
+        n_points = len(lv1)
+        use_kde = n_points <= 100_000
+        kde_sample_size = min(10_000, n_points) if n_points > 10_000 else n_points
 
-    set_style()
-    fig, axes = plt.subplots(1, 3, figsize=(21, 5))
+        if n_points > 10_000 and use_kde:
+            sample_idx = np.random.choice(n_points, size=kde_sample_size, replace=False)
+            lv1_kde = lv1[sample_idx]
+            lv2_kde = lv2[sample_idx]
+        else:
+            lv1_kde = lv1
+            lv2_kde = lv2
 
-    label1 = get_label(m1, labels)
-    label2 = get_label(m2, labels)
-    color1 = get_color(m1, colors)
-    color2 = get_color(m2, colors)
+        label1 = get_label(m1, labels)
+        label2 = get_label(m2, labels)
+        color1 = get_color(m1, colors)
+        color2 = get_color(m2, colors)
+        bins = 30 if n_points > 50_000 else 40
 
-    # Panel 1: Overlapping latent distributions (reduced bins for speed).
-    ax = axes[0]
-    bins = 30 if n_points > 50000 else 40
-    sns.histplot(lv1, bins=bins, kde=use_kde, stat="density", color=color1, alpha=0.35, edgecolor="none", ax=ax, label=label1)
-    sns.histplot(lv2, bins=bins, kde=use_kde, stat="density", color=color2, alpha=0.35, edgecolor="none", ax=ax, label=label2)
-    ax.axvline(lv1.mean(), color=color1, linestyle="--", linewidth=1.5, alpha=0.9)
-    ax.axvline(lv2.mean(), color=color2, linestyle="--", linewidth=1.5, alpha=0.9)
-    ax.set_xlabel("Latent value")
-    ax.set_ylabel("Density")
-    ax.set_title("Latent Value Distributions", fontsize=13, fontweight="bold")
-    ax.legend(frameon=False)
-    sns.despine(ax=ax)
+        # Panel 1: overlapping distributions.
+        ax = ax_row[0]
+        sns.histplot(lv1, bins=bins, kde=use_kde, stat="density", color=color1, alpha=0.35, edgecolor="none", ax=ax, label=label1)
+        sns.histplot(lv2, bins=bins, kde=use_kde, stat="density", color=color2, alpha=0.35, edgecolor="none", ax=ax, label=label2)
+        ax.axvline(lv1.mean(), color=color1, linestyle="--", linewidth=1.5, alpha=0.9)
+        ax.axvline(lv2.mean(), color=color2, linestyle="--", linewidth=1.5, alpha=0.9)
+        ax.set_xlabel("Latent value")
+        ax.set_ylabel("Density")
+        ax.set_title("Latent Value Distributions", fontsize=11, fontweight="bold")
+        ax.legend(frameon=False, fontsize=8)
+        sns.despine(ax=ax)
 
-    # Panel 2: Distribution of latent differences (reduced bins for speed).
-    ax = axes[1]
-    diff = lv2 - lv1
-    sns.histplot(diff, bins=bins, kde=use_kde, stat="density", color="#4a90d9", alpha=0.8, edgecolor="none", ax=ax)
-    ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.7)
-    ax.axvline(diff.mean(), color="#e74c3c", linestyle="-", linewidth=1.5, alpha=0.9)
-    ax.set_xlabel(f"Difference ({label2} - {label1})")
-    ax.set_ylabel("Density")
-    ax.set_title("Latent Difference Distribution", fontsize=13, fontweight="bold")
-    sns.despine(ax=ax)
+        # Panel 2: difference distribution.
+        ax = ax_row[1]
+        diff = lv2 - lv1
+        sns.histplot(diff, bins=bins, kde=use_kde, stat="density", color="#4a90d9", alpha=0.8, edgecolor="none", ax=ax)
+        ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.7)
+        ax.axvline(diff.mean(), color="#e74c3c", linestyle="-", linewidth=1.5, alpha=0.9)
+        ax.set_xlabel(f"Difference ({label2} − {label1})")
+        ax.set_ylabel("Density")
+        ax.set_title("Latent Difference Distribution", fontsize=11, fontweight="bold")
+        sns.despine(ax=ax)
 
-    # Panel 3: Per-bin scatter with optional density coloring.
-    ax = axes[2]
-    if use_kde and len(lv1_kde) > 1:
-        try:
-            xy = np.vstack([lv1_kde, lv2_kde]) + np.random.normal(0, 1e-8, (2, len(lv1_kde)))
-            density = gaussian_kde(xy)(xy)
-            # Map density back to all points if we sampled
-            if n_points > 10000:
-                # Use nearest-neighbor approximation for unsampled points
-                from scipy.spatial import cKDTree
-                tree = cKDTree(xy.T)
-                xy_all = np.vstack([lv1, lv2])
-                distances, indices = tree.query(xy_all.T, k=1)
-                density_all = density[indices]
-                density_all[distances > 0.1] = np.median(density)  # Cap outliers
-                density = density_all
-            order = np.argsort(density)
-        except Exception as e:
-            log.debug(f"KDE computation failed: {e}; using no density coloring")
+        # Panel 3: per-bin scatter coloured by density.
+        ax = ax_row[2]
+        if use_kde and len(lv1_kde) > 1:
+            try:
+                xy = np.vstack([lv1_kde, lv2_kde]) + np.random.normal(0, 1e-8, (2, len(lv1_kde)))
+                density = gaussian_kde(xy)(xy)
+                if n_points > 10_000:
+                    from scipy.spatial import cKDTree
+                    tree = cKDTree(xy.T)
+                    xy_all = np.vstack([lv1, lv2])
+                    distances, indices = tree.query(xy_all.T, k=1)
+                    density_all = density[indices]
+                    density_all[distances > 0.1] = np.median(density)
+                    density = density_all
+                order = np.argsort(density)
+            except Exception as e:
+                log.debug(f"KDE computation failed: {e}; using no density coloring")
+                density = np.ones(len(lv1))
+                order = np.arange(len(lv1))
+        else:
             density = np.ones(len(lv1))
             order = np.arange(len(lv1))
-    else:
-        density = np.ones(len(lv1))
-        order = np.arange(len(lv1))
-    
-    sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis", s=10, alpha=0.65, edgecolors="none")
-    lo = min(lv1.min(), lv2.min())
-    hi = max(lv1.max(), lv2.max())
-    ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.5, alpha=0.7)
-    corr = float(np.corrcoef(lv1, lv2)[0, 1]) if len(lv1) > 1 else 0.0
-    ax.set_xlabel(label1)
-    ax.set_ylabel(label2)
-    ax.set_title(f"Per-BIN Latent Comparison (r={corr:.3f})", fontsize=13, fontweight="bold")
-    sns.despine(ax=ax)
-    cbar = fig.colorbar(sc, ax=ax, shrink=0.85)
-    cbar.set_label("Point Density" if use_kde else "Uniform")
 
-    plt.tight_layout()
+        sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis", s=10, alpha=0.65, edgecolors="none")
+        lo = min(lv1.min(), lv2.min())
+        hi = max(lv1.max(), lv2.max())
+        ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.5, alpha=0.7)
+        corr = float(np.corrcoef(lv1, lv2)[0, 1]) if len(lv1) > 1 else 0.0
+        ax.set_xlabel(label1)
+        ax.set_ylabel(label2)
+        ax.set_title(f"Per-BIN Latent Comparison (r={corr:.3f})", fontsize=11, fontweight="bold")
+        sns.despine(ax=ax)
+        cbar = ax_row[2].get_figure().colorbar(sc, ax=ax, shrink=0.85)
+        cbar.set_label("Point Density" if use_kde else "Uniform")
+
+    n_rows = len(pairs)
+    set_style()
+    fig, axes = plt.subplots(n_rows, 3, figsize=(21, 5 * n_rows), squeeze=False)
+    fig.suptitle("Latent Vector Comparison", fontsize=13, y=0.995)
+
+    for row_idx, (m1, m2) in enumerate(pairs):
+        _render_row(axes[row_idx], m1, m2, row_label=(row_idx == 0))
+
+    plt.tight_layout(rect=(0, 0, 1, 0.985))
     plt.savefig(os.path.join(output_dir, "latent_comparison.png"), dpi=150, bbox_inches="tight")
     plt.close()
     log.info("  ✓ Saved: latent_comparison.png")
