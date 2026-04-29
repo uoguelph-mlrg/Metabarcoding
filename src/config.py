@@ -10,14 +10,14 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 class Config:
     # Run configuration
     data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
-    results_dir: str = "./results/excess"             # Directory where run artifacts are saved
+    results_dir: str = "./results/baseline"             # Directory where run artifacts are saved
     checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
 
     # Train / val / test split
     train_frac: float = 0.8
     val_frac: float = 0.1
-    remove_excess: bool = True                 # If True, remove all samples with excess from train/val set and build test set only from excess samples (instead of random splitting)
+    remove_excess: bool = False                 # If True, remove all samples with excess from train/val set and build test set only from excess samples (instead of random splitting)
     
     # Basic training settings
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
