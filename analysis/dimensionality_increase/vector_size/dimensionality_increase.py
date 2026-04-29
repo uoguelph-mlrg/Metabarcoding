@@ -81,7 +81,7 @@ def run_comparison(
         log.info(f"TRAINING MULTIPLICATIVE GATING: DIMENSION={embed_dim}")
         log.info("="*70)
         
-        config_module.set_seed(14)  # Reset seed for fair comparison
+        config_module.set_seed()  # Reset seed for fair comparison
         cfg = config_module.Config(
             embed_dim=embed_dim,
             gating_fn="softplus",  # Always use softplus

@@ -101,7 +101,7 @@ class Config:
     alphaearth_scale_meters: int = 10
     alphaearth_project: Optional[str] = 'metabarcoding-491221'
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(seed: int = 14) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():

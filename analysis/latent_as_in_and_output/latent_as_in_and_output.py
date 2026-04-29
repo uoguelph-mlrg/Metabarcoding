@@ -111,7 +111,7 @@ def run_comparison(
 		)
 		log.info("=" * 70)
 
-		local_set_seed(14)
+		local_set_seed()
 		local_cfg = LocalConfig()
 		local_cfg.latent_input_dim = int(latent_input_dim)
 		local_cfg.embed_dim = int(embed_dim)

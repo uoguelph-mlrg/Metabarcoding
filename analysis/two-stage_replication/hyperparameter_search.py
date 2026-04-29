@@ -100,14 +100,13 @@ def main():
                         help="Search method (grid or random)")
     parser.add_argument("--n_iter", type=int, default=30, help="Number of iterations for random search")
     parser.add_argument("--data_dir", type=str, default="data", help="Path to data directory")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--output_dir", type=str, default="results", help="Output directory")
     
     args = parser.parse_args()
     
     # Setup
-    config = RandomForestConfig(data_dir=args.data_dir, random_state=args.seed)
-    set_seed(args.seed)
+    config = RandomForestConfig(data_dir=args.data_dir)
+    set_seed()
     
     # Load and preprocess data
     print("Loading data...")

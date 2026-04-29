@@ -15,7 +15,7 @@ class RandomForestConfig:
     min_samples_leaf: int = 1           # Minimum samples required in a leaf node
     max_features: str = "sqrt"          # Number of features to consider for best split
     n_jobs: int = -1                    # Number of parallel jobs (-1 uses all cores)
-    random_state: int = 42              # Random seed for reproducibility
+    random_state: int = 14              # Random seed for reproducibility
     
     # Data split fractions
     train_frac: float = 0.8
@@ -32,6 +32,6 @@ class RandomForestConfig:
     exclude_columns: tuple = ("sample_id", "bin_uri")
 
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(seed: int = 14) -> None:
     """Set random seed for reproducibility."""
     np.random.seed(seed)

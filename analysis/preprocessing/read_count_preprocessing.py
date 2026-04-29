@@ -73,7 +73,7 @@ def run_comparison(
             raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
         # Reset seed for fair comparison
-        set_seed(14)
+        set_seed()
 
         with variant_wandb_run(
             use_wandb=use_wandb,
@@ -127,7 +127,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Setup
-    set_seed(14)
+    set_seed()
     cfg = Config()
     if args.epochs is not None:
         cfg.epochs = args.epochs

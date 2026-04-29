@@ -20,7 +20,7 @@ def main():
     
     cfg = Config()
     cfg.data_path = os.path.join(os.path.dirname(__file__), '../../data/ecuador_training_data.csv')
-    set_seed(14)
+    set_seed()
     
     # Load data WITHOUT taxonomy
     print("\n" + "=" * 70)
@@ -46,7 +46,7 @@ def main():
     print("DATA WITH TAXONOMY")
     print("=" * 70)
     
-    set_seed(14)
+    set_seed()
     data_with_tax, taxonomy_df, _, _, encoders, _ = load_data_with_taxonomy(
         cfg.data_path, cfg, include_taxonomy=True, fixed_split_indices=split_indices
     )

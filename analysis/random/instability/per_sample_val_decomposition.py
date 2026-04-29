@@ -165,7 +165,7 @@ def main(best_ckpt_path: Optional[Path], late_ckpt_path: Optional[Path], out_dir
     valid_keys = {f.name for f in dc_fields(Config)}
     cfg = Config(**{k: v for k, v in sample_cfg_ckpt["config"].items() if k in valid_keys})
 
-    set_seed(42)
+    set_seed()
     data, _, bin_index, sample_index, _ = load(cfg, save_data=False)
     input_dim = data["val"]["X"].shape[1]
 

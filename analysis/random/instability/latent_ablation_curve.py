@@ -176,10 +176,10 @@ def main(ckpt_dir: Path, out_dir: Path, data_dir: Optional[Path] = None) -> None
 
     # ------------------------------------------------------------------
     # Load data (fast — no neighbor graph)
-    # set_seed(42) + load() reproduces the same train/val split as the run
+    # set_seed() + load() reproduces the same train/val split as the run
     # ------------------------------------------------------------------
     print("\nLoading validation data (no neighbor graph, should be fast)...")
-    set_seed(42)
+    set_seed()
     data, _, bin_index, sample_index, _ = load(cfg_ref, save_data=False)
 
     input_dim = data["val"]["X"].shape[1]

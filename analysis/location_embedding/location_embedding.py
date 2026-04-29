@@ -134,7 +134,7 @@ def run_comparison(
         log.info(f"TRAINING MODEL WITH {embedder_name.upper()} LOCATION EMBEDDINGS")
         log.info("=" * 78)
 
-        set_seed(14)
+        set_seed()
 
         # Build a config with this embedder's settings
         model_kwargs: Dict[str, Any] = {}

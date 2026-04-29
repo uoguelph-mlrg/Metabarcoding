@@ -674,14 +674,13 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Generate datasets with different read count preprocessing")
-    parser.add_argument("--seed", type=int, default=14, help="Random seed")
     args = parser.parse_args()
     
     # Setup logging
     log.basicConfig(level=log.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     
     # Set seed for reproducibility
-    np.random.seed(args.seed)
+    np.random.seed()
     
     # Create config
     cfg = Config()

@@ -86,7 +86,7 @@ def run_comparison(
         log.info(f"TRAINING MULTIPLICATIVE GATING: {gating_fn.upper()}")
         log.info("="*70)
         
-        config_module.set_seed(14)  # Reset seed for fair comparison
+        config_module.set_seed()  # Reset seed for fair comparison
         cfg = config_module.Config(
             embed_dim=10,
             gating_fn=gating_fn,

@@ -35,7 +35,7 @@ def preprocess_and_save(
     output_dir: str = "data",
     train_frac: float = 0.8,
     val_frac: float = 0.1,
-    random_state: int = 42
+    random_state: int = 14
 ):
     # === FEATURE ENGINEERING (MATCH ITERATION 6) ===
     print(f"Loading data from: {input_path}")
@@ -320,7 +320,6 @@ if __name__ == "__main__":
                         help="Output directory for preprocessed data")
     parser.add_argument("--train_frac", type=float, default=0.8)
     parser.add_argument("--val_frac", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
     
     args = parser.parse_args()
     
@@ -328,6 +327,5 @@ if __name__ == "__main__":
         input_path=args.input,
         output_dir=args.output,
         train_frac=args.train_frac,
-        val_frac=args.val_frac,
-        random_state=args.seed
+        val_frac=args.val_frac
     )

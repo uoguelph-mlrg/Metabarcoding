@@ -24,7 +24,6 @@ Optional args
 - --repeats 20
 - --warmup 5
 - --valid-fraction 0.7
-- --seed 7
 - --device cpu|mps|cuda
 
 Interpretation

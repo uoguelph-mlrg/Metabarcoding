@@ -124,7 +124,7 @@ def cpu_if_mps(device: torch.device) -> torch.device:
     return torch.device("cpu") if device.type == "mps" else device
 
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(seed: int = 14) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():

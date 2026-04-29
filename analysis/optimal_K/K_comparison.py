@@ -62,7 +62,7 @@ def run_comparison(
         log.info(f"TRAINING WITH K={k} NEAREST NEIGHBORS")
         log.info("="*70)
 
-        set_seed(14)
+        set_seed()
         cfg_k = Config()
         cfg_k.K = int(k)
         variant_name = f"K_{k}"
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Setup
-    set_seed(14)
+    set_seed()
     cfg = Config()
     if args.epochs is not None:
         cfg.epochs = args.epochs

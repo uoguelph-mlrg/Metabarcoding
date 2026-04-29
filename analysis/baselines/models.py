@@ -138,7 +138,7 @@ class DecisionTreeModel(BaselineModel):
         self.model = DecisionTreeRegressor(
             max_depth=max_depth,
             min_samples_leaf=min_samples_leaf,
-            random_state=42
+            random_state=14
         )
         
     def fit(self, X: pd.DataFrame, y: pd.Series, **kwargs) -> "DecisionTreeModel":
@@ -161,7 +161,7 @@ class RandomForestModel(BaselineModel):
             n_estimators=n_estimators,
             max_depth=max_depth,
             min_samples_leaf=min_samples_leaf,
-            random_state=42,
+            random_state=14,
             n_jobs=-1
         )
         
@@ -185,7 +185,7 @@ class GradientBoostingModel(BaselineModel):
             n_estimators=n_estimators,
             max_depth=max_depth,
             learning_rate=learning_rate,
-            random_state=42
+            random_state=14
         )
         
     def fit(self, X: pd.DataFrame, y: pd.Series, **kwargs) -> "GradientBoostingModel":
@@ -240,7 +240,7 @@ class TwoStageModel(BaselineModel):
             max_depth=20, 
             min_samples_split=10,
             class_weight='balanced_subsample',
-            random_state=42, 
+            random_state=14, 
             n_jobs=-1
         )
         self.regressor = regressor or RandomForestRegressor(
@@ -248,7 +248,7 @@ class TwoStageModel(BaselineModel):
             max_depth=10, 
             min_samples_split=10,
             min_samples_leaf=1,
-            random_state=42, 
+            random_state=14, 
             n_jobs=-1
         )
         self.threshold = threshold
@@ -306,7 +306,7 @@ class ZeroInflatedRidge(BaselineModel):
         super().__init__(name=f"Zero-Inflated Ridge (alpha={alpha})")
         self.alpha = alpha
         self.epsilon = epsilon
-        self.classifier = LogisticRegression(max_iter=1000, random_state=42)
+        self.classifier = LogisticRegression(max_iter=1000, random_state=14)
         self.regressor = Ridge(alpha=alpha)
         
     def fit(self, X: pd.DataFrame, y: pd.Series, **kwargs) -> "ZeroInflatedRidge":
@@ -373,7 +373,7 @@ class LogTransformModel(BaselineModel):
         super().__init__(name="Log-Transform Model")
         self.epsilon = epsilon
         self.base_model = base_model or RandomForestRegressor(
-            n_estimators=100, max_depth=15, random_state=42, n_jobs=-1
+            n_estimators=100, max_depth=15, random_state=14, n_jobs=-1
         )
         
     def fit(self, X: pd.DataFrame, y: pd.Series, **kwargs) -> "LogTransformModel":
@@ -404,7 +404,7 @@ class QuantileRandomForest(BaselineModel):
             n_estimators=n_estimators,
             max_depth=15,
             min_samples_leaf=10,
-            random_state=42,
+            random_state=14,
             n_jobs=-1
         )
         
@@ -451,7 +451,7 @@ class LatentMLPModel(BaselineModel):
         from config import Config, set_seed
         from train import Trainer
 
-        set_seed(42)
+        set_seed()
         cfg = Config()
         trainer = Trainer(
             cfg,

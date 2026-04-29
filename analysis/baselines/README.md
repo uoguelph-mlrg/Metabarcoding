@@ -66,7 +66,6 @@ Note: `baselines_comparison` is intentionally separate from `--baseline-train`.
 --models          List of model names to run
 --zero_inflated_only  Only run models designed for zero-inflation
 --output_dir      Directory to save results (default: results/)
---seed            Random seed for reproducibility
 --quiet           Suppress verbose output
 ```
 

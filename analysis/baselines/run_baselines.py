@@ -115,7 +115,7 @@ def run_all_baselines(
     model_names: Optional[List[str]] = None,
     zero_inflated_only: bool = False,
     output_dir: str = "results",
-    random_state: int = 42,
+    random_state: int = 14,
     verbose: bool = True
 ) -> Dict[str, Dict[str, float]]:
     """
@@ -290,12 +290,6 @@ def main():
         help="Directory to save results"
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed"
-    )
-    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress verbose output"
@@ -315,7 +309,6 @@ def main():
         model_names=args.models,
         zero_inflated_only=args.zero_inflated_only,
         output_dir=args.output_dir,
-        random_state=args.seed,
         verbose=not args.quiet
     )
     
