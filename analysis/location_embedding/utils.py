@@ -319,10 +319,6 @@ def load(
     else:
         df["collection_day"] = 0
 
-    unique_samples = df["sample_id"].unique()
-    n_samples = len(unique_samples)
-    sample_index = {s: i for i, s in enumerate(unique_samples)}
-
     # Normalize + log-transform occurences to get target y
     sample_totals = df.groupby("sample_id")["occurrences"].transform("sum")
     # Also store actual proportions for cross-entropy loss
@@ -334,6 +330,11 @@ def load(
     df["avg_reads_norm"] = np.log1p(df["avg_reads"])
     df["max_reads_norm"] = np.log1p(df["max_reads"])
     df["min_reads_norm"] = np.log1p(df["min_reads"])
+
+    # Build sample index mappings before splitting so split sizes are computed correctly.
+    unique_samples = df["sample_id"].unique()
+    n_samples = len(unique_samples)
+    sample_index = {s: i for i, s in enumerate(unique_samples)}
     
     ################################################################################################
     # Train/val/test split
@@ -380,14 +381,15 @@ def load(
         train_sample_idx = sample_indices[:n_train]
         val_sample_idx = sample_indices[n_train:n_train + n_val]
         test_sample_idx = sample_indices[n_train + n_val:]
-    
+
+    unique_bins = df["bin_uri"].unique()
+    bin_index = {b: i for i, b in enumerate(unique_bins)}
+
     split_indices = {
         "train": train_sample_idx,
         "val": val_sample_idx,
         "test": test_sample_idx,
     }
-    unique_bins = df["bin_uri"].unique()
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
 
     # Resolve location embedding params: explicit kwargs take priority, then config attributes, then defaults
     def _cfg(attr, default):
@@ -431,7 +433,7 @@ def load(
             prefix=_emb_prefix,
         )
 
-        feature_list = [f for f in feature_list if f not in LOCATION_RAW_FEATURES]
+        feature_list = [f for f in OBSERVATION_FEATURES if f not in LOCATION_RAW_FEATURES]
         feature_list.extend(location_embedding_cols)
         if _keep_raw_gps:
             feature_list.extend(LOCATION_RAW_FEATURES)
