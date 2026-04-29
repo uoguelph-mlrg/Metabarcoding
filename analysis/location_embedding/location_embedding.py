@@ -129,9 +129,6 @@ def run_comparison(
 
     root_dir = os.path.dirname(os.path.abspath(__file__))
     
-    if embedders is None:
-        embedders = ["satclip", "geoclip", "range", "alphaearth"]
-    
     for embedder_name in embedders:
         log.info("\n" + "=" * 78)
         log.info(f"TRAINING MODEL WITH {embedder_name.upper()} LOCATION EMBEDDINGS")
@@ -171,7 +168,7 @@ def run_comparison(
                 tags=["location_embedding", embedder_name, "variant_only"],
                 config={"embedder": embedder_name, **cfg.__dict__},
             ):
-                trainer = BaseTrainer(cfg)
+                trainer = BaseTrainer(cfg, model_name=embedder_name)
                 embedder_results = trainer.run(use_wandb=use_wandb)
                 required_keys = ("predictions", "targets", "sample_labels", "bin_labels")
                 missing = [k for k in required_keys if k not in embedder_results]
