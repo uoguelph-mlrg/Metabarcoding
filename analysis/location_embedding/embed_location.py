@@ -64,6 +64,16 @@ def _sanitize_latlon(latlon: np.ndarray) -> np.ndarray:
 	return arr
 
 
+def _latlon_to_unit_xyz(latlon: np.ndarray) -> np.ndarray:
+	arr = _sanitize_latlon(latlon).astype(np.float64)
+	lat_rad = np.deg2rad(arr[:, 0])
+	lon_rad = np.deg2rad(arr[:, 1])
+	x = np.cos(lat_rad) * np.cos(lon_rad)
+	y = np.cos(lat_rad) * np.sin(lon_rad)
+	z = np.sin(lat_rad)
+	return np.column_stack([x, y, z]).astype(np.float32)
+
+
 @dataclass
 class EmbedderSpec:
 	model_name: str
@@ -133,7 +143,6 @@ class _RangeBackedEmbedder(BaseLocationEmbedder):
 		range_beta: float,
 	) -> None:
 		super().__init__(device=device, batch_size=batch_size)
-		range_src = _ensure_third_party_on_syspath("RANGE")
 		try:
 			import torch
 		except ImportError as exc:
@@ -141,96 +150,79 @@ class _RangeBackedEmbedder(BaseLocationEmbedder):
 				"RANGE backend requires 'torch'. Install with: pip install torch"
 			) from exc
 
-		import_errors: List[str] = []
-		load_model_mod = None
-		for mod_name in ("range.load_model",):
-			try:
-				importlib.invalidate_caches()
-				load_model_mod = importlib.import_module(mod_name)
-				break
-			except Exception as exc:  # pragma: no cover - import failures are env-specific
-				import_errors.append(f"{mod_name}: {exc}")
-
-		if load_model_mod is None:
-			local_hint = range_src / "range"
-			raise ImportError(
-				"RANGE backend import failed. Ensure RANGE source is available under "
-				"analysis/location_embedding/third_party/RANGE and dependencies are installed. "
-				f"Checked path: {local_hint}. Import errors: {' | '.join(import_errors)}"
-			)
-
 		self._torch = torch
-		load_model = getattr(load_model_mod, "load_model")
+		self._model_name = model_name.upper()
+		if self._model_name not in ("RANGE", "RANGE+"):
+			raise ValueError(f"Unsupported RANGE model '{model_name}'. Use RANGE or RANGE+.")
 
-		ckpt_path = satclip_ckpt_path
-		if ckpt_path is None:
-			try:
-				from huggingface_hub import hf_hub_download
-			except ImportError as exc:
-				raise ImportError(
-					"RANGE backend needs huggingface-hub to fetch SatCLIP checkpoint when "
-					"'satclip_ckpt_path' is not provided. Install with: pip install huggingface-hub"
-				) from exc
-			ckpt_path = hf_hub_download(
-				repo_id="microsoft/SatCLIP-ResNet50-L10",
-				filename="satclip-resnet50-l10.ckpt",
-				repo_type="model",
+		if range_db_path is None:
+			raise ValueError("RANGE requires a precomputed database file path via 'range_db_path'.")
+		range_db = Path(range_db_path).expanduser()
+		if not range_db.is_absolute():
+			range_db = (_REPO_DIR / range_db).resolve()
+		if not range_db.is_file():
+			raise FileNotFoundError(
+				"RANGE database not found. "
+				f"Expected file at: {range_db}. "
+				"Pass --range_db_path explicitly if needed."
 			)
 
-		kwargs = {}
-		if "RANGE" in model_name.upper():
-			if range_db_path is None:
-				raise ValueError(
-					"RANGE requires a precomputed database file path via 'range_db_path'."
-				)
-			range_db = Path(range_db_path).expanduser()
-			if not range_db.is_absolute():
-				range_db = (_REPO_DIR / range_db).resolve()
-			if not range_db.is_file():
-				raise FileNotFoundError(
-					"RANGE database not found. "
-					f"Expected file at: {range_db}. "
-					"Pass --range_db_path explicitly if needed."
-				)
-			kwargs["db_path"] = str(range_db)
-			kwargs["beta"] = float(range_beta)
+		db = np.load(range_db, allow_pickle=True)
+		if "satclip_embeddings" not in db or "image_embeddings" not in db:
+			raise ValueError(
+				"Invalid RANGE database: expected keys 'satclip_embeddings' and 'image_embeddings'."
+			)
 
-		self._model = load_model(
-			model_name=model_name,
-			pretrained_path=ckpt_path,
+		db_satclip = db["satclip_embeddings"].astype(np.float32)
+		db_satclip_norm = np.linalg.norm(db_satclip, ord=2, axis=1, keepdims=True)
+		db_satclip = db_satclip / np.clip(db_satclip_norm, 1e-8, None)
+		self._db_satclip = self._torch.tensor(db_satclip, dtype=self._torch.float32, device=self.device)
+		self._db_image = self._torch.tensor(db["image_embeddings"].astype(np.float32), dtype=self._torch.float32, device=self.device)
+
+		self._db_locs_xyz = None
+		if self._model_name == "RANGE+":
+			if "locs" not in db:
+				raise ValueError("Invalid RANGE+ database: expected key 'locs'.")
+			db_locs_latlon = db["locs"].astype(np.float32)
+			self._db_locs_xyz = self._torch.tensor(_latlon_to_unit_xyz(db_locs_latlon), dtype=self._torch.float32, device=self.device)
+
+		self._satclip = SatCLIPEmbedder(
 			device=device,
-			**kwargs,
+			batch_size=batch_size,
+			satclip_ckpt_path=satclip_ckpt_path,
 		)
-		self._model.eval()
-
-		if hasattr(self._model, "location_feature_dim"):
-			self._embedding_dim = int(getattr(self._model, "location_feature_dim"))
-		elif "RANGE" in model_name.upper():
-			self._embedding_dim = 1280
-		else:
-			self._embedding_dim = 256
+		self._temp = 15.0
+		self._geo_temp = 40.0
+		self._beta = float(range_beta)
+		self._embedding_dim = 1280
 
 	@property
 	def embedding_dim(self) -> int:
 		return self._embedding_dim
 
 	def encode(self, latlon: np.ndarray) -> np.ndarray:
-		coords_latlon = _sanitize_latlon(latlon)
-		# RANGE codepaths expect [lon, lat]
-		coords_lonlat = np.column_stack([coords_latlon[:, 1], coords_latlon[:, 0]])
-
+		coords_latlon = _sanitize_latlon(latlon).astype(np.float32)
 		outs: List[np.ndarray] = []
 		with self._torch.no_grad():
-			for start, end in _iter_batches(len(coords_lonlat), self.batch_size):
-				batch = self._torch.tensor(
-					coords_lonlat[start:end], dtype=self._torch.float64, device=self.device
-				)
-				emb = self._model(batch)
-				if hasattr(emb, "detach"):
-					emb_np = emb.detach().cpu().numpy()
+			for start, end in _iter_batches(len(coords_latlon), self.batch_size):
+				batch_latlon_np = coords_latlon[start:end]
+				curr_loc_np = self._satclip.encode(batch_latlon_np).astype(np.float32)
+				curr_loc = self._torch.tensor(curr_loc_np, dtype=self._torch.float32, device=self.device)
+				curr_loc = curr_loc / self._torch.clamp(curr_loc.norm(p=2, dim=-1, keepdim=True), min=1e-8)
+
+				high_res_similarity = self._torch.softmax((curr_loc @ self._db_satclip.T) * self._temp, dim=-1)
+				high_res_embeddings = high_res_similarity @ self._db_image
+
+				if self._model_name == "RANGE+":
+					query_xyz = self._torch.tensor(_latlon_to_unit_xyz(batch_latlon_np), dtype=self._torch.float32, device=self.device)
+					angular_similarity = self._torch.softmax((query_xyz @ self._db_locs_xyz.T) * self._geo_temp, dim=-1)
+					angular_high_res = angular_similarity @ self._db_image
+					combined_high_res = (1.0 - self._beta) * angular_high_res + self._beta * high_res_embeddings
 				else:
-					emb_np = np.asarray(emb)
-				outs.append(np.asarray(emb_np, dtype=np.float32))
+					combined_high_res = high_res_embeddings
+
+				emb = self._torch.cat([combined_high_res, curr_loc], dim=1)
+				outs.append(emb.detach().cpu().numpy().astype(np.float32))
 		return np.concatenate(outs, axis=0) if outs else np.zeros((0, self.embedding_dim), dtype=np.float32)
 
 
@@ -297,6 +289,7 @@ class SatCLIPEmbedder(BaseLocationEmbedder):
 
 		self._torch = torch
 		self._model = get_satclip(ckpt_path, device=device)
+		self._model.to(device)
 		self._model.eval()
 		self._embedding_dim = int(getattr(self._model, "location_feature_dim", 256))
 

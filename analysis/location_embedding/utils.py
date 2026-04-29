@@ -319,12 +319,9 @@ def load(
     else:
         df["collection_day"] = 0
 
-    # Build index mappings
     unique_samples = df["sample_id"].unique()
     n_samples = len(unique_samples)
     sample_index = {s: i for i, s in enumerate(unique_samples)}
-    unique_bins = df["bin_uri"].unique()
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
 
     # Normalize + log-transform occurences to get target y
     sample_totals = df.groupby("sample_id")["occurrences"].transform("sum")
@@ -389,6 +386,8 @@ def load(
         "val": val_sample_idx,
         "test": test_sample_idx,
     }
+    unique_bins = df["bin_uri"].unique()
+    bin_index = {b: i for i, b in enumerate(unique_bins)}
 
     # Resolve location embedding params: explicit kwargs take priority, then config attributes, then defaults
     def _cfg(attr, default):
@@ -442,7 +441,7 @@ def load(
             _emb_model,
             len(location_embedding_cols),
         )
-    
+
     missing_features = [c for c in OBSERVATION_FEATURES if c not in df.columns]
     if missing_features:
         log.warning(f"Missing features in dataset: {', '.join(missing_features)}.")
@@ -472,11 +471,8 @@ def load(
             log.warning(f"Feature column '{col}' is not numeric; attempting to coerce to numeric with NaN for invalid values.")
             df_long[col] = pd.to_numeric(df_long[col], errors="coerce")
 
-    # Build taxonomy_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
-    if config.use_taxonomy:
-        taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
-    else:
-        taxonomy_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
+    # Build taxonomy_df with taxonomy columns
+    taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
 
     # Ensure taxonomy_df is ordered by bin_index
     taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
