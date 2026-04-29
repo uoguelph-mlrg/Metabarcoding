@@ -315,13 +315,6 @@ def load(
     else:
         df["collection_day"] = 0
 
-    # Build index mappings
-    unique_samples = df["sample_id"].unique()
-    n_samples = len(unique_samples)
-    sample_index = {s: i for i, s in enumerate(unique_samples)}
-    unique_bins = df["bin_uri"].unique()
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
-
     # Normalize + log-transform occurences to get target y
     sample_totals = df.groupby("sample_id")["occurrences"].transform("sum")
     # Also store actual proportions for cross-entropy loss
@@ -333,6 +326,11 @@ def load(
     df["avg_reads_norm"] = np.log1p(df["avg_reads"])
     df["max_reads_norm"] = np.log1p(df["max_reads"])
     df["min_reads_norm"] = np.log1p(df["min_reads"])
+
+    # Build sample index mappings before splitting so split sizes are computed correctly.
+    unique_samples = df["sample_id"].unique()
+    n_samples = len(unique_samples)
+    sample_index = {s: i for i, s in enumerate(unique_samples)}
     
     ################################################################################################
     # Train/val/test split
@@ -379,7 +377,10 @@ def load(
         train_sample_idx = sample_indices[:n_train]
         val_sample_idx = sample_indices[n_train:n_train + n_val]
         test_sample_idx = sample_indices[n_train + n_val:]
-    
+
+    unique_bins = df["bin_uri"].unique()
+    bin_index = {b: i for i, b in enumerate(unique_bins)}
+
     split_indices = {
         "train": train_sample_idx,
         "val": val_sample_idx,
@@ -415,11 +416,8 @@ def load(
             log.warning(f"Feature column '{col}' is not numeric; attempting to coerce to numeric with NaN for invalid values.")
             df_long[col] = pd.to_numeric(df_long[col], errors="coerce")
 
-    # Build taxonomy_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
-    if config.use_taxonomy:
-        taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
-    else:
-        taxonomy_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
+    # Build taxonomy_df with taxonomy columns
+    taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
 
     # Ensure taxonomy_df is ordered by bin_index
     taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
