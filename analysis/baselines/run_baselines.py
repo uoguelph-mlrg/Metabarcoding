@@ -184,9 +184,10 @@ def run_all_baselines(
     # Print comparison table
     print_metrics_table(test_results)
     
-    # Save results
-    os.makedirs(output_dir, exist_ok=True)
+    # Save results in a timestamped subdirectory so successive runs don't collide.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(output_dir, timestamp)
+    os.makedirs(output_dir, exist_ok=True)
     
     # Save test results
     test_filepath = os.path.join(output_dir, f"baseline_results_test_{timestamp}.csv")

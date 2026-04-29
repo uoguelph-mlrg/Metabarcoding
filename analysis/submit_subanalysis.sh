@@ -228,7 +228,7 @@ resolve_target() {
     BarcodeBERT)
       TARGET_DIR="BarcodeBERT"
       TRAIN_CMD_TEMPLATE='python barcodebert.py __NO_WANDB__'
-      RESULTS_PATTERNS='BarcodeBERT/results/barcodebert_*.pkl'
+      RESULTS_PATTERNS='BarcodeBERT/results/*/barcodebert_*.pkl'
       FIGURES_DIR='figures/BarcodeBERT'
       DEFAULT_LABELS_JSON='{"baseline":"BarcodeBERT","taxonomy":"Taxonomy"}'
       DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","taxonomy":"#9b59b6"}'
@@ -237,7 +237,7 @@ resolve_target() {
     baselines_comparison)
       TARGET_DIR="baselines"
       TRAIN_CMD_TEMPLATE='python run_baselines.py --data_path __PROJECT_ROOT__/data/ecuador_training_data.csv --output_dir results'
-      RESULTS_PATTERNS='baselines/results/baseline_model_comparison_results_*.pkl'
+      RESULTS_PATTERNS='baselines/results/*/baseline_model_comparison_results_*.pkl'
       FIGURES_DIR='figures/baselines_comparison'
       DEFAULT_LABELS_JSON='{"mean":"Mean","zero":"Zero","linear_regression":"Linear Regression","ridge":"Ridge","elasticnet":"ElasticNet","decision_tree":"Decision Tree","random_forest":"Random Forest","gradient_boosting":"Gradient Boosting","knn":"KNN","two_stage":"Two-Stage","zero_inflated_ridge":"Zero-Inflated Ridge","tweedie":"Tweedie","log_transform":"Log-Transform","quantile_rf":"Quantile RF"}'
       DEFAULT_COLORS_JSON='{"mean":"#808080","zero":"#4d4d4d","linear_regression":"#f28e2b","ridge":"#4e79a7","elasticnet":"#e15759","decision_tree":"#76b7b2","random_forest":"#59a14f","gradient_boosting":"#edc948","knn":"#b07aa1","two_stage":"#9c755f","zero_inflated_ridge":"#bab0ab","tweedie":"#ff9da7","log_transform":"#8cd17d","quantile_rf":"#af7aa1"}'
@@ -246,7 +246,7 @@ resolve_target() {
     interpolated_latent)
       TARGET_DIR="interpolated_latent"
       TRAIN_CMD_TEMPLATE='python interpolated_latent.py __NO_WANDB__'
-      RESULTS_PATTERNS='interpolated_latent/results/interpolated_latent_*.pkl'
+      RESULTS_PATTERNS='interpolated_latent/results/*/interpolated_latent_*.pkl'
       FIGURES_DIR='figures/interpolated_latent'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","default_with_interpolation":"Interpolation (20%)","include_self_false":"Interpolation (20%, no self latent)","inference_true":"Interpolation (20%, at inference)","train_mlp_false":"Interpolation (20%, no MLP interpolation)","fraction_0p1":"Interpolation (10%)","fraction_0p5":"Interpolation (50%)","fraction_1p0":"Interpolation (100%)"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","default_with_interpolation":"#e74c3c","include_self_false":"#e67e22","inference_true":"#f39c12","train_mlp_false":"#2ecc71","fraction_0p1":"#3498db","fraction_0p5":"#9b59b6","fraction_1p0":"#1abc9c"}'
@@ -255,7 +255,7 @@ resolve_target() {
     location_embedding)
       TARGET_DIR="location_embedding"
       TRAIN_CMD_TEMPLATE='python location_embedding.py __NO_WANDB__'
-      RESULTS_PATTERNS='location_embedding/results/location_embedding_*.pkl'
+      RESULTS_PATTERNS='location_embedding/results/*/location_embedding_*.pkl'
       FIGURES_DIR='figures/location_embedding'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (No Location Embedding)","satclip":"SatCLIP (256D)","range":"RANGE (1280D)","geoclip":"GeoCLIP (512D)","alphaearth":"AlphaEarth (64D)"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","satclip":"#e74c3c","range":"#3498db","geoclip":"#2ecc71","alphaearth":"#f39c12"}'
@@ -264,7 +264,7 @@ resolve_target() {
     latent_as_in_and_output)
       TARGET_DIR='latent_as_in_and_output'
       TRAIN_CMD_TEMPLATE='python latent_as_in_and_output.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='latent_as_in_and_output/results/latent_as_in_and_output_*.pkl'
+      RESULTS_PATTERNS='latent_as_in_and_output/results/*/latent_as_in_and_output_*.pkl'
       FIGURES_DIR='figures/latent_as_in_and_output'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","both_dim_5":"Latent In+Out (dim=5)","input_only_dim_10":"Latent Input Only (dim=10)"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","both_dim_5":"#e74c3c","input_only_dim_10":"#3498db"}'
@@ -273,7 +273,7 @@ resolve_target() {
     ablation_study)
       TARGET_DIR='ablation_study'
       TRAIN_CMD_TEMPLATE='python ablation_study.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='ablation_study/results/ablation_study_*.pkl'
+      RESULTS_PATTERNS='ablation_study/results/*/ablation_study_*.pkl'
       FIGURES_DIR='figures/ablation_study'
       DEFAULT_LABELS_JSON='{"baseline":"MLP + Latent","mlp_no_taxonomy":"MLP (no taxonomy)","mlp_with_taxonomy":"MLP (with taxonomy)"}'
       DEFAULT_COLORS_JSON='{"baseline":"#ff7f0e","mlp_no_taxonomy":"#1f77b4","mlp_with_taxonomy":"#2ca02c"}'
@@ -282,7 +282,7 @@ resolve_target() {
     loss_comparison)
       TARGET_DIR='loss_comparison'
       TRAIN_CMD_TEMPLATE='python loss_comparison.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='loss_comparison/results/loss_comparison_*.pkl'
+      RESULTS_PATTERNS='loss_comparison/results/*/loss_comparison_*.pkl'
       FIGURES_DIR='figures/loss_comparison'
       DEFAULT_LABELS_JSON='{"baseline":"Cross-Entropy","logistic":"Logistic (BCE)"}'
       DEFAULT_COLORS_JSON='{"cross_entropy":"#2ecc71","logistic":"#9b59b6"}'
@@ -291,7 +291,7 @@ resolve_target() {
     optimal_K)
       TARGET_DIR='optimal_K'
       TRAIN_CMD_TEMPLATE='python K_comparison.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='optimal_K/results/K_comparison_*.pkl'
+      RESULTS_PATTERNS='optimal_K/results/*/K_comparison_*.pkl'
       FIGURES_DIR='figures/optimal_K'
       DEFAULT_LABELS_JSON='{"K_5":"K=5","baseline":"K=25","K_100":"K=100","K_1000":"K=1000"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","K_5":"#824e05","K_25":"#e74c3c","K_100":"#e67e22","K_1000":"#f39c12"}'
@@ -300,7 +300,7 @@ resolve_target() {
     preprocessing)
       TARGET_DIR='preprocessing'
       TRAIN_CMD_TEMPLATE='python utils_test.py && python read_count_preprocessing.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='preprocessing/results/preprocessing_*.pkl'
+      RESULTS_PATTERNS='preprocessing/results/*/preprocessing_*.pkl'
       FIGURES_DIR='figures/preprocessing'
       DEFAULT_LABELS_JSON='{"original":"Original (raw counts)","normalized":"Normalized Only","logarithm":"Logarithm Only"}'
       DEFAULT_COLORS_JSON='{"original":"#ff7f0e","normalized":"#1f77b4","logarithm":"#2ca02c"}'
@@ -309,7 +309,7 @@ resolve_target() {
     dimensionality_increase/gating_function)
       TARGET_DIR='dimensionality_increase/gating_function'
       TRAIN_CMD_TEMPLATE='python dimensionality_increase.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='dimensionality_increase/gating_function/results/gating_comparison_*.pkl'
+      RESULTS_PATTERNS='dimensionality_increase/gating_function/results/*/gating_comparison_*.pkl'
       FIGURES_DIR='figures/dimensionality_gating'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (Additive)","exp":"Exponential","scaled_exp":"Scaled Exponential","additive":"Additive (1+h)","softplus":"Softplus","tanh":"Tanh","sigmoid":"Sigmoid","dot_product":"Dot Product"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","exp":"#e74c3c","scaled_exp":"#e67e22","additive":"#f39c12","softplus":"#2ecc71","tanh":"#3498db","sigmoid":"#9b59b6","dot_product":"#1abc9c"}'
@@ -318,7 +318,7 @@ resolve_target() {
     dimensionality_increase/vector_size)
       TARGET_DIR='dimensionality_increase/vector_size'
       TRAIN_CMD_TEMPLATE='python dimensionality_increase.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='dimensionality_increase/vector_size/results/dimensionality_analysis_*.pkl'
+      RESULTS_PATTERNS='dimensionality_increase/vector_size/results/*/dimensionality_analysis_*.pkl'
       FIGURES_DIR='figures/dimensionality_vector'
       DEFAULT_LABELS_JSON='{"baseline":"Dim=1 (Baseline)","dim_2":"Dim=2","dim_5":"Dim=5","dim_6":"Dim=6","dim_8":"Dim=8","dim_10":"Dim=10","dim_12":"Dim=12","dim_15":"Dim=15","dim_20":"Dim=20","dim_50":"Dim=50"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","dim_2":"#824e05","dim_5":"#e74c3c","dim_6":"#e67e22","dim_8":"#f39c12","dim_10":"#f1c40f","dim_12":"#a2f10f","dim_15":"#2ecc71","dim_20":"#1d8d4b","dim_50":"#3498db"}'
