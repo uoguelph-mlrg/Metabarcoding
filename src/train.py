@@ -529,7 +529,7 @@ class Trainer:
                         valid_mask = torch.ones(inputs.shape[1], dtype=torch.bool, device=inputs.device)
                     inputs_flat = inputs[b][valid_mask]
                     bin_idx_flat = bin_idx[b][valid_mask]
-                    interpolation_mask = valid_mask if use_interpolation else None
+                    interpolation_mask = torch.ones(len(bin_idx_flat), dtype=torch.bool, device=inputs_flat.device) if use_interpolation else None
                     outputs = self.model(
                         inputs_flat,
                         bin_idx_flat,
@@ -902,6 +902,14 @@ class Trainer:
         if os.path.exists(best_ckpt):
             checkpoint = torch.load(best_ckpt, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint["model_state_dict"])
+
+        _keep = {"best.pt", "latest.pt", PREPROCESSING_STATE_FILENAME}
+        for _ckpt_file in os.listdir(self.checkpoint_dir):
+            if _ckpt_file not in _keep:
+                try:
+                    os.remove(os.path.join(self.checkpoint_dir, _ckpt_file))
+                except OSError:
+                    pass
 
         self._plot_training_progress()
 
