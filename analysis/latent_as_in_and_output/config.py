@@ -17,7 +17,8 @@ class Config:
     # Train / val / test split
     train_frac: float = 0.8
     val_frac: float = 0.1
-    
+    remove_excess: bool = False
+
     # Basic training settings
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
     device: str = (
@@ -42,7 +43,6 @@ class Config:
 
     # DNA embedding settings (used when use_embedding=True)
     embedding_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "embeddings.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = None     # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
     # MLP - architecture & optimization settings
