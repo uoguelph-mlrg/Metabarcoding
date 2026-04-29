@@ -10,7 +10,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 class Config:
     # Run configuration
     data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
-    results_dir: str = "../results"             # Directory where run artifacts are saved
+    results_dir: str = os.path.join(os.path.dirname(__file__), "results")  # Directory where run artifacts are saved
     checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
 
