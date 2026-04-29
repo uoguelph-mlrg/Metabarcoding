@@ -35,7 +35,8 @@ def make_variant_filename(analysis_name: str, variant_name: str) -> str:
 
 def make_output_dir(script_file: str, output_dir_arg: str) -> str:
     script_dir = os.path.dirname(os.path.abspath(script_file))
-    output_dir = os.path.join(script_dir, output_dir_arg)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(script_dir, output_dir_arg, ts)
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 

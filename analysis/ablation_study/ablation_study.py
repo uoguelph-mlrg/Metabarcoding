@@ -674,7 +674,7 @@ def run_ablation_study(
     
     # Create splits using the SAME preprocessing as the latent model (utils.load)
     # We only use this call to determine split indices deterministically.
-    _, _, _, _, split_indices, _ = load(cfg, save_data=False)
+    _, _, _, _, _, _, split_indices, _ = load(cfg, save_data=False)
     
     # ========================================================================
     # Step 2: Build non-taxonomy data once for all ablation variants
@@ -754,7 +754,7 @@ def run_ablation_study(
     
     # Build hierarchical taxonomy ids per BIN (0 reserved for "unknown")
     tax_ids_per_bin, card = _build_taxonomy_id_matrix(
-        bins_df=bins_df,
+        bins_df=taxonomy_df,
         n_bins=len(bin_index),
         taxonomy_cols=TAXONOMY_COLS,
     )
@@ -832,9 +832,9 @@ if __name__ == "__main__":
         run_group=run_group,
     )
     
-    # Save results
+    # Save results in a timestamped subdirectory so successive runs don't collide.
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, args.output_dir)
+    output_dir = os.path.join(script_dir, args.output_dir, time.strftime("%Y%m%d_%H%M%S"))
     for variant, variant_results in results.items():
         results_path = os.path.join(output_dir, f"ablation_study_{variant}.pkl")
         save_results({variant: variant_results}, results_path)
