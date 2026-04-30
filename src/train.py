@@ -5,13 +5,12 @@ import os
 import pickle
 import sys
 import time
+import warnings
 from dataclasses import asdict
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging as log
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
@@ -28,6 +27,7 @@ from config import Config, set_seed
 from dataset import MBDataset, collate_samples
 from latent_solver import LatentSolver
 from loss import Loss
+from metrics import compute_metrics, metric_key
 from mlp import MLPModel
 from model import Model
 from neighbor_graph import NeighbourGraph
@@ -490,7 +490,9 @@ class Trainer:
                 latent=self.model.latent_vec,
                 optimizer=self.latent_optimizer,
             )
-            self.latent_scheduler.step()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.latent_scheduler.step()
         finally:
             self.model.latent_vec.requires_grad_(previous_requires_grad)
 
@@ -596,187 +598,13 @@ class Trainer:
     ) -> Dict[str, float]:
         """Compute per-observation and per-sample evaluation metrics.
 
-        Micro metrics are computed on all observations pooled together. Macro metrics
-        are computed per sample first and then averaged to avoid domination by samples
-        with many observed BINs.
-
         Args:
             split: Dataset split to evaluate.
             predictions: Optional pre-computed output of get_predictions(). When
-                provided the forward pass is skipped, avoiding a redundant computation
-                that would otherwise double the inference cost at each epoch.
+                provided the forward pass is skipped.
         """
         y_pred, y_true, sample_labels, _ = predictions if predictions is not None else self.get_predictions(split=split)
-
-        y_true = np.asarray(y_true, dtype=float)
-        y_pred = np.asarray(y_pred, dtype=float)
-        valid = np.isfinite(y_true) & np.isfinite(y_pred)
-        y_true = y_true[valid]
-        y_pred = np.clip(y_pred[valid], 0, 1)
-        eps = 1e-10
-        
-        def _shannon_diversity(values: np.ndarray, eps: float = 1e-10) -> float:
-            """Compute Shannon diversity from non-negative abundance values."""
-            arr = np.asarray(values, dtype=float).reshape(-1)
-            if arr.size == 0:
-                return np.nan
-            # eps is added before normalization so zero-only vectors still produce a
-            # finite distribution and log argument.
-            probs = (arr + eps) / np.sum(arr + eps)
-            return float(-np.sum(probs * np.log(probs + eps)))
-        
-        def _spearman_rho(x: np.ndarray, y: np.ndarray) -> Optional[float]:
-            """Compute Spearman rho and return None if undefined."""
-            rank_x = pd.Series(x).rank(method="average").to_numpy(dtype=float)
-            rank_y = pd.Series(y).rank(method="average").to_numpy(dtype=float)
-            if np.std(rank_x) == 0 or np.std(rank_y) == 0:
-                return None
-            rho = float(np.corrcoef(rank_x, rank_y)[0, 1])
-            return rho if np.isfinite(rho) else None
-        
-        def _r2_and_intercept(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float]:
-            """Compute R² plus fitted intercept for Shannon diversity."""
-            if len(y_true) == 0:
-                return np.nan, np.nan
-            ss_res = np.sum((y_true - y_pred) ** 2)
-            ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-            r2 = float(1 - ss_res / (ss_tot + eps))
-            
-            slope, intercept = np.polyfit(y_true, y_pred, 1)
-            intercept = float(intercept) if np.isfinite(intercept) else np.nan
-            return r2, intercept
-
-        rmse_macro = np.nan
-        mae_macro = np.nan
-        kl_divergence = np.nan
-        shannon_r2 = np.nan
-        shannon_intercept = np.nan
-        spearman_macro = np.nan
-
-        if sample_labels is not None:
-            sample_labels_v = np.asarray(sample_labels)[valid]
-            rmse_per, mae_per, kl_per = [], [], []
-            shannon_true_per, shannon_pred_per = [], []
-            spearman_per = []
-            for sample in np.unique(sample_labels_v):
-                mask = sample_labels_v == sample
-                true_s = y_true[mask]
-                pred_s = y_pred[mask]
-                if len(true_s) == 0:
-                    continue
-                # Macro metrics weight each sample equally regardless of sample size.
-                rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
-                mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
-                true_s_norm = (true_s + eps) / (true_s + eps).sum()
-                pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
-                kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
-
-                shannon_true = _shannon_diversity(true_s, eps)
-                shannon_pred = _shannon_diversity(pred_s, eps)
-                if np.isfinite(shannon_true) and np.isfinite(shannon_pred):
-                    shannon_true_per.append(shannon_true)
-                    shannon_pred_per.append(shannon_pred)
-
-                if len(true_s) > 1:
-                    rho = _spearman_rho(true_s, pred_s)
-                    if rho is not None:
-                        spearman_per.append(rho)
-
-            if rmse_per:
-                rmse_macro = float(np.mean(rmse_per))
-                mae_macro = float(np.mean(mae_per))
-                kl_divergence = float(np.mean(kl_per))
-
-            if len(shannon_true_per) > 1:
-                shannon_r2, shannon_intercept = _r2_and_intercept(np.array(shannon_true_per), np.array(shannon_pred_per))
-
-            if spearman_per:
-                spearman_macro = float(np.mean(spearman_per))
-
-        rmse_micro = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-        mae_micro = float(np.mean(np.abs(y_true - y_pred)))
-        ss_res = np.sum((y_true - y_pred) ** 2)
-        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-        r2 = float(1 - ss_res / (ss_tot + eps))
-
-        y_true_log = np.log(y_true + 1)
-        y_pred_log = np.log(y_pred + 1)
-        ss_res_log = np.sum((y_true_log - y_pred_log) ** 2)
-        ss_tot_log = np.sum((y_true_log - np.mean(y_true_log)) ** 2)
-        r2_log = float(1 - ss_res_log / (ss_tot_log + eps))
-
-        zero_mask = y_true == 0
-        nonzero_mask = y_true > 0
-        # Report sparsity-sensitive errors separately because abundance vectors can be
-        # strongly zero-inflated.
-        rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))) if zero_mask.sum() > 0 else np.nan
-        mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))) if zero_mask.sum() > 0 else np.nan
-        rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2))) if nonzero_mask.sum() > 0 else np.nan
-        mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask]))) if nonzero_mask.sum() > 0 else np.nan
-
-        corr = np.corrcoef(y_true, y_pred)[0, 1] if len(y_true) > 1 else 0.0
-        correlation = 0.0 if np.isnan(corr) else float(corr)
-
-        nz = y_true != 0
-        rel_error = np.zeros_like(y_true, dtype=float)
-        rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
-        absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else np.nan
-
-        return {
-            "RMSE (micro)": rmse_micro,
-            "RMSE (macro)": rmse_macro,
-            "MAE (micro)": mae_micro,
-            "MAE (macro)": mae_macro,
-            "Absolute Relative Error": absolute_relative_error,
-            "R² (Shannon diversity)": shannon_r2,
-            "Shannon intercept": shannon_intercept,
-            "Spearman Rho (macro)": spearman_macro,
-            "R²": r2,
-            "R² (log + 1)": r2_log,
-            "RMSE (zeros)": rmse_zeros,
-            "MAE (zeros)": mae_zeros,
-            "RMSE (non-zeros)": rmse_nonzeros,
-            "MAE (non-zeros)": mae_nonzeros,
-            "KL Divergence": kl_divergence,
-            "Correlation": correlation,
-            "n_zeros": float(zero_mask.sum()),
-            "n_nonzeros": float(nonzero_mask.sum()),
-        }
-
-
-    def _metric_key(self, metric_name: str) -> str:
-        return (
-            metric_name.lower()
-            .replace(" ", "_")
-            .replace("(", "")
-            .replace(")", "")
-            .replace("²", "2")
-            .replace("+", "plus")
-            .replace("-", "_")
-            .replace("/", "_")
-        )
-
-    def _plot_training_progress(self) -> None:
-        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-
-        epoch_nums = [e for e, _ in self.train_losses]
-        train_vals = [l for _, l in self.train_losses]
-        val_vals = [l for _, l in self.val_losses]
-
-        ax.plot(epoch_nums, train_vals, "b-", linewidth=2, alpha=0.8, label="Train Loss")
-        ax.plot(epoch_nums, val_vals, "r-", linewidth=2, alpha=0.8, label="Validation Loss")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.set_title("Training Progress")
-        ax.grid(True, alpha=0.3)
-        ax.legend(frameon=False)
-
-        fig_dir = os.path.join(self.base_artifact_dir, "figures")
-        os.makedirs(fig_dir, exist_ok=True)
-        save_path = os.path.join(fig_dir, f"training_progress_{self.model_name}_{self.run_id}.png")
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
+        return compute_metrics(y_pred, y_true, sample_labels=sample_labels)
 
     def run(self, use_wandb: bool = True) -> Dict[str, Any]:
         log.info(
@@ -804,7 +632,9 @@ class Trainer:
                 latent_s = time.perf_counter() - latent_start
 
                 loss_value, mlp_timings = self._train_batch(batch)
-                self.mlp_scheduler.step()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.mlp_scheduler.step()
 
                 total_s = time.perf_counter() - batch_start
 
@@ -879,9 +709,9 @@ class Trainer:
                 "timing/epoch/val_metrics_s": float(val_metric_s),
             }
             for metric_name, metric_value in train_metrics.items():
-                epoch_log_payload[f"train/metrics/{self._metric_key(metric_name)}"] = metric_value
+                epoch_log_payload[f"train/metrics/{metric_key(metric_name)}"] = metric_value
             for metric_name, metric_value in val_metrics.items():
-                epoch_log_payload[f"val/metrics/{self._metric_key(metric_name)}"] = metric_value
+                epoch_log_payload[f"val/metrics/{metric_key(metric_name)}"] = metric_value
             for diag_name, diag_value in diag.items():
                 epoch_log_payload[f"diag/{diag_name}"] = diag_value
 
@@ -907,8 +737,6 @@ class Trainer:
                 except OSError:
                     pass
 
-        self._plot_training_progress()
-
         test_loss = self.validate(split="test")
         test_preds = self.get_predictions(split="test")
         test_metrics = self.compute_metrics(split="test", predictions=test_preds)
@@ -918,7 +746,7 @@ class Trainer:
                 "test/loss": test_loss,
             }
             for metric_name, metric_value in test_metrics.items():
-                payload[f"test/metrics/{self._metric_key(metric_name)}"] = metric_value
+                payload[f"test/metrics/{metric_key(metric_name)}"] = metric_value
             wandb.log(payload)
 
         predictions, targets, sample_labels, bin_labels = test_preds
