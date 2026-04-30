@@ -85,6 +85,11 @@ class Config:
     gating_epsilon: float = 0.693               # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
 
+    # Location embedding (optional; None disables it and keeps raw lat/lon features)
+    location_embedder: Optional[str] = None      # None | "satclip" | "geoclip" | "range" | "alphaearth"
+    keep_raw_gps_features: bool = False          # Keep raw lat/lon alongside location embeddings
+    satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
+
 
 def set_seed(seed: int = 14) -> None:
     np.random.seed(seed)
