@@ -89,7 +89,7 @@ def main(ckpt_path: Optional[Path], out_dir: Path) -> None:
     # ------------------------------------------------------------------
     print("\nLoading data (reproducible split with seed=14)...")
     set_seed()
-    data, taxonomy_df, bin_index, sample_index, split_indices = load(cfg, save_data=False)
+    data, taxonomy_df, _, _, bin_index, sample_index, split_indices, _ = load(cfg)
 
     # Build reverse index: integer index → bin_uri
     idx_to_bin = {v: k for k, v in bin_index.items()}

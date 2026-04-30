@@ -86,7 +86,7 @@ def run_comparison(
             config={**cfg.__dict__, "variant": method},
         ):
             cfg = Config(**cfg.__dict__)  # Create a copy of the config
-            cfg.data_path = data_dir  # Override data directory for this variant
+            cfg.preprocessed_dir = data_dir  # Load from cached variant directory
             trainer = Trainer(cfg, model_name=method, results_dir=output_dir)
             method_results = trainer.run(use_wandb=use_wandb)
 
