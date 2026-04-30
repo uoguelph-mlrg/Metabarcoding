@@ -12,7 +12,7 @@ All models use cross-entropy loss for fair comparison.
 Results are saved to pickle for visualization.
 
 Usage:
-    python ablation_study.py 
+    python ablation_study.py
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from config import Config, set_seed
 from train import Trainer  # Reuse existing Trainer for MLP + Latent
-from utils import load, OBSERVATION_FEATURES
+from utils import load, OBSERVATION_FEATURES, TAXONOMY_FEATURES
 from mlp import MLPModel
 from loss import Loss
 from dataset import MBDataset, collate_samples
@@ -51,167 +51,8 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 
-# ============================================================================
-# Data Loading with Taxonomy Features
-# ============================================================================
-
-TAXONOMY_COLS = ["phylum", "class", "order", "family", "subfamily", "genus", "species"]
-
-
-def load_data_with_taxonomy(
-    config: Config,
-    include_taxonomy: bool = False,
-    fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
-) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Optional[Dict[str, LabelEncoder]], Dict[str, np.ndarray]]:
-    """
-    Load data with optional taxonomic features encoded as integers.
-    
-    Args:
-        config: Configuration object
-        include_taxonomy: Whether to include taxonomy features
-        fixed_split_indices: If provided, use these sample indices for splits
-                            (ensures same splits across different data loading calls)
-    
-    Returns:
-        Tuple of (splits, taxonomy_data, bin_index, sample_index, taxonomy_encoders, split_indices)
-    """
-    df = pd.read_csv(config.data_path)
-    df = df.rename(columns={"sample-eventid": "sample_id"})
-    
-    # Parse date feature
-    if "collection_start_date" in df.columns:
-        df["collection_day"] = pd.to_datetime(
-            df["collection_start_date"], format="%m/%d/%Y", errors="coerce"
-        ).dt.dayofyear.fillna(0)
-    else:
-        df["collection_day"] = 0
-    
-    # Build indices
-    unique_samples = df["sample_id"].unique()
-    n_samples = len(unique_samples)
-    sample_index = {s: i for i, s in enumerate(unique_samples)}
-    unique_bins = df["bin_uri"].unique()
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
-    
-    # Compute relative abundance
-    sample_totals = df.groupby("sample_id")["occurrences"].transform("sum")
-    df["rel_abundance"] = df["occurrences"] / (sample_totals + 1e-10)
-    
-    # Normalize reads per sample
-    df["total_reads_per_sample"] = np.log1p(df["total_reads_per_sample"])
-    df["total_reads_norm"] = np.log1p(df["total_reads"])
-    df["avg_reads_norm"] = np.log1p(df["avg_reads"])
-    df["max_reads_norm"] = np.log1p(df["max_reads"])
-    df["min_reads_norm"] = np.log1p(df["min_reads"])
-    
-    # Determine feature columns
-    feature_cols = [c for c in OBSERVATION_FEATURES if c in df.columns]
-    
-    # Encode taxonomy if requested
-    taxonomy_encoders = None
-    if include_taxonomy:
-        taxonomy_encoders = {}
-        for col in TAXONOMY_COLS:
-            if col in df.columns:
-                df[col] = df[col].fillna("unknown").astype(str)
-                le = LabelEncoder()
-                df[f"{col}_encoded"] = le.fit_transform(df[col])
-                taxonomy_encoders[col] = le
-                feature_cols.append(f"{col}_encoded")
-    
-    # Build long-format dataframe
-    base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
-    df_long = df[base_cols + feature_cols].copy()
-    
-    # Extract taxonomy data
-    taxonomy_data = df.groupby("bin_uri").first()[
-        [c for c in TAXONOMY_COLS if c in df.columns]
-    ].reset_index()
-    taxonomy_data["_idx"] = taxonomy_data["bin_uri"].map(bin_index)
-    taxonomy_data = taxonomy_data.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
-    
-    # Create splits - use fixed indices if provided for reproducibility
-    if fixed_split_indices is not None:
-        train_sample_idx = fixed_split_indices["train"]
-        val_sample_idx = fixed_split_indices["val"]
-        test_sample_idx = fixed_split_indices["test"]
-    else:
-        sample_indices = np.arange(n_samples)
-        np.random.shuffle(sample_indices)
-        
-        n_train = int(n_samples * config.train_frac)
-        n_val = int(n_samples * config.val_frac)
-        
-        train_sample_idx = sample_indices[:n_train]
-        val_sample_idx = sample_indices[n_train:n_train + n_val]
-        test_sample_idx = sample_indices[n_train + n_val:]
-    
-    # Normalize numeric features based on training set
-    numeric_features = [c for c in OBSERVATION_FEATURES if c in df_long.columns]
-    X_train_subset = df_long.loc[
-        df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), 
-        numeric_features + ["bin_uri"]
-    ]
-    
-    # Fill missing values with bin medians from training set
-    bin_medians = X_train_subset.groupby("bin_uri").median()
-    for col in numeric_features:
-        if col not in bin_medians.columns:
-            continue
-        median_map = bin_medians[col].to_dict()
-        df_long[col] = df_long.apply(
-            lambda row: median_map.get(row["bin_uri"], np.nan) if pd.isna(row[col]) else row[col],
-            axis=1
-        )
-        df_long[col] = df_long[col].fillna(df_long[col].median())
-    
-    # Standardize features
-    for col in numeric_features:
-        mean_val = X_train_subset[col].mean()
-        std_val = X_train_subset[col].std(ddof=0) + 1e-10
-        df_long[col] = (df_long[col] - mean_val) / std_val
-    
-    # Also normalize taxonomy features if included
-    if include_taxonomy:
-        for col in TAXONOMY_COLS:
-            encoded_col = f"{col}_encoded"
-            if encoded_col in df_long.columns:
-                mean_val = df_long[encoded_col].mean()
-                std_val = df_long[encoded_col].std(ddof=0) + 1e-10
-                df_long[encoded_col] = (df_long[encoded_col] - mean_val) / std_val
-    
-    def compute_split(df_long, sample_idx, feature_cols):
-        sample_set = set(unique_samples[sample_idx])
-        mask = df_long["sample_id"].isin(sample_set)
-        X = df_long.loc[mask, ["sample_id", "bin_uri"] + feature_cols].set_index(["sample_id", "bin_uri"])
-        y = df_long.loc[mask, "rel_abundance"]
-        return X, y
-    
-    X_train, y_train = compute_split(df_long, train_sample_idx, feature_cols)
-    X_val, y_val = compute_split(df_long, val_sample_idx, feature_cols)
-    X_test, y_test = compute_split(df_long, test_sample_idx, feature_cols)
-    
-    log.info(f"Loaded {len(df_long)} observations")
-    log.info(f"  {len(unique_samples)} samples, {len(unique_bins)} bins")
-    log.info(f"  Features: {len(feature_cols)}")
-    if include_taxonomy:
-        log.info(f"  Taxonomy levels encoded: {list(taxonomy_encoders.keys())}")
-    log.info(f"  Train: {len(train_sample_idx)} samples, Val: {len(val_sample_idx)} samples, Test: {len(test_sample_idx)} samples")
-    
-    splits = {
-        "train": {"X": X_train, "y": y_train},
-        "val": {"X": X_val, "y": y_val},
-        "test": {"X": X_test, "y": y_test},
-    }
-    
-    # Store split indices for reuse
-    split_indices = {
-        "train": train_sample_idx,
-        "val": val_sample_idx,
-        "test": test_sample_idx,
-    }
-    
-    return splits, taxonomy_data, bin_index, sample_index, taxonomy_encoders, split_indices
+# Derived from TAXONOMY_FEATURES (utils) so taxonomy_df columns stay in sync.
+TAXONOMY_COLS = list(TAXONOMY_FEATURES)
 
 
 # ============================================================================
@@ -642,7 +483,7 @@ def compute_regression_metrics(preds: np.ndarray, targets: np.ndarray) -> Dict[s
 # ============================================================================
 
 def run_ablation_study(
-    cfg: Config, 
+    cfg: Config,
     use_wandb: bool = True,
     max_epochs: int = 100,
     run_group: Optional[str] = None,
@@ -653,34 +494,29 @@ def run_ablation_study(
     1. MLP without taxonomy: MLP-only with observation features
     2. MLP with taxonomy: MLP-only with hierarchical taxonomy embeddings
 
-    All variants use the same train/val/test splits.
+    All variants use the same train/val/test splits and identical preprocessing
+    as the latent model (via utils.load).
     """
     results = {}
-    
+
     # ========================================================================
-    # Step 1: Load data and get split indices (will be reused)
+    # Step 1: Load data using the canonical utils.load pipeline.
+    # This ensures identical sample filtering, feature engineering,
+    # imputation, standardization, and train/val/test splits as the
+    # MLP + Latent baseline.
     # ========================================================================
     log.info("\n" + "="*70)
     log.info("PREPARING DATA SPLITS")
     log.info("="*70)
-    
+
     set_seed()  # Fixed seed for reproducibility
-    
-    # Create splits using the SAME preprocessing as the latent model (utils.load)
-    # We only use this call to determine split indices deterministically.
-    _, _, _, _, _, _, split_indices, _ = load(cfg, save_data=False)
-    
-    # ========================================================================
-    # Step 2: Build non-taxonomy data once for all ablation variants
-    # ========================================================================
-    data_no_tax, taxonomy_df, bin_index, sample_index, _, _ = load_data_with_taxonomy(
-        cfg,
-        include_taxonomy=False,
-        fixed_split_indices=split_indices,
+
+    splits, taxonomy_df, _, _, bin_index, sample_index, _, _ = load(
+        cfg, save_data=False
     )
-    
+
     # ========================================================================
-    # Step 3: Train MLP without taxonomy (same features as MLP + Latent)
+    # Step 2: Train MLP without taxonomy (same features as MLP + Latent)
     # ========================================================================
     log.info("\n" + "="*70)
     log.info("TRAINING MLP WITHOUT TAXONOMY")
@@ -700,7 +536,7 @@ def run_ablation_study(
     
     try:
         mlp_no_tax_trainer = MLPOnlyTrainer(
-            cfg, data_no_tax, bin_index, sample_index, 
+            cfg, splits, bin_index, sample_index,
             model_name="MLP (no taxonomy)",
             taxonomy=None,
         )
@@ -708,12 +544,12 @@ def run_ablation_study(
     finally:
         if use_wandb:
             wandb.finish()
-    
+
     mlp_no_tax_metrics = compute_regression_metrics(
         mlp_no_tax_results["predictions"],
         mlp_no_tax_results["targets"]
     )
-    
+
     results["mlp_no_taxonomy"] = {
         "model_name": "MLP (no taxonomy)",
         "best_val_loss": mlp_no_tax_results["best_val_loss"],
@@ -722,7 +558,7 @@ def run_ablation_study(
         "sample_labels": mlp_no_tax_results["sample_labels"],
         "bin_labels": mlp_no_tax_results["bin_labels"],
         "metrics": mlp_no_tax_metrics,
-        "n_features": data_no_tax["train"]["X"].shape[1],
+        "n_features": splits["train"]["X"].shape[1],
     }
     
     log.info(f"MLP (no taxonomy): MAE={mlp_no_tax_metrics['mae_all']:.6f}, MSE={mlp_no_tax_metrics['mse_all']:.6f}")
@@ -756,7 +592,7 @@ def run_ablation_study(
     
     try:
         mlp_with_tax_trainer = MLPOnlyTrainer(
-            cfg, data_no_tax, bin_index, sample_index,
+            cfg, splits, bin_index, sample_index,
             model_name="MLP (with taxonomy)",
             taxonomy=taxonomy_spec,
         )
@@ -764,12 +600,12 @@ def run_ablation_study(
     finally:
         if use_wandb:
             wandb.finish()
-    
+
     mlp_with_tax_metrics = compute_regression_metrics(
         mlp_with_tax_results["predictions"],
         mlp_with_tax_results["targets"]
     )
-    
+
     results["mlp_with_taxonomy"] = {
         "model_name": "MLP (with taxonomy)",
         "best_val_loss": mlp_with_tax_results["best_val_loss"],
@@ -778,7 +614,7 @@ def run_ablation_study(
         "sample_labels": mlp_with_tax_results["sample_labels"],
         "bin_labels": mlp_with_tax_results["bin_labels"],
         "metrics": mlp_with_tax_metrics,
-        "n_features": data_no_tax["train"]["X"].shape[1],
+        "n_features": splits["train"]["X"].shape[1],
     }
     
     log.info(f"MLP (with taxonomy): MAE={mlp_with_tax_metrics['mae_all']:.6f}, MSE={mlp_with_tax_metrics['mse_all']:.6f}")
