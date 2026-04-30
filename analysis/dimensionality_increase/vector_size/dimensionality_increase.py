@@ -64,13 +64,13 @@ def run_comparison(
     
     Args:
         use_wandb: Whether to log to Weights & Biases
-        dimensions: List of embedding dimensions to test. If None, tests [2, 5, 10, 20, 50]
+        dimensions: List of embedding dimensions to test. If None, tests [1, 2, 5, 10, 20, 50]
     
     Returns:
         Dictionary with results for each dimension
     """
     if dimensions is None:
-        dimensions = [2, 5, 10, 20, 50]
+        dimensions = [1, 2, 5, 10, 20, 50]
     
     results = {}
     log.info(f"train module: {train_module.__file__}")
