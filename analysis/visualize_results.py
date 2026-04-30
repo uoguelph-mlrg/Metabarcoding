@@ -1443,10 +1443,20 @@ def plot_latent_diagnostics(
 
         ax = axes[row_idx, col]
         col += 1
+        has_both_z_and_d = bool(ablation_z) and bool(ablation_d)
         if val_map:
             epochs = sorted(val_map)
             ax.plot(epochs, [val_map[e] for e in epochs], color="black", lw=2.0, label="validation loss")
-        if ablation_joint:
+        if has_both_z_and_d:
+            # Show all three ablation lines when both z and d are available
+            ax.plot([e for e, _ in ablation_z], [v for _, v in ablation_z], color="steelblue", lw=1.6,
+                    marker="o", ms=3, label="z-only ablation loss")
+            ax.plot([e for e, _ in ablation_d], [v for _, v in ablation_d], color="#2ca02c", lw=1.6,
+                    marker="s", ms=3, label="d-only ablation loss")
+            if ablation_joint:
+                ax.plot([e for e, _ in ablation_joint], [v for _, v in ablation_joint], color="#d62728", lw=1.9,
+                        marker="^", ms=4, label="joint (z+d) ablation loss")
+        elif ablation_joint:
             ax.plot([e for e, _ in ablation_joint], [v for _, v in ablation_joint], color="#d62728", lw=1.9,
                     marker="o", ms=4, label="latent ablation loss")
         elif ablation_z:
@@ -1464,20 +1474,35 @@ def plot_latent_diagnostics(
             ax.legend(fontsize=8)
 
         ax = axes[row_idx, col]
-        delta_pairs: List[Tuple[int, float]] = []
+        # Choose the primary ablation series to use for delta bars.
+        # Priority: joint > z-only > d-only (whichever is available).
         if ablation_joint:
-            ab_map = {epoch: loss for epoch, loss in ablation_joint}
+            primary_ablation = ablation_joint
+            delta_label = "validation − joint ablation"
+        elif ablation_z:
+            primary_ablation = ablation_z
+            delta_label = "validation − z ablation"
+        elif ablation_d:
+            primary_ablation = ablation_d
+            delta_label = "validation − d ablation"
+        else:
+            primary_ablation = []
+            delta_label = "delta"
+
+        delta_pairs: List[Tuple[int, float]] = []
+        if primary_ablation and val_map:
+            ab_map = {epoch: loss for epoch, loss in primary_ablation}
             delta_pairs = _delta_series(val_map, ab_map)
-            delta_label = "validation - latent ablation"
+
         if delta_pairs:
             dx = [epoch for epoch, _ in delta_pairs]
             dy = [value for _, value in delta_pairs]
-            colors = ["#d62728" if value >= 0 else "#2ca02c" for value in dy]
+            bar_colors = ["#d62728" if value >= 0 else "#2ca02c" for value in dy]
             width = max(1, (dx[-1] - dx[0]) / max(len(dx), 1) * 0.8) if len(dx) > 1 else 5
-            ax.bar(dx, dy, width=width, color=colors, alpha=0.8)
+            ax.bar(dx, dy, width=width, color=bar_colors, alpha=0.8)
             ax.axhline(0.0, color="gray", ls="--", lw=1, alpha=0.8)
         ax.set_title("delta bars")
-        ax.set_ylabel(delta_label if delta_pairs else "delta")
+        ax.set_ylabel(delta_label)
         ax.grid(True, alpha=0.3)
         if row_idx == len(rows) - 1:
             ax.set_xlabel("epoch")
@@ -1527,16 +1552,45 @@ def plot_latent_comparison(
         anchor = latent_models[0]
         pairs = [(anchor, m) for m in latent_models if m != anchor]
 
+    def _to_bin_norms(raw: Any) -> Tuple[np.ndarray, bool]:
+        """Return (per_bin_values, is_vector_latent).
+
+        For 2-D latent matrices [n_bins, embed_dim] we return the L2 norm of
+        each BIN's latent vector, which avoids the cross-pattern artefact caused
+        by naively flattening multi-dimensional latent vectors (positive and
+        negative sign-flips across different runs produce x=y AND x=-y clusters).
+
+        For 1-D latent vectors [n_bins] we return the values as-is.
+        """
+        arr = np.asarray(raw, dtype=float)
+        if arr.ndim == 1:
+            return arr, False
+        if arr.ndim == 2:
+            return np.linalg.norm(arr, axis=-1), True
+        # Higher-dim: flatten first two dims then take norm of remaining
+        n_bins = arr.shape[0]
+        return np.linalg.norm(arr.reshape(n_bins, -1), axis=-1), True
+
     def _render_row(ax_row, m1: str, m2: str, row_label: bool) -> None:
-        lv1 = np.asarray(results[m1]["latent_vector"]).flatten()
-        lv2 = np.asarray(results[m2]["latent_vector"]).flatten()
+        lv1_raw = results[m1]["latent_vector"]
+        lv2_raw = results[m2]["latent_vector"]
+        lv1, is_vec1 = _to_bin_norms(lv1_raw)
+        lv2, is_vec2 = _to_bin_norms(lv2_raw)
+
         if lv1.shape != lv2.shape:
             log.warning(
-                f"Latent vectors have different shapes ({m1}: {lv1.shape}, {m2}: {lv2.shape}); skipping pair."
+                f"Latent vectors have different shapes after norm reduction "
+                f"({m1}: {lv1.shape}, {m2}: {lv2.shape}); skipping pair."
             )
             for ax in ax_row:
                 ax.axis("off")
             return
+
+        is_vector_latent = is_vec1 or is_vec2
+        scatter_xlabel = f"{get_label(m1, labels)} latent norm" if is_vector_latent else get_label(m1, labels)
+        scatter_ylabel = f"{get_label(m2, labels)} latent norm" if is_vector_latent else get_label(m2, labels)
+        dist_xlabel = "Latent norm" if is_vector_latent else "Latent value"
+        diff_xlabel_suffix = "latent norm" if is_vector_latent else "latent value"
 
         n_points = len(lv1)
         use_kde = n_points <= 100_000
@@ -1562,7 +1616,7 @@ def plot_latent_comparison(
         sns.histplot(lv2, bins=bins, kde=use_kde, stat="density", color=color2, alpha=0.35, edgecolor="none", ax=ax, label=label2)
         ax.axvline(lv1.mean(), color=color1, linestyle="--", linewidth=1.5, alpha=0.9)
         ax.axvline(lv2.mean(), color=color2, linestyle="--", linewidth=1.5, alpha=0.9)
-        ax.set_xlabel("Latent value")
+        ax.set_xlabel(dist_xlabel)
         ax.set_ylabel("Density")
         ax.set_title("Latent Value Distributions", fontsize=11, fontweight="bold")
         ax.legend(frameon=False, fontsize=8)
@@ -1574,45 +1628,52 @@ def plot_latent_comparison(
         sns.histplot(diff, bins=bins, kde=use_kde, stat="density", color="#4a90d9", alpha=0.8, edgecolor="none", ax=ax)
         ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.7)
         ax.axvline(diff.mean(), color="#e74c3c", linestyle="-", linewidth=1.5, alpha=0.9)
-        ax.set_xlabel(f"Difference ({label2} − {label1})")
+        ax.set_xlabel(f"Difference in {diff_xlabel_suffix} ({label2} − {label1})")
         ax.set_ylabel("Density")
         ax.set_title("Latent Difference Distribution", fontsize=11, fontweight="bold")
         sns.despine(ax=ax)
 
         # Panel 3: per-bin scatter coloured by density.
         ax = ax_row[2]
-        if use_kde and len(lv1_kde) > 1:
+        if len(lv1_kde) > 1:
             try:
                 xy = np.vstack([lv1_kde, lv2_kde]) + np.random.normal(0, 1e-8, (2, len(lv1_kde)))
-                density = gaussian_kde(xy)(xy)
+                density_kde = gaussian_kde(xy)(xy)
                 if n_points > 10_000:
                     from scipy.spatial import cKDTree
                     tree = cKDTree(xy.T)
                     xy_all = np.vstack([lv1, lv2])
                     distances, indices = tree.query(xy_all.T, k=1)
-                    density_all = density[indices]
-                    density_all[distances > 0.1] = np.median(density)
+                    density_all = density_kde[indices]
+                    density_all[distances > 0.1] = np.median(density_kde)
                     density = density_all
+                else:
+                    density = density_kde
                 order = np.argsort(density)
             except Exception as e:
-                log.debug(f"KDE computation failed: {e}; using no density coloring")
-                density = np.ones(len(lv1))
-                order = np.arange(len(lv1))
+                log.debug(f"KDE computation failed: {e}; falling back to distance-based density")
+                # Fallback: use distance to centroid as a proxy for density
+                cx, cy = lv1.mean(), lv2.mean()
+                density = 1.0 / (1.0 + np.sqrt((lv1 - cx) ** 2 + (lv2 - cy) ** 2))
+                order = np.argsort(density)
         else:
             density = np.ones(len(lv1))
             order = np.arange(len(lv1))
 
-        sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis", s=10, alpha=0.65, edgecolors="none")
+        norm = Normalize(vmin=density.min(), vmax=density.max())
+        sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis", norm=norm,
+                        s=10, alpha=0.65, edgecolors="none")
         lo = min(lv1.min(), lv2.min())
         hi = max(lv1.max(), lv2.max())
         ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.5, alpha=0.7)
         corr = float(np.corrcoef(lv1, lv2)[0, 1]) if len(lv1) > 1 else 0.0
-        ax.set_xlabel(label1)
-        ax.set_ylabel(label2)
-        ax.set_title(f"Per-BIN Latent Comparison (r={corr:.3f})", fontsize=11, fontweight="bold")
+        ax.set_xlabel(scatter_xlabel)
+        ax.set_ylabel(scatter_ylabel)
+        title_suffix = " (norm)" if is_vector_latent else ""
+        ax.set_title(f"Per-BIN Latent{title_suffix} Comparison (r={corr:.3f})", fontsize=11, fontweight="bold")
         sns.despine(ax=ax)
         cbar = ax_row[2].get_figure().colorbar(sc, ax=ax, shrink=0.85)
-        cbar.set_label("Point Density" if use_kde else "Uniform")
+        cbar.set_label("Point Density")
 
     n_rows = len(pairs)
     set_style()
