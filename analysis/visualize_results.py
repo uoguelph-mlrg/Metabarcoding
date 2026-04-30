@@ -66,7 +66,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mc
 import seaborn as sns
 from scipy.stats import gaussian_kde
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, PowerNorm
 from matplotlib.patches import Patch, Rectangle
 from matplotlib.lines import Line2D
 
@@ -1216,51 +1216,23 @@ def plot_training_progress_comparison(
 
     set_style()
     n = len(models)
-    fig, axes = plt.subplots(2, n, figsize=(8 * n, 10), sharey="row")
-    if n == 1:
-        axes = np.array([
-            [axes[0, 0] if axes.ndim == 2 else axes[0]], [axes[1, 0] if axes.ndim == 2 else axes[1]]
-        ])
+    fig, axes = plt.subplots(1, n, figsize=(8 * n, 5), sharey=True)
+    axes = np.array(axes).flatten() if n > 1 else np.array([axes])
 
     for idx, model in enumerate(models):
         lbl = get_label(model, labels)
         color = get_color(model, colors)
         train_vals, val_vals = _extract(results[model])
-        cycle_train = results[model].get("cycle_train_losses", [])
-        cycle_val = results[model].get("cycle_val_losses", [])
 
-        ax1 = axes[0, idx]
-        ax1.plot(train_vals, color=color, lw=1.6, label="Train", alpha=0.85)
-        ax1.plot(val_vals, color=color, lw=1.6, ls="--", label="Val", alpha=0.85)
-        # Vertical lines at EM cycle boundaries
-        if results[model].get("timeline_train_losses"):
-            for i, (phase, *_) in enumerate(results[model]["timeline_train_losses"]):
-                if phase == "latent" and i > 0:
-                    ax1.axvline(x=i, color="gray", ls=":", alpha=0.5, lw=1)
-        ax1.set_xlabel("Training Step")
-        ax1.set_ylabel("Loss")
-        ax1.set_title(f"{lbl}: Loss Evolution")
-        ax1.grid(True, alpha=0.3)
-        ax1.legend(frameon=True, fontsize=10, loc="upper right")
-
-        ax2 = axes[1, idx]
-        if cycle_train:
-            cyc = [c + 1 for c, _ in cycle_train]
-            ax2.plot(
-                cyc, [l for _, l in cycle_train], color=color, ls="-", 
-                marker="o", lw=1.8, ms=6, label="Train", alpha=0.9
-            )
-        if cycle_val:
-            cyc = [c + 1 for c, _ in cycle_val]
-            ax2.plot(
-                cyc, [l for _, l in cycle_val], color=color, ls="--",
-                marker="o", lw=1.8, ms=6, label="Val", alpha=0.9
-            )
-        ax2.set_xlabel("EM Cycle")
-        ax2.set_ylabel("Loss")
-        ax2.set_title(f"{lbl}: End-of-Cycle Losses")
-        ax2.grid(True, alpha=0.3)
-        ax2.legend(frameon=True, fontsize=10, loc="upper right")
+        ax = axes[idx]
+        ax.plot(train_vals, color=color, lw=1.6, label="Train", alpha=0.85)
+        ax.plot(val_vals, color=color, lw=1.6, ls="--", label="Val", alpha=0.85)
+        ax.set_xlabel("Training Step")
+        ax.set_ylabel("Loss")
+        ax.set_title(f"{lbl}: Loss Evolution")
+        ax.grid(True, alpha=0.3)
+        ax.legend(frameon=True, fontsize=10, loc="upper right")
+        sns.despine(ax=ax)
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "training_progress.png"), dpi=150, bbox_inches="tight")
@@ -1348,7 +1320,7 @@ def plot_latent_diagnostics(
         return xs, means, stds
 
     def _delta_series(val_map: Dict[int, float], ab_map: Dict[int, float]) -> List[Tuple[int, float]]:
-        return [(epoch, val_map[epoch] - ab_map[epoch]) for epoch in sorted(val_map) if epoch in ab_map]
+        return [(epoch, ab_map[epoch] - val_map[epoch]) for epoch in sorted(val_map) if epoch in ab_map]
 
     rows: List[Dict[str, Any]] = []
     any_ratio = False
@@ -1493,11 +1465,11 @@ def plot_latent_diagnostics(
         if primary_ablation and val_map:
             ab_map = {epoch: loss for epoch, loss in primary_ablation}
             delta_pairs = _delta_series(val_map, ab_map)
-
+            delta_label = "latent ablation − validation (↑ = latent helps)"
         if delta_pairs:
             dx = [epoch for epoch, _ in delta_pairs]
             dy = [value for _, value in delta_pairs]
-            bar_colors = ["#d62728" if value >= 0 else "#2ca02c" for value in dy]
+            colors = ["#2ca02c" if value >= 0 else "#d62728" for value in dy]
             width = max(1, (dx[-1] - dx[0]) / max(len(dx), 1) * 0.8) if len(dx) > 1 else 5
             ax.bar(dx, dy, width=width, color=bar_colors, alpha=0.8)
             ax.axhline(0.0, color="gray", ls="--", lw=1, alpha=0.8)
@@ -1508,8 +1480,8 @@ def plot_latent_diagnostics(
             ax.set_xlabel("epoch")
         if row_idx == 0 and delta_pairs:
             ax.legend(handles=[
-                Patch(facecolor="#2ca02c", edgecolor="white", label="latent helps (delta < 0)"),
-                Patch(facecolor="#d62728", edgecolor="white", label="latent hurts (delta >= 0)"),
+                Patch(facecolor="#2ca02c", edgecolor="white", label="latent helps (delta > 0)"),
+                Patch(facecolor="#d62728", edgecolor="white", label="latent hurts (delta ≤ 0)"),
             ], fontsize=8)
 
     plt.tight_layout(rect=(0, 0, 1, 0.985))
@@ -1539,7 +1511,16 @@ def plot_latent_comparison(
     - Reduces histogram bins for faster rendering.
     - Skips KDE for very large datasets (>100k points).
     """
-    latent_models = [m for m in _sorted_models(results, labels) if isinstance(results[m], dict) and results[m].get("latent_vector") is not None]
+    def _has_valid_latent(m: str) -> bool:
+        if not isinstance(results.get(m), dict):
+            return False
+        lv = results[m].get("latent_vector")
+        if lv is None:
+            return False
+        arr = np.asarray(lv)
+        return arr.ndim >= 1 and arr.size > 0
+
+    latent_models = [m for m in _sorted_models(results, labels) if _has_valid_latent(m)]
     if len(latent_models) < 2:
         log.info("  (Skipping latent comparison — fewer than two models provide latent vectors.)")
         return
@@ -1552,32 +1533,12 @@ def plot_latent_comparison(
         anchor = latent_models[0]
         pairs = [(anchor, m) for m in latent_models if m != anchor]
 
-    def _to_bin_norms(raw: Any) -> Tuple[np.ndarray, bool]:
-        """Return (per_bin_values, is_vector_latent).
+    scatter_handles: List[Any] = []
 
-        For 2-D latent matrices [n_bins, embed_dim] we return the L2 norm of
-        each BIN's latent vector, which avoids the cross-pattern artefact caused
-        by naively flattening multi-dimensional latent vectors (positive and
-        negative sign-flips across different runs produce x=y AND x=-y clusters).
-
-        For 1-D latent vectors [n_bins] we return the values as-is.
-        """
-        arr = np.asarray(raw, dtype=float)
-        if arr.ndim == 1:
-            return arr, False
-        if arr.ndim == 2:
-            return np.linalg.norm(arr, axis=-1), True
-        # Higher-dim: flatten first two dims then take norm of remaining
-        n_bins = arr.shape[0]
-        return np.linalg.norm(arr.reshape(n_bins, -1), axis=-1), True
-
-    def _render_row(ax_row, m1: str, m2: str, row_label: bool) -> None:
-        lv1_raw = results[m1]["latent_vector"]
-        lv2_raw = results[m2]["latent_vector"]
-        lv1, is_vec1 = _to_bin_norms(lv1_raw)
-        lv2, is_vec2 = _to_bin_norms(lv2_raw)
-
-        if lv1.shape != lv2.shape:
+    def _render_row(ax_row, m1: str, m2: str) -> None:
+        lv1 = np.asarray(results[m1]["latent_vector"]).flatten()
+        lv2 = np.asarray(results[m2]["latent_vector"]).flatten()
+        if lv1.shape[0] != lv2.shape[0]:
             log.warning(
                 f"Latent vectors have different shapes after norm reduction "
                 f"({m1}: {lv1.shape}, {m2}: {lv2.shape}); skipping pair."
@@ -1618,7 +1579,7 @@ def plot_latent_comparison(
         ax.axvline(lv2.mean(), color=color2, linestyle="--", linewidth=1.5, alpha=0.9)
         ax.set_xlabel(dist_xlabel)
         ax.set_ylabel("Density")
-        ax.set_title("Latent Value Distributions", fontsize=11, fontweight="bold")
+        ax.set_title(f"{label1} vs {label2}: distributions", fontsize=11, fontweight="bold")
         ax.legend(frameon=False, fontsize=8)
         sns.despine(ax=ax)
 
@@ -1635,34 +1596,33 @@ def plot_latent_comparison(
 
         # Panel 3: per-bin scatter coloured by density.
         ax = ax_row[2]
+        # Always compute density on the full dataset (subsample only for KDE fitting)
         if len(lv1_kde) > 1:
             try:
-                xy = np.vstack([lv1_kde, lv2_kde]) + np.random.normal(0, 1e-8, (2, len(lv1_kde)))
-                density_kde = gaussian_kde(xy)(xy)
-                if n_points > 10_000:
-                    from scipy.spatial import cKDTree
-                    tree = cKDTree(xy.T)
-                    xy_all = np.vstack([lv1, lv2])
-                    distances, indices = tree.query(xy_all.T, k=1)
-                    density_all = density_kde[indices]
-                    density_all[distances > 0.1] = np.median(density_kde)
-                    density = density_all
-                else:
-                    density = density_kde
+                xy_kde = np.vstack([lv1_kde, lv2_kde]) + np.random.normal(0, 1e-8, (2, len(lv1_kde)))
+                kde_fn = gaussian_kde(xy_kde)
+                # Evaluate density on ALL points for accurate coloring
+                xy_all = np.vstack([lv1, lv2])
+                density = kde_fn(xy_all)
                 order = np.argsort(density)
             except Exception as e:
-                log.debug(f"KDE computation failed: {e}; falling back to distance-based density")
-                # Fallback: use distance to centroid as a proxy for density
-                cx, cy = lv1.mean(), lv2.mean()
-                density = 1.0 / (1.0 + np.sqrt((lv1 - cx) ** 2 + (lv2 - cy) ** 2))
-                order = np.argsort(density)
+                log.debug(f"KDE computation failed: {e}; using uniform density")
+                density = np.ones(len(lv1))
+                order = np.arange(len(lv1))
         else:
             density = np.ones(len(lv1))
             order = np.arange(len(lv1))
 
-        norm = Normalize(vmin=density.min(), vmax=density.max())
-        sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis", norm=norm,
-                        s=10, alpha=0.65, edgecolors="none")
+        # Use PowerNorm(gamma<1) to stretch low-density region and show full colormap
+        d_min, d_max = density.min(), density.max()
+        if d_max > d_min:
+            norm = PowerNorm(gamma=0.4, vmin=d_min, vmax=d_max)
+        else:
+            norm = Normalize(vmin=d_min, vmax=d_max + 1e-10)
+
+        sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis",
+                        norm=norm, s=10, alpha=0.75, edgecolors="none")
+        scatter_handles.append(sc)
         lo = min(lv1.min(), lv2.min())
         hi = max(lv1.max(), lv2.max())
         ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.5, alpha=0.7)
@@ -1672,8 +1632,6 @@ def plot_latent_comparison(
         title_suffix = " (norm)" if is_vector_latent else ""
         ax.set_title(f"Per-BIN Latent{title_suffix} Comparison (r={corr:.3f})", fontsize=11, fontweight="bold")
         sns.despine(ax=ax)
-        cbar = ax_row[2].get_figure().colorbar(sc, ax=ax, shrink=0.85)
-        cbar.set_label("Point Density")
 
     n_rows = len(pairs)
     set_style()
@@ -1681,9 +1639,13 @@ def plot_latent_comparison(
     fig.suptitle("Latent Vector Comparison", fontsize=13, y=0.995)
 
     for row_idx, (m1, m2) in enumerate(pairs):
-        _render_row(axes[row_idx], m1, m2, row_label=(row_idx == 0))
+        _render_row(axes[row_idx], m1, m2)
 
-    plt.tight_layout(rect=(0, 0, 1, 0.985))
+    plt.tight_layout(rect=(0, 0, 0.96, 0.985))
+    # Single shared colorbar on the right for all scatter panels
+    if scatter_handles:
+        cbar_ax = fig.add_axes((0.965, 0.15, 0.012, 0.70))
+        fig.colorbar(scatter_handles[0], cax=cbar_ax).set_label("Point Density", fontsize=10)
     plt.savefig(os.path.join(output_dir, "latent_comparison.png"), dpi=150, bbox_inches="tight")
     plt.close()
     log.info("  ✓ Saved: latent_comparison.png")
@@ -1869,6 +1831,21 @@ def plot_summary_table(
 # Master orchestration
 # ============================================================================
 
+def _top_n_by_kl(results: Dict[str, Any], n: int, labels: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Return a subset of *results* containing the *n* models with lowest KL Divergence."""
+    models = _sorted_models(results, labels)
+    kl_scores = {}
+    for m in models:
+        metrics = compute_extended_metrics(
+            results[m]["targets"], results[m]["predictions"],
+            sample_labels=results[m].get("sample_labels"),
+            bin_labels=results[m].get("bin_labels"),
+        )
+        kl_scores[m] = metrics["KL Divergence"]
+    top = sorted(kl_scores, key=lambda m: kl_scores[m])[:n]
+    return {m: results[m] for m in top}
+
+
 def create_all_visualizations(
     results: Dict[str, Any],
     output_dir: str,
@@ -1877,40 +1854,54 @@ def create_all_visualizations(
     title: str = "Model Comparison",
     latent_model_key: str = "latent_as_input",
     csv_filename: str = "comparison_results.csv",
+    subset_top_n: Optional[int] = None,
 ) -> None:
-    """Generate all standard comparison plots and save them to *output_dir*."""
+    """Generate all standard comparison plots and save them to *output_dir*.
+
+    When *subset_top_n* is set, the 9 detail plots (scatter, range-error,
+    residual, zero-vs-nonzero, top-model radar) use only the top-N models
+    ranked by KL Divergence; metrics_comparison and summary_table always
+    show all models.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     log.info("\n" + "=" * 60)
     log.info("CREATING VISUALIZATIONS")
     log.info("=" * 60)
 
+    # Subset used for detail plots when requested
+    if subset_top_n is not None and len(results) > subset_top_n:
+        results_detail = _top_n_by_kl(results, subset_top_n, labels)
+        log.info(f"  (Detail plots restricted to top-{subset_top_n} by KL Divergence: {list(results_detail.keys())})")
+    else:
+        results_detail = results
+
     log.info("\n 1. Metric comparison bar plots...")
     plot_metrics_comparison(results, output_dir, colors, labels, title=title)
 
     log.info(" 2. Scatter plots (full range)...")
-    plot_scatter_actual_vs_predicted(results, output_dir, labels)
+    plot_scatter_actual_vs_predicted(results_detail, output_dir, labels)
 
     log.info(" 3. Scatter plots (ground truth <1%)...")
-    plot_scatter_zoomed(results, output_dir, labels)
+    plot_scatter_zoomed(results_detail, output_dir, labels)
 
     log.info(" 4. Log-log scatter plots...")
-    plot_loglog_scatter_actual_vs_predicted(results, output_dir, labels)
+    plot_loglog_scatter_actual_vs_predicted(results_detail, output_dir, labels)
 
     log.info(" 5. MAE by abundance range...")
-    plot_mae_per_range(results, output_dir, colors, labels)
+    plot_mae_per_range(results_detail, output_dir, colors, labels)
 
     log.info(" 6. MAE by abundance range (zoomed, <1%)...")
-    plot_mae_per_range_zoomed(results, output_dir, colors, labels)
+    plot_mae_per_range_zoomed(results_detail, output_dir, colors, labels)
 
     log.info(" 7. Relative Absolute Error by range...")
-    plot_RAE_per_range(results, output_dir, colors, labels)
+    plot_RAE_per_range(results_detail, output_dir, colors, labels)
 
     log.info(" 8. Residual distribution...")
-    plot_residual_distribution(results, output_dir, colors, labels)
+    plot_residual_distribution(results_detail, output_dir, colors, labels)
 
     log.info(" 9. Zero vs non-zero MAE comparison...")
-    plot_zero_vs_nonzero_comparison(results, output_dir, colors, labels)
+    plot_zero_vs_nonzero_comparison(results_detail, output_dir, colors, labels)
 
     log.info("10. Training progress (if available)...")
     plot_training_progress_comparison(results, output_dir, colors, labels)
@@ -1922,7 +1913,7 @@ def create_all_visualizations(
     plot_latent_comparison(results, output_dir, colors, labels)
 
     log.info("13. Top-model radar overview (>4 models only)...")
-    plot_top_models_overview(results, output_dir, colors, labels)
+    plot_top_models_overview(results_detail, output_dir, colors, labels)
 
     log.info("14. Summary table...")
     plot_summary_table(results, output_dir, colors, labels, title=title, csv_filename=csv_filename)
