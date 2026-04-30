@@ -1,7 +1,7 @@
 .DS_Store
 *.pyc
 *.pt
-*.pkl
+*preprocessing_state.pkl
 *.log
 *.npz
 **/wandb/*
@@ -9,7 +9,6 @@
 third_party/
 Metabarcoding/analysis/data_curation/results/
 **/__pycache__
-**slogs/
 **.slurm_jobs/
 data/embeddings*.npy
 autoresearch/results.tsv
