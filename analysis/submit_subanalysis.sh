@@ -286,7 +286,7 @@ resolve_target() {
       FIGURES_DIR='figures/loss_comparison'
       DEFAULT_LABELS_JSON='{"baseline":"Cross-Entropy","logistic":"Logistic (BCE)"}'
       DEFAULT_COLORS_JSON='{"cross_entropy":"#2ecc71","logistic":"#9b59b6"}'
-      DEFAULT_TIME="1:00:00"
+      DEFAULT_TIME="2:00:00"
       ;;
     optimal_K)
       TARGET_DIR='optimal_K'
