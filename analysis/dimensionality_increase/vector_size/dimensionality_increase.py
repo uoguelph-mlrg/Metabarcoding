@@ -84,7 +84,6 @@ def run_comparison(
         config_module.set_seed()  # Reset seed for fair comparison
         cfg = config_module.Config(
             embed_dim=embed_dim,
-            gating_fn="softplus",  # Always use softplus
         )
         log.info(f"Config: embed_dim={cfg.embed_dim}, gating_fn={cfg.gating_fn}")
 
@@ -101,7 +100,7 @@ def run_comparison(
         ):
             trainer = train_module.Trainer(cfg)
             log.info(f"Model type: {type(trainer.model).__name__}")
-            log.info(f"Gating function: {trainer.model.gating_fn}")
+            log.info(f"Gating function: {cfg.gating_fn}")
             
             results[variant] = trainer.run(use_wandb=use_wandb)
         
