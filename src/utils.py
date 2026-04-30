@@ -476,6 +476,85 @@ def load(
     if config.use_taxonomy and missing_features:
         log.warning(f"Missing taxonomy features in dataset: {', '.join(missing_features)}.")
 
+    ################################################################################################
+    # Location embedding (optional)
+    ################################################################################################
+    location_embedding_cols: List[str] = []
+    if replay_state is None and getattr(config, "location_embedder", None) is not None:
+        from embed_location import build_location_embedder, add_location_embeddings, EmbedderSpec
+        _emb_model = config.location_embedder
+        _cache_path: Optional[str] = None
+        if getattr(config, "preprocessed_dir", None) is not None:
+            _cache_path = os.path.join(
+                os.path.abspath(config.preprocessed_dir),
+                f"loc_emb_{_emb_model}.npy",
+            )
+            _cache_coords_path = _cache_path.replace(".npy", "_coords.npy")
+
+        if _cache_path is not None and os.path.exists(_cache_path) and os.path.exists(_cache_coords_path):
+            cached_embs = np.load(_cache_path)
+            cached_coords = np.load(_cache_coords_path)
+            log.info("Loaded location embeddings from cache: %s", _cache_path)
+            # Re-join cached embeddings to df rows by matching lat/lon
+            n_emb_dims = cached_embs.shape[1]
+            location_embedding_cols = [f"loc_emb_{i:03d}" for i in range(n_emb_dims)]
+            coord_to_idx = {tuple(row): i for i, row in enumerate(cached_coords)}
+            lat = df["latitude"].to_numpy()
+            lon = df["longitude"].to_numpy()
+            row_embs = np.array([
+                cached_embs[coord_to_idx.get((lat[i], lon[i]), -1)]
+                if (lat[i], lon[i]) in coord_to_idx else np.zeros(n_emb_dims, dtype=np.float32)
+                for i in range(len(df))
+            ], dtype=np.float32)
+            for j, col in enumerate(location_embedding_cols):
+                df[col] = row_embs[:, j]
+        else:
+            spec = EmbedderSpec(
+                model_name=_emb_model,
+                device=config.device,
+                satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
+            )
+            embedder = build_location_embedder(spec)
+            df, location_embedding_cols = add_location_embeddings(
+                df, embedder, lat_col="latitude", lon_col="longitude"
+            )
+            log.info("Computed location embeddings via %s (%d dims)", _emb_model, len(location_embedding_cols))
+            if _cache_path is not None:
+                unique_coords = df[["latitude", "longitude"]].drop_duplicates().to_numpy(dtype=np.float64)
+                coord_to_idx = {tuple(row): i for i, row in enumerate(unique_coords)}
+                n_emb_dims = len(location_embedding_cols)
+                uniq_embs = np.zeros((len(unique_coords), n_emb_dims), dtype=np.float32)
+                for j, col in enumerate(location_embedding_cols):
+                    for k, coord in enumerate(unique_coords):
+                        rows_with_coord = (df["latitude"] == coord[0]) & (df["longitude"] == coord[1])
+                        uniq_embs[k, j] = df.loc[rows_with_coord, col].iloc[0]
+                os.makedirs(os.path.dirname(_cache_path), exist_ok=True)
+                np.save(_cache_path, uniq_embs)
+                np.save(_cache_coords_path, unique_coords)
+                log.info("Saved location embedding cache to %s", _cache_path)
+
+    # Build feature list: when using location embedder, replace raw GPS with embedding cols
+    LOCATION_RAW_FEATURES = ["latitude", "longitude"]
+    base_feature_list = list(OBSERVATION_FEATURES)
+    if location_embedding_cols:
+        base_feature_list = [f for f in OBSERVATION_FEATURES if f not in LOCATION_RAW_FEATURES]
+        base_feature_list.extend(location_embedding_cols)
+        if getattr(config, "keep_raw_gps_features", False):
+            base_feature_list.extend(LOCATION_RAW_FEATURES)
+    elif replay_state is not None and getattr(config, "location_embedder", None) is not None:
+        # Replay with location embedder: re-run embedding to recreate columns, then let
+        # feature_cols_present from state take over (which already includes loc_emb_* cols).
+        from embed_location import build_location_embedder, add_location_embeddings, EmbedderSpec
+        spec = EmbedderSpec(
+            model_name=config.location_embedder,
+            device=config.device,
+            satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
+        )
+        embedder = build_location_embedder(spec)
+        df, location_embedding_cols = add_location_embeddings(
+            df, embedder, lat_col="latitude", lon_col="longitude"
+        )
+
     # Build df_long with required columns + features
     base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
     if replay_state is not None:
@@ -489,7 +568,7 @@ def load(
                 + ", ".join(replay_missing)
             )
     else:
-        feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
+        feature_cols_present = [c for c in base_feature_list if c in df.columns]
     df_long = df[base_cols + feature_cols_present].copy()
 
     # Ensure feature columns are numeric; non-numeric values become NaN and are imputed later.
