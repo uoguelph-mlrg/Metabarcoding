@@ -1,0 +1,698 @@
+[Wed Apr 29 09:02:45 PM EDT 2026] Target: baselines_comparison
+[Wed Apr 29 09:02:45 PM EDT 2026] Running baselines_comparison (analysis/baselines); this is separate from --baseline-train (src/train.py --model baseline)
+[Wed Apr 29 09:02:45 PM EDT 2026] Train command: python run_baselines.py --data_path /home/eboehly/scratch/Metabarcoding/data/ecuador_training_data.csv --output_dir results
+
+============================================================
+LOADING AND PREPROCESSING DATA
+============================================================
+Loading data from: /home/eboehly/scratch/Metabarcoding/data/ecuador_training_data.csv
+Found 100 samples, 15539 bins, 79012 observations
+Observation features: 15
+Taxonomy features: 7
+Total features: 22
+
+Split sizes:
+  Train samples: 80
+  Val samples: 10
+  Test samples: 10
+
+Observation counts:
+  Train: 62187
+  Val: 8858
+  Test: 7967
+
+Zero inflation:
+  Train: 36276/62187 (58.3%)
+  Val: 4790/8858 (54.1%)
+  Test: 4485/7967 (56.3%)
+
+Running 15 baseline models:
+  - mean
+  - zero
+  - linear_regression
+  - ridge
+  - ridge_high_reg
+  - elasticnet
+  - decision_tree
+  - random_forest
+  - gradient_boosting
+  - knn
+  - two_stage
+  - zero_inflated_ridge
+  - tweedie
+  - log_transform
+  - quantile_rf
+
+============================================================
+Training: Mean Baseline
+============================================================
+  Validation - RMSE: 0.0043, MAE: 0.0015, R²: -0.0013
+  Test       - RMSE: 0.0053, MAE: 0.0016, R²: -0.0000
+  Zero Recall (test): 0.00%
+
+============================================================
+Training: Zero Baseline
+============================================================
+  Validation - RMSE: 0.0044, MAE: 0.0011, R²: -0.0692
+  Test       - RMSE: 0.0054, MAE: 0.0013, R²: -0.0571
+  Zero Recall (test): 100.00%
+
+============================================================
+Training: Linear Regression
+============================================================
+  Validation - RMSE: 0.0039, MAE: 0.0012, R²: 0.1574
+  Test       - RMSE: 0.0047, MAE: 0.0013, R²: 0.1992
+  Zero Recall (test): 18.89%
+
+============================================================
+Training: Ridge Regression (alpha=1.0)
+============================================================
+  Validation - RMSE: 0.0039, MAE: 0.0012, R²: 0.1574
+  Test       - RMSE: 0.0047, MAE: 0.0013, R²: 0.1991
+  Zero Recall (test): 18.89%
+
+============================================================
+Training: Ridge Regression (alpha=10.0)
+============================================================
+  Validation - RMSE: 0.0039, MAE: 0.0012, R²: 0.1579
+  Test       - RMSE: 0.0047, MAE: 0.0013, R²: 0.1985
+  Zero Recall (test): 18.89%
+
+============================================================
+Training: ElasticNet (alpha=0.1, l1=0.5)
+============================================================
+  Validation - RMSE: 0.0043, MAE: 0.0015, R²: -0.0013
+  Test       - RMSE: 0.0053, MAE: 0.0016, R²: -0.0000
+  Zero Recall (test): 0.00%
+
+============================================================
+Training: Decision Tree (depth=10)
+============================================================
+  Validation - RMSE: 0.0038, MAE: 0.0010, R²: 0.2154
+  Test       - RMSE: 0.0039, MAE: 0.0010, R²: 0.4489
+  Zero Recall (test): 1.07%
+
+============================================================
+Training: Random Forest (n=100, depth=15)
+============================================================
+  Validation - RMSE: 0.0031, MAE: 0.0009, R²: 0.4715
+  Test       - RMSE: 0.0037, MAE: 0.0010, R²: 0.5044
+  Zero Recall (test): 0.00%
+
+============================================================
+Training: Gradient Boosting (n=100, lr=0.1)
+============================================================
+  Validation - RMSE: 0.0032, MAE: 0.0009, R²: 0.4572
+  Test       - RMSE: 0.0034, MAE: 0.0010, R²: 0.5866
+  Zero Recall (test): 24.30%
+
+============================================================
+Training: KNN (k=78)
+============================================================
+  Validation - RMSE: 0.0034, MAE: 0.0010, R²: 0.3856
+  Test       - RMSE: 0.0048, MAE: 0.0012, R²: 0.1799
+  Zero Recall (test): 13.27%
+
+============================================================
+Training: Two-Stage (Hurdle) Model
+============================================================
+  Validation - RMSE: 0.0030, MAE: 0.0009, R²: 0.5020
+  Test       - RMSE: 0.0037, MAE: 0.0010, R²: 0.5065
+  Zero Recall (test): 2.88%
+
+============================================================
+Training: Zero-Inflated Ridge (alpha=1.0)
+============================================================
+  Validation - RMSE: 0.0040, MAE: 0.0010, R²: 0.1214
+  Test       - RMSE: 0.0107, MAE: 0.0013, R²: -3.1110
+  Zero Recall (test): 0.04%
+
+============================================================
+Training: Tweedie (power=1.5)
+============================================================
+  Validation - RMSE: 0.0043, MAE: 0.0015, R²: -0.0013
+  Test       - RMSE: 0.0053, MAE: 0.0016, R²: -0.0000
+  Zero Recall (test): 0.00%
+
+============================================================
+Training: Log-Transform Model
+============================================================
+  Validation - RMSE: 0.0037, MAE: 0.0009, R²: 0.2662
+  Test       - RMSE: 0.0042, MAE: 0.0010, R²: 0.3709
+  Zero Recall (test): 74.45%
+
+============================================================
+Training: Quantile RF (q=0.5)
+============================================================
+  Validation - RMSE: 0.0032, MAE: 0.0008, R²: 0.4319
+  Test       - RMSE: 0.0039, MAE: 0.0009, R²: 0.4391
+  Zero Recall (test): 15.81%
+
+================================================================================
+BASELINE MODEL RESULTS
+================================================================================
+                      rmse    mae      r2  mse_zeros  mse_nonzeros  zero_recall
+Model                                                                          
+gradient_boosting   0.0034 0.0010  0.5866     0.0000        0.0000       0.2430
+two_stage           0.0037 0.0010  0.5065     0.0000        0.0000       0.0288
+random_forest       0.0037 0.0010  0.5044     0.0000        0.0000       0.0000
+decision_tree       0.0039 0.0010  0.4489     0.0000        0.0000       0.0107
+quantile_rf         0.0039 0.0009  0.4391     0.0000        0.0000       0.1581
+log_transform       0.0042 0.0010  0.3709     0.0000        0.0000       0.7445
+linear_regression   0.0047 0.0013  0.1992     0.0000        0.0000       0.1889
+ridge               0.0047 0.0013  0.1991     0.0000        0.0000       0.1889
+ridge_high_reg      0.0047 0.0013  0.1985     0.0000        0.0000       0.1889
+knn                 0.0048 0.0012  0.1799     0.0000        0.0001       0.1327
+mean                0.0053 0.0016 -0.0000     0.0000        0.0001       0.0000
+elasticnet          0.0053 0.0016 -0.0000     0.0000        0.0001       0.0000
+tweedie             0.0053 0.0016 -0.0000     0.0000        0.0001       0.0000
+zero                0.0054 0.0013 -0.0571     0.0000        0.0001       1.0000
+zero_inflated_ridge 0.0107 0.0013 -3.1110     0.0000        0.0003       0.0004
+================================================================================
+
+Results saved to: results/20260429_210339/baseline_results_test_20260429_210339.csv
+Unified visualization payload saved to: results/20260429_210339/baseline_model_comparison_results_20260429_210339.pkl
+Results saved to: results/20260429_210339/baseline_results_val_20260429_210339.csv
+Summary report saved to: results/20260429_210339/baseline_summary_20260429_210339.txt
+
+🏆 Best model by RMSE: gradient_boosting (RMSE=0.0034)
+[Wed Apr 29 09:02:45 PM EDT 2026] Visualization inputs: /home/eboehly/scratch/Metabarcoding/analysis/baselines/results/20260429_210339/baseline_model_comparison_results_20260429_210339.pkl
+2026-04-29 21:03:43,859 INFO Loading results from --results_paths (1 file(s)) ...
+2026-04-29 21:03:43,865 INFO Found 15 model(s): ['mean', 'zero', 'linear_regression', 'ridge', 'ridge_high_reg', 'elasticnet', 'decision_tree', 'random_forest', 'gradient_boosting', 'knn', 'two_stage', 'zero_inflated_ridge', 'tweedie', 'log_transform', 'quantile_rf']
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_function_base_impl.py:3023: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[:, None]
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_function_base_impl.py:3024: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[None, :]
+2026-04-29 21:03:44,019 INFO 
+======================================================================================================================================================================================================================================================================================================================================================================================
+2026-04-29 21:03:44,020 INFO MODEL COMPARISON
+2026-04-29 21:03:44,020 INFO ======================================================================================================================================================================================================================================================================================================================================================================================
+2026-04-29 21:03:44,020 INFO Metric                Mean                  Zero                  Linear Regression     Ridge                 ElasticNet            Decision Tree         Random Forest         Gradient Boosting     KNN                   Two-Stage             Zero-Inflated Ridge   Tweedie               Log-Transform         Quantile RF           Ridge High Reg        Best                  
+2026-04-29 21:03:44,020 INFO --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+2026-04-29 21:03:44,020 INFO RMSE (micro)          0.005253              0.005401              0.004701              0.004701              0.005253              0.003900              0.003698              0.003378              0.004757              0.003690              0.010651              0.005253              0.004167              0.003934              0.004703              Gradient Boosting     
+2026-04-29 21:03:44,020 INFO RMSE (macro)          0.005170              0.005361              0.004714              0.004714              0.005170              0.004017              0.003718              0.003468              0.004621              0.003763              0.007894              0.005170              0.004248              0.003910              0.004717              Gradient Boosting     
+2026-04-29 21:03:44,020 INFO MAE (micro)           0.001634              0.001255              0.001322              0.001322              0.001634              0.001034              0.000993              0.000970              0.001180              0.001025              0.001255              0.001634              0.000965              0.000893              0.001322              Quantile RF           
+2026-04-29 21:03:44,020 INFO MAE (macro)           0.001845              0.001405              0.001532              0.001532              0.001845              0.001135              0.001073              0.001071              0.001349              0.001164              0.001505              0.001845              0.001086              0.000981              0.001532              Quantile RF           
+2026-04-29 21:03:44,020 INFO Absolute Relative Error0.576543              1.000000              0.791763              0.791878              0.576543              0.817410              0.912825              0.766100              0.603991              0.824799              0.528055              0.576543              0.688302              0.705613              0.792592              Zero-Inflated Ridge   
+2026-04-29 21:03:44,020 INFO R² (Shannon diversity)0.794792              0.794792              0.747954              0.747236              0.794792              0.971453              0.924272              0.985810              0.890339              0.903159              0.670213              0.794792              0.899011              0.955937              0.741703              Gradient Boosting     
+2026-04-29 21:03:44,020 INFO Shannon intercept     5.054068              5.054068              4.750640              4.754549              5.054068              1.303343              1.449567              1.372004              3.365059              2.148584              0.747220              5.054068              -1.886595             1.042754              4.779020              Zero-Inflated Ridge   
+2026-04-29 21:03:44,020 INFO Spearman Rho (macro)  nan                   nan                   0.544884              0.544909              nan                   0.663904              0.669111              0.669008              0.526117              0.677184              0.532189              nan                   0.679055              0.674686              0.544957              Log-Transform         
+2026-04-29 21:03:44,020 INFO R²                    -0.000035             -0.057093             0.199224              0.199139              -0.000035             0.448861              0.504403              0.586578              0.179851              0.506467              -3.110973             -0.000035             0.370864              0.439126              0.198473              Gradient Boosting     
+2026-04-29 21:03:44,020 INFO R² (log + 1)          -0.000078             -0.062170             0.201142              0.201054              -0.000078             0.432510              0.502449              0.568733              0.189247              0.501556              -1.865820             -0.000078             0.356687              0.444580              0.200364              Gradient Boosting     
+2026-04-29 21:03:44,020 INFO KL Divergence         1.700060              1.700060              1.575896              1.575939              1.700060              0.679022              0.518293              0.566370              0.899756              0.559554              1.111404              1.700060              0.974849              0.539160              1.576307              Random Forest         
+2026-04-29 21:03:44,020 INFO RMSE (zeros)          0.001286              0.000000              0.001075              0.001074              0.001286              0.001377              0.001202              0.001196              0.001103              0.001220              0.001717              0.001286              0.000182              0.000989              0.001069              Zero                  
+2026-04-29 21:03:44,020 INFO MAE (zeros)           0.001286              0.000000              0.000703              0.000703              0.001286              0.000366              0.000350              0.000360              0.000572              0.000379              0.000428              0.001286              0.000036              0.000242              0.000702              Zero                  
+2026-04-29 21:03:44,020 INFO RMSE (non-zeros)      0.007811              0.008170              0.007005              0.007006              0.007811              0.005688              0.005425              0.004926              0.007086              0.005408              0.015993              0.007811              0.006299              0.005844              0.007010              Gradient Boosting     
+2026-04-29 21:03:44,021 INFO MAE (non-zeros)       0.002083              0.002872              0.002119              0.002119              0.002083              0.001894              0.001822              0.001754              0.001963              0.001857              0.002320              0.002083              0.002162              0.001730              0.002121              Quantile RF           
+2026-04-29 21:03:44,021 INFO Correlation           0.000000              0.000000              0.446924              0.446847              0.000000              0.678136              0.711424              0.766130              0.435890              0.713909              0.168629              0.000000              0.707787              0.668005              0.446209              Gradient Boosting     
+2026-04-29 21:03:44,021 INFO --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+2026-04-29 21:03:44,021 INFO 
+Win summary:
+2026-04-29 21:03:44,021 INFO   Mean: 0 wins
+2026-04-29 21:03:44,021 INFO   Zero: 2 wins
+2026-04-29 21:03:44,021 INFO   Linear Regression: 0 wins
+2026-04-29 21:03:44,021 INFO   Ridge: 0 wins
+2026-04-29 21:03:44,021 INFO   ElasticNet: 0 wins
+2026-04-29 21:03:44,021 INFO   Decision Tree: 0 wins
+2026-04-29 21:03:44,021 INFO   Random Forest: 1 wins
+2026-04-29 21:03:44,021 INFO   Gradient Boosting: 7 wins
+2026-04-29 21:03:44,021 INFO   KNN: 0 wins
+2026-04-29 21:03:44,021 INFO   Two-Stage: 0 wins
+2026-04-29 21:03:44,021 INFO   Zero-Inflated Ridge: 2 wins
+2026-04-29 21:03:44,021 INFO   Tweedie: 0 wins
+2026-04-29 21:03:44,021 INFO   Log-Transform: 1 wins
+2026-04-29 21:03:44,021 INFO   Quantile RF: 3 wins
+2026-04-29 21:03:44,021 INFO   Ridge High Reg: 0 wins
+2026-04-29 21:03:44,021 INFO 
+✓ Best overall: Gradient Boosting (7/16 metrics)
+2026-04-29 21:03:44,021 INFO 
+Improvement over Mean:
+2026-04-29 21:03:44,021 INFO 
+  Zero:
+2026-04-29 21:03:44,021 INFO     RMSE (micro)                    :   -2.81% ↓
+2026-04-29 21:03:44,021 INFO     RMSE (macro)                    :   -3.69% ↓
+2026-04-29 21:03:44,021 INFO     MAE (micro)                     :   23.20% ↑
+2026-04-29 21:03:44,021 INFO     MAE (macro)                     :   23.84% ↑
+2026-04-29 21:03:44,021 INFO     Absolute Relative Error         :  -73.45% ↓
+2026-04-29 21:03:44,021 INFO     R² (Shannon diversity)          :    0.00% ↑
+2026-04-29 21:03:44,021 INFO     Shannon intercept               :    0.00% ↑
+2026-04-29 21:03:44,021 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,021 INFO     R²                              : -161076.55% ↓
+2026-04-29 21:03:44,021 INFO     R² (log + 1)                    : -79340.99% ↓
+2026-04-29 21:03:44,021 INFO     KL Divergence                   :   -0.00% ↓
+2026-04-29 21:03:44,021 INFO     RMSE (zeros)                    :  100.00% ↑
+2026-04-29 21:03:44,021 INFO     MAE (zeros)                     :  100.00% ↑
+2026-04-29 21:03:44,021 INFO     RMSE (non-zeros)                :   -4.59% ↓
+2026-04-29 21:03:44,021 INFO     MAE (non-zeros)                 :  -37.90% ↓
+2026-04-29 21:03:44,021 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,021 INFO 
+  Linear Regression:
+2026-04-29 21:03:44,021 INFO     RMSE (micro)                    :   10.52% ↑
+2026-04-29 21:03:44,021 INFO     RMSE (macro)                    :    8.82% ↑
+2026-04-29 21:03:44,021 INFO     MAE (micro)                     :   19.12% ↑
+2026-04-29 21:03:44,021 INFO     MAE (macro)                     :   16.95% ↑
+2026-04-29 21:03:44,021 INFO     Absolute Relative Error         :  -37.33% ↓
+2026-04-29 21:03:44,021 INFO     R² (Shannon diversity)          :   -5.89% ↓
+2026-04-29 21:03:44,021 INFO     Shannon intercept               :    6.00% ↑
+2026-04-29 21:03:44,021 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,021 INFO     R²                              : 562520.72% ↑
+2026-04-29 21:03:44,021 INFO     R² (log + 1)                    : 257118.79% ↑
+2026-04-29 21:03:44,021 INFO     KL Divergence                   :    7.30% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (zeros)                    :   16.45% ↑
+2026-04-29 21:03:44,022 INFO     MAE (zeros)                     :   45.35% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (non-zeros)                :   10.32% ↑
+2026-04-29 21:03:44,022 INFO     MAE (non-zeros)                 :   -1.74% ↓
+2026-04-29 21:03:44,022 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,022 INFO 
+  Ridge:
+2026-04-29 21:03:44,022 INFO     RMSE (micro)                    :   10.51% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (macro)                    :    8.82% ↑
+2026-04-29 21:03:44,022 INFO     MAE (micro)                     :   19.12% ↑
+2026-04-29 21:03:44,022 INFO     MAE (macro)                     :   16.94% ↑
+2026-04-29 21:03:44,022 INFO     Absolute Relative Error         :  -37.35% ↓
+2026-04-29 21:03:44,022 INFO     R² (Shannon diversity)          :   -5.98% ↓
+2026-04-29 21:03:44,022 INFO     Shannon intercept               :    5.93% ↑
+2026-04-29 21:03:44,022 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,022 INFO     R²                              : 562279.48% ↑
+2026-04-29 21:03:44,022 INFO     R² (log + 1)                    : 257005.88% ↑
+2026-04-29 21:03:44,022 INFO     KL Divergence                   :    7.30% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (zeros)                    :   16.51% ↑
+2026-04-29 21:03:44,022 INFO     MAE (zeros)                     :   45.36% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (non-zeros)                :   10.31% ↑
+2026-04-29 21:03:44,022 INFO     MAE (non-zeros)                 :   -1.76% ↓
+2026-04-29 21:03:44,022 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,022 INFO 
+  ElasticNet:
+2026-04-29 21:03:44,022 INFO     RMSE (micro)                    :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (macro)                    :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     MAE (micro)                     :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     MAE (macro)                     :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     Absolute Relative Error         :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     R² (Shannon diversity)          :    0.00% ↓
+2026-04-29 21:03:44,022 INFO     Shannon intercept               :    0.00% ↓
+2026-04-29 21:03:44,022 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,022 INFO     R²                              :    0.00% ↓
+2026-04-29 21:03:44,022 INFO     R² (log + 1)                    :    0.00% ↓
+2026-04-29 21:03:44,022 INFO     KL Divergence                   :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (zeros)                    :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     MAE (zeros)                     :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (non-zeros)                :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     MAE (non-zeros)                 :    0.00% ↑
+2026-04-29 21:03:44,022 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,022 INFO 
+  Decision Tree:
+2026-04-29 21:03:44,022 INFO     RMSE (micro)                    :   25.76% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (macro)                    :   22.30% ↑
+2026-04-29 21:03:44,022 INFO     MAE (micro)                     :   36.74% ↑
+2026-04-29 21:03:44,022 INFO     MAE (macro)                     :   38.49% ↑
+2026-04-29 21:03:44,022 INFO     Absolute Relative Error         :  -41.78% ↓
+2026-04-29 21:03:44,022 INFO     R² (Shannon diversity)          :   22.23% ↑
+2026-04-29 21:03:44,022 INFO     Shannon intercept               :   74.21% ↑
+2026-04-29 21:03:44,022 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,022 INFO     R²                              : 1267260.53% ↑
+2026-04-29 21:03:44,022 INFO     R² (log + 1)                    : 552759.00% ↑
+2026-04-29 21:03:44,022 INFO     KL Divergence                   :   60.06% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (zeros)                    :   -7.01% ↓
+2026-04-29 21:03:44,022 INFO     MAE (zeros)                     :   71.53% ↑
+2026-04-29 21:03:44,022 INFO     RMSE (non-zeros)                :   27.17% ↑
+2026-04-29 21:03:44,022 INFO     MAE (non-zeros)                 :    9.06% ↑
+2026-04-29 21:03:44,022 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,022 INFO 
+  Random Forest:
+2026-04-29 21:03:44,022 INFO     RMSE (micro)                    :   29.60% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (macro)                    :   28.09% ↑
+2026-04-29 21:03:44,023 INFO     MAE (micro)                     :   39.23% ↑
+2026-04-29 21:03:44,023 INFO     MAE (macro)                     :   41.81% ↑
+2026-04-29 21:03:44,023 INFO     Absolute Relative Error         :  -58.33% ↓
+2026-04-29 21:03:44,023 INFO     R² (Shannon diversity)          :   16.29% ↑
+2026-04-29 21:03:44,023 INFO     Shannon intercept               :   71.32% ↑
+2026-04-29 21:03:44,023 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,023 INFO     R²                              : 1424058.51% ↑
+2026-04-29 21:03:44,023 INFO     R² (log + 1)                    : 642126.73% ↑
+2026-04-29 21:03:44,023 INFO     KL Divergence                   :   69.51% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (zeros)                    :    6.56% ↑
+2026-04-29 21:03:44,023 INFO     MAE (zeros)                     :   72.78% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (non-zeros)                :   30.55% ↑
+2026-04-29 21:03:44,023 INFO     MAE (non-zeros)                 :   12.53% ↑
+2026-04-29 21:03:44,023 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,023 INFO 
+  Gradient Boosting:
+2026-04-29 21:03:44,023 INFO     RMSE (micro)                    :   35.70% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (macro)                    :   32.93% ↑
+2026-04-29 21:03:44,023 INFO     MAE (micro)                     :   40.68% ↑
+2026-04-29 21:03:44,023 INFO     MAE (macro)                     :   41.92% ↑
+2026-04-29 21:03:44,023 INFO     Absolute Relative Error         :  -32.88% ↓
+2026-04-29 21:03:44,023 INFO     R² (Shannon diversity)          :   24.03% ↑
+2026-04-29 21:03:44,023 INFO     Shannon intercept               :   72.85% ↑
+2026-04-29 21:03:44,023 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,023 INFO     R²                              : 1656040.84% ↑
+2026-04-29 21:03:44,023 INFO     R² (log + 1)                    : 726823.77% ↑
+2026-04-29 21:03:44,023 INFO     KL Divergence                   :   66.69% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (zeros)                    :    7.07% ↑
+2026-04-29 21:03:44,023 INFO     MAE (zeros)                     :   71.99% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (non-zeros)                :   36.94% ↑
+2026-04-29 21:03:44,023 INFO     MAE (non-zeros)                 :   15.77% ↑
+2026-04-29 21:03:44,023 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,023 INFO 
+  KNN:
+2026-04-29 21:03:44,023 INFO     RMSE (micro)                    :    9.44% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (macro)                    :   10.62% ↑
+2026-04-29 21:03:44,023 INFO     MAE (micro)                     :   27.79% ↑
+2026-04-29 21:03:44,023 INFO     MAE (macro)                     :   26.89% ↑
+2026-04-29 21:03:44,023 INFO     Absolute Relative Error         :   -4.76% ↓
+2026-04-29 21:03:44,023 INFO     R² (Shannon diversity)          :   12.02% ↑
+2026-04-29 21:03:44,023 INFO     Shannon intercept               :   33.42% ↑
+2026-04-29 21:03:44,023 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,023 INFO     R²                              : 507830.00% ↑
+2026-04-29 21:03:44,023 INFO     R² (log + 1)                    : 241918.99% ↑
+2026-04-29 21:03:44,023 INFO     KL Divergence                   :   47.08% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (zeros)                    :   14.27% ↑
+2026-04-29 21:03:44,023 INFO     MAE (zeros)                     :   55.53% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (non-zeros)                :    9.28% ↑
+2026-04-29 21:03:44,023 INFO     MAE (non-zeros)                 :    5.73% ↑
+2026-04-29 21:03:44,023 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,023 INFO 
+  Two-Stage:
+2026-04-29 21:03:44,023 INFO     RMSE (micro)                    :   29.75% ↑
+2026-04-29 21:03:44,023 INFO     RMSE (macro)                    :   27.22% ↑
+2026-04-29 21:03:44,023 INFO     MAE (micro)                     :   37.30% ↑
+2026-04-29 21:03:44,023 INFO     MAE (macro)                     :   36.89% ↑
+2026-04-29 21:03:44,023 INFO     Absolute Relative Error         :  -43.06% ↓
+2026-04-29 21:03:44,023 INFO     R² (Shannon diversity)          :   13.63% ↑
+2026-04-29 21:03:44,023 INFO     Shannon intercept               :   57.49% ↑
+2026-04-29 21:03:44,023 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,024 INFO     R²                              : 1429884.32% ↑
+2026-04-29 21:03:44,024 INFO     R² (log + 1)                    : 640985.21% ↑
+2026-04-29 21:03:44,024 INFO     KL Divergence                   :   67.09% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (zeros)                    :    5.16% ↑
+2026-04-29 21:03:44,024 INFO     MAE (zeros)                     :   70.57% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (non-zeros)                :   30.77% ↑
+2026-04-29 21:03:44,024 INFO     MAE (non-zeros)                 :   10.84% ↑
+2026-04-29 21:03:44,024 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,024 INFO 
+  Zero-Inflated Ridge:
+2026-04-29 21:03:44,024 INFO     RMSE (micro)                    : -102.75% ↓
+2026-04-29 21:03:44,024 INFO     RMSE (macro)                    :  -52.70% ↓
+2026-04-29 21:03:44,024 INFO     MAE (micro)                     :   23.24% ↑
+2026-04-29 21:03:44,024 INFO     MAE (macro)                     :   18.41% ↑
+2026-04-29 21:03:44,024 INFO     Absolute Relative Error         :    8.41% ↑
+2026-04-29 21:03:44,024 INFO     R² (Shannon diversity)          :  -15.67% ↓
+2026-04-29 21:03:44,024 INFO     Shannon intercept               :   85.22% ↑
+2026-04-29 21:03:44,024 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,024 INFO     R²                              : -8782348.80% ↓
+2026-04-29 21:03:44,024 INFO     R² (log + 1)                    : -2384035.48% ↓
+2026-04-29 21:03:44,024 INFO     KL Divergence                   :   34.63% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (zeros)                    :  -33.45% ↓
+2026-04-29 21:03:44,024 INFO     MAE (zeros)                     :   66.76% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (non-zeros)                : -104.75% ↓
+2026-04-29 21:03:44,024 INFO     MAE (non-zeros)                 :  -11.39% ↓
+2026-04-29 21:03:44,024 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,024 INFO 
+  Tweedie:
+2026-04-29 21:03:44,024 INFO     RMSE (micro)                    :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (macro)                    :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     MAE (micro)                     :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     MAE (macro)                     :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     Absolute Relative Error         :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     R² (Shannon diversity)          :    0.00% ↓
+2026-04-29 21:03:44,024 INFO     Shannon intercept               :    0.00% ↓
+2026-04-29 21:03:44,024 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,024 INFO     R²                              :    0.00% ↓
+2026-04-29 21:03:44,024 INFO     R² (log + 1)                    :    0.00% ↓
+2026-04-29 21:03:44,024 INFO     KL Divergence                   :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (zeros)                    :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     MAE (zeros)                     :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (non-zeros)                :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     MAE (non-zeros)                 :    0.00% ↑
+2026-04-29 21:03:44,024 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,024 INFO 
+  Log-Transform:
+2026-04-29 21:03:44,024 INFO     RMSE (micro)                    :   20.68% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (macro)                    :   17.83% ↑
+2026-04-29 21:03:44,024 INFO     MAE (micro)                     :   40.94% ↑
+2026-04-29 21:03:44,024 INFO     MAE (macro)                     :   41.13% ↑
+2026-04-29 21:03:44,024 INFO     Absolute Relative Error         :  -19.38% ↓
+2026-04-29 21:03:44,024 INFO     R² (Shannon diversity)          :   13.11% ↑
+2026-04-29 21:03:44,024 INFO     Shannon intercept               :   62.67% ↑
+2026-04-29 21:03:44,024 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,024 INFO     R²                              : 1047069.05% ↑
+2026-04-29 21:03:44,024 INFO     R² (log + 1)                    : 455872.77% ↑
+2026-04-29 21:03:44,024 INFO     KL Divergence                   :   42.66% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (zeros)                    :   85.87% ↑
+2026-04-29 21:03:44,024 INFO     MAE (zeros)                     :   97.17% ↑
+2026-04-29 21:03:44,024 INFO     RMSE (non-zeros)                :   19.35% ↑
+2026-04-29 21:03:44,024 INFO     MAE (non-zeros)                 :   -3.79% ↓
+2026-04-29 21:03:44,024 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,025 INFO 
+  Quantile RF:
+2026-04-29 21:03:44,025 INFO     RMSE (micro)                    :   25.11% ↑
+2026-04-29 21:03:44,025 INFO     RMSE (macro)                    :   24.37% ↑
+2026-04-29 21:03:44,025 INFO     MAE (micro)                     :   45.38% ↑
+2026-04-29 21:03:44,025 INFO     MAE (macro)                     :   46.80% ↑
+2026-04-29 21:03:44,025 INFO     Absolute Relative Error         :  -22.39% ↓
+2026-04-29 21:03:44,025 INFO     R² (Shannon diversity)          :   20.28% ↑
+2026-04-29 21:03:44,025 INFO     Shannon intercept               :   79.37% ↑
+2026-04-29 21:03:44,025 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,025 INFO     R²                              : 1239776.77% ↑
+2026-04-29 21:03:44,025 INFO     R² (log + 1)                    : 568181.87% ↑
+2026-04-29 21:03:44,025 INFO     KL Divergence                   :   68.29% ↑
+2026-04-29 21:03:44,025 INFO     RMSE (zeros)                    :   23.14% ↑
+2026-04-29 21:03:44,025 INFO     MAE (zeros)                     :   81.15% ↑
+2026-04-29 21:03:44,025 INFO     RMSE (non-zeros)                :   25.18% ↑
+2026-04-29 21:03:44,025 INFO     MAE (non-zeros)                 :   16.93% ↑
+2026-04-29 21:03:44,025 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,025 INFO 
+  Ridge High Reg:
+2026-04-29 21:03:44,025 INFO     RMSE (micro)                    :   10.47% ↑
+2026-04-29 21:03:44,025 INFO     RMSE (macro)                    :    8.77% ↑
+2026-04-29 21:03:44,025 INFO     MAE (micro)                     :   19.11% ↑
+2026-04-29 21:03:44,025 INFO     MAE (macro)                     :   16.94% ↑
+2026-04-29 21:03:44,025 INFO     Absolute Relative Error         :  -37.47% ↓
+2026-04-29 21:03:44,025 INFO     R² (Shannon diversity)          :   -6.68% ↓
+2026-04-29 21:03:44,025 INFO     Shannon intercept               :    5.44% ↑
+2026-04-29 21:03:44,025 INFO     Spearman Rho (macro)            :     nan% ↓
+2026-04-29 21:03:44,025 INFO     R²                              : 560401.41% ↑
+2026-04-29 21:03:44,025 INFO     R² (log + 1)                    : 256123.76% ↑
+2026-04-29 21:03:44,025 INFO     KL Divergence                   :    7.28% ↑
+2026-04-29 21:03:44,025 INFO     RMSE (zeros)                    :   16.87% ↑
+2026-04-29 21:03:44,025 INFO     MAE (zeros)                     :   45.43% ↑
+2026-04-29 21:03:44,025 INFO     RMSE (non-zeros)                :   10.26% ↑
+2026-04-29 21:03:44,025 INFO     MAE (non-zeros)                 :   -1.84% ↓
+2026-04-29 21:03:44,025 INFO     Correlation                     :    0.00% ↓
+2026-04-29 21:03:44,028 INFO 
+============================================================
+2026-04-29 21:03:44,028 INFO CREATING VISUALIZATIONS
+2026-04-29 21:03:44,028 INFO ============================================================
+2026-04-29 21:03:44,028 INFO 
+ 1. Metric comparison bar plots...
+2026-04-29 21:03:52,744 INFO   ✓ Saved: metrics_comparison.png
+2026-04-29 21:03:52,744 INFO  2. Scatter plots (full range)...
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_function_base_impl.py:3023: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[:, None]
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_function_base_impl.py:3024: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[None, :]
+2026-04-29 21:04:07,922 INFO   ✓ Saved: scatter_predicted_vs_actual.png
+2026-04-29 21:04:07,925 INFO  3. Scatter plots (ground truth <1%)...
+2026-04-29 21:04:22,192 INFO   ✓ Saved: scatter_zoomed.png
+2026-04-29 21:04:22,194 INFO  4. Log-log scatter plots...
+2026-04-29 21:04:37,585 INFO   ✓ Saved: scatter_loglog_predicted_vs_actual.png
+2026-04-29 21:04:37,586 INFO  5. MAE by abundance range...
+2026-04-29 21:04:41,534 INFO   ✓ Saved: error_by_range.png
+2026-04-29 21:04:41,535 INFO  6. MAE by abundance range (zoomed, <1%)...
+2026-04-29 21:04:45,753 INFO   ✓ Saved: error_by_range_zoomed.png
+2026-04-29 21:04:45,753 INFO  7. Relative Absolute Error by range...
+2026-04-29 21:04:48,064 INFO   ✓ Saved: relative_err_by_range.png
+2026-04-29 21:04:48,064 INFO  8. Residual distribution...
+2026-04-29 21:04:50,524 INFO   ✓ Saved: residual_distribution.png
+2026-04-29 21:04:50,525 INFO  9. Zero vs non-zero MAE comparison...
+2026-04-29 21:04:53,523 INFO   ✓ Saved: zero_vs_nonzero_comparison.png
+2026-04-29 21:04:53,523 INFO 10. Training progress (if available)...
+2026-04-29 21:04:53,523 INFO   (Skipping training progress plot — no training data found.)
+2026-04-29 21:04:53,523 INFO 11. Latent importance diagnostics (if available)...
+2026-04-29 21:04:53,523 INFO   (Skipping latent diagnostics — no model provides latent_diagnostics.)
+2026-04-29 21:04:53,523 INFO 12. Latent vector comparison (if available)...
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+/home/eboehly/barcode/lib/python3.11/site-packages/seaborn/_oldcore.py:1119: FutureWarning: use_inf_as_na option is deprecated and will be removed in a future version. Convert inf values to NaN before operating instead.
+  with pd.option_context('mode.use_inf_as_na', True):
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_histograms_impl.py:897: RuntimeWarning: invalid value encountered in divide
+  return n / db / n.sum(), bin_edges
+2026-04-29 21:05:04,007 INFO   ✓ Saved: latent_comparison.png
+2026-04-29 21:05:04,007 INFO 13. Top-model radar overview (>4 models only)...
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_function_base_impl.py:3023: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[:, None]
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_function_base_impl.py:3024: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[None, :]
+2026-04-29 21:05:04,524 INFO   ✓ Saved: top_models_radar.png
+2026-04-29 21:05:04,524 INFO 14. Summary table...
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_function_base_impl.py:3023: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[:, None]
+/home/eboehly/barcode/lib/python3.11/site-packages/numpy/lib/_function_base_impl.py:3024: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[None, :]
+2026-04-29 21:05:05,718 INFO   ✓ Saved: summary_table.png
+2026-04-29 21:05:05,727 INFO   ✓ Saved: comparison_results.csv
+2026-04-29 21:05:05,727 INFO 
+✅ All visualizations saved to: /scratch/eboehly/Metabarcoding/analysis/figures/baselines_comparison/
+[Wed Apr 29 09:02:45 PM EDT 2026] Completed target: baselines_comparison

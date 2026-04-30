@@ -1,0 +1,58 @@
+[Wed Apr 29 09:02:46 PM EDT 2026] Target: preprocessing
+[Wed Apr 29 09:02:46 PM EDT 2026] Train command: python utils_test.py && python read_count_preprocessing.py  --output_dir results
+2026-04-29 21:04:29,830 - INFO - ======================================================================
+2026-04-29 21:04:29,831 - INFO - GENERATING DATASETS WITH DIFFERENT PREPROCESSING METHODS
+2026-04-29 21:04:29,831 - INFO - ======================================================================
+2026-04-29 21:04:29,831 - INFO - 
+Generating split indices...
+2026-04-29 21:04:31,523 - INFO - Applied sample read-count filter: threshold=min(q05=43185.50, 50000)=43185.50; kept 485/511 samples; dropped 26.
+2026-04-29 21:04:31,653 - INFO - Precomputed embeddings not found; running BarcodeBERT inference on /scratch/eboehly/Metabarcoding/data/data_merged.csv
+2026-04-29 21:04:39,820 - INFO - Loading BarcodeBERT from HuggingFace (emmabhl/BarcodeBERT_finetuned) ...
+2026-04-29 21:04:39,908 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/config.json "HTTP/1.1 200 OK"
+2026-04-29 21:04:39,979 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+2026-04-29 21:04:40,032 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/tokenizer.py "HTTP/1.1 200 OK"
+2026-04-29 21:04:40,106 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/tokenizer.json "HTTP/1.1 200 OK"
+2026-04-29 21:04:40,154 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+2026-04-29 21:04:40,203 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/config.json "HTTP/1.1 200 OK"
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 1705.96it/s]
+2026-04-29 21:04:45,485 - INFO - Running BarcodeBERT inference on 64464 BINs (batch_size=64) ...
+2026-04-29 21:05:13,799 - INFO - BarcodeBERT inference complete.
+2026-04-29 21:05:13,897 - INFO - Embeddings loaded: 27402/27402 bins have sequences; 0 will use taxonomy fallback.
+2026-04-29 21:05:15,842 - INFO - Loaded 56991 observations
+2026-04-29 21:05:15,842 - INFO -   485 samples, 64029 bins
+2026-04-29 21:05:15,842 - INFO -   Features: 9 (total_reads_per_sample, repl_w_reads_fractn, latitude, longitude, collection_day, total_reads_norm, avg_reads_norm, max_reads_norm, min_reads_norm)
+2026-04-29 21:05:15,842 - INFO -   Train: 388 samples (80%)
+2026-04-29 21:05:15,842 - INFO -   Val: 48 samples (10%)
+2026-04-29 21:05:15,842 - INFO -   Test: 49 samples (10%)
+2026-04-29 21:05:16,028 - INFO - 
+======================================================================
+2026-04-29 21:05:16,028 - INFO - Preprocessing method: ORIGINAL
+2026-04-29 21:05:16,028 - INFO - ======================================================================
+2026-04-29 21:05:17,141 - INFO - Applied sample read-count filter: threshold=min(q05=43185.50, 50000)=43185.50; kept 485/511 samples; dropped 26.
+2026-04-29 21:05:17,236 - INFO - Precomputed embeddings not found; running BarcodeBERT inference on /scratch/eboehly/Metabarcoding/data/data_merged.csv
+2026-04-29 21:05:17,236 - INFO - Loading BarcodeBERT from HuggingFace (emmabhl/BarcodeBERT_finetuned) ...
+2026-04-29 21:05:17,289 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/config.json "HTTP/1.1 200 OK"
+2026-04-29 21:05:17,372 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+2026-04-29 21:05:17,421 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/tokenizer.py "HTTP/1.1 200 OK"
+2026-04-29 21:05:17,480 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/tokenizer.json "HTTP/1.1 200 OK"
+2026-04-29 21:05:17,663 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+2026-04-29 21:05:17,707 - INFO - HTTP Request: HEAD https://huggingface.co/emmabhl/BarcodeBERT_finetuned/resolve/main/config.json "HTTP/1.1 200 OK"
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 8868.24it/s]
+2026-04-29 21:05:18,979 - INFO - Running BarcodeBERT inference on 64464 BINs (batch_size=64) ...
+2026-04-29 21:05:46,888 - INFO - BarcodeBERT inference complete.
+2026-04-29 21:05:47,095 - INFO - Embeddings loaded: 64029/64029 bins have sequences; 0 will use taxonomy fallback.
+2026-04-29 21:05:51,818 - INFO - Loaded 176737 observations
+2026-04-29 21:05:51,818 - INFO -   485 samples, 64029 bins
+2026-04-29 21:05:51,818 - INFO -   Features: 9 (total_reads_per_sample, repl_w_reads_fractn, latitude, longitude, collection_day, total_reads_norm, avg_reads_norm, max_reads_norm, min_reads_norm)
+2026-04-29 21:05:51,818 - INFO -   Train: 388 samples (80%)
+2026-04-29 21:05:51,818 - INFO -   Val: 48 samples (10%)
+2026-04-29 21:05:51,818 - INFO -   Test: 49 samples (10%)
+Traceback (most recent call last):
+  File "/scratch/eboehly/Metabarcoding/analysis/preprocessing/utils_test.py", line 700, in <module>
+    _ = load(
+        ^^^^^
+  File "/scratch/eboehly/Metabarcoding/analysis/preprocessing/utils_test.py", line 556, in load
+    data_path = os.path.join(data_path_root, config.read_count_preprocessing)
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Config' object has no attribute 'read_count_preprocessing'
+[Wed Apr 29 09:02:46 PM EDT 2026] No result files matched patterns: preprocessing/results/*/preprocessing_*.pkl
