@@ -60,6 +60,12 @@ import pickle
 import logging as log
 from typing import Dict, Any, List, Optional, Tuple
 
+import sys as _sys
+import os as _os
+_SRC_DIR = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "src"))
+if _SRC_DIR not in _sys.path:
+    _sys.path.insert(0, _SRC_DIR)
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -69,6 +75,8 @@ from scipy.stats import gaussian_kde
 from matplotlib.colors import Normalize, PowerNorm
 from matplotlib.patches import Patch, Rectangle
 from matplotlib.lines import Line2D
+
+from metrics import compute_metrics as _compute_metrics_core
 
 
 # ============================================================================
@@ -304,138 +312,7 @@ def compute_extended_metrics(
         if bin_labels.shape[0] != y_true.shape[0]:
             raise ValueError("'bin_labels' length must match 'targets' and 'predictions'")
 
-    valid = np.isfinite(y_true) & np.isfinite(y_pred)
-    y_true = y_true[valid]
-    y_pred = np.clip(y_pred[valid], 0, 1)
-
-    rmse_macro: Optional[float] = np.nan
-    mae_macro: Optional[float] = np.nan
-    kl_divergence: Optional[float] = np.nan
-    shannon_r2: Optional[float] = np.nan
-    shannon_intercept: Optional[float] = np.nan
-    spearman_macro: Optional[float] = np.nan
-    eps = 1e-10
-
-    # ------------------------------------------------------------------
-    # Per sample metrics (macro-averaged)
-    # ------------------------------------------------------------------
-    if sample_labels is not None:
-        sample_labels_v = sample_labels[valid]
-
-        rmse_per, mae_per, kl_per = [], [], []
-        shannon_true_per, shannon_pred_per = [], []
-        spearman_per = []
-        for s in np.unique(sample_labels_v):
-            mask = sample_labels_v == s
-            true_s = y_true[mask]
-            pred_s = y_pred[mask]
-            if len(true_s) == 0:
-                continue
-            rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
-            mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
-            # KL per sample: each sample's values form a probability distribution
-            true_s_norm = (true_s + eps) / (true_s + eps).sum()
-            pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
-            kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
-
-            shannon_true = _shannon_diversity(true_s, eps=eps)
-            shannon_pred = _shannon_diversity(pred_s, eps=eps)
-            if np.isfinite(shannon_true) and np.isfinite(shannon_pred):
-                shannon_true_per.append(shannon_true)
-                shannon_pred_per.append(shannon_pred)
-
-            if len(true_s) > 1:
-                rho = _spearman_rho(true_s, pred_s)
-                if rho is not None:
-                    spearman_per.append(rho)
-
-        if rmse_per:
-            rmse_macro = float(np.mean(rmse_per))
-            mae_macro = float(np.mean(mae_per))
-            kl_divergence = float(np.mean(kl_per))
-
-        if len(shannon_true_per) >= 2:
-            fit_r2, fit_intercept = _fit_r2_intercept(
-                np.asarray(shannon_true_per, dtype=float),
-                np.asarray(shannon_pred_per, dtype=float),
-            )
-            if fit_r2 is not None:
-                shannon_r2 = fit_r2
-            if fit_intercept is not None:
-                shannon_intercept = fit_intercept
-
-        if spearman_per:
-            spearman_macro = float(np.mean(spearman_per))
-    
-    # ------------------------------------------------------------------
-    # Overall micro-averaged metrics (treating all entries as a single vector)
-    # ------------------------------------------------------------------
-
-    mse = np.mean((y_true - y_pred) ** 2)
-    rmse_micro = float(np.sqrt(mse))
-    mae_micro = float(np.mean(np.abs(y_true - y_pred)))
-
-    if np.isnan(rmse_macro):
-        rmse_macro = rmse_micro
-        mae_macro = mae_micro
-        y_tn = (y_true + eps) / (y_true + eps).sum()
-        y_pn = (y_pred + eps) / (y_pred + eps).sum()
-        kl_divergence = float(np.sum(y_tn * np.log(y_tn / y_pn)))
-
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    r2 = float(1 - ss_res / (ss_tot + 1e-10))
-    
-    # Log-transform metrics to better capture performance on low-abundance bins
-    y_true_log = np.log(y_true + 1)
-    y_pred_log = np.log(y_pred + 1)
-    r2_log = float(1 - np.sum((y_true_log - y_pred_log) ** 2) / (np.sum((y_true_log - np.mean(y_true_log)) ** 2) + 1e-10))
-
-    # Compute metrics for zero and non-zero abundance bins
-    zero_mask = y_true == 0
-    nonzero_mask = y_true > 0
-
-    if zero_mask.sum() > 0:
-        rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2)))
-        mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask])))
-    else:
-        rmse_zeros = mae_zeros = np.nan
-
-    if nonzero_mask.sum() > 0:
-        rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2)))
-        mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask])))
-    else:
-        rmse_nonzeros = mae_nonzeros = np.nan
-        
-    # Pearson correlation between true and predicted values
-    corr = np.corrcoef(y_true, y_pred)[0, 1]
-    correlation = 0.0 if np.isnan(corr) else float(corr)
-
-    nz = y_true != 0
-    rel_error = np.zeros_like(y_true, dtype=float)
-    rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
-    absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else np.nan
-
-    return {
-        "RMSE (micro)": rmse_micro,
-        "RMSE (macro)": rmse_macro,
-        "MAE (micro)": mae_micro,
-        "MAE (macro)": mae_macro,
-        "Absolute Relative Error": absolute_relative_error,
-        "R² (Shannon diversity)": shannon_r2,
-        "Shannon intercept": shannon_intercept,
-        "Spearman Rho (macro)": spearman_macro,
-        "R²": r2,
-        "R² (log + 1)": r2_log,
-        "RMSE (zeros)": rmse_zeros,
-        "MAE (zeros)": mae_zeros,
-        "RMSE (non-zeros)": rmse_nonzeros,
-        "MAE (non-zeros)": mae_nonzeros,
-        "KL Divergence": kl_divergence,
-        "Correlation": correlation,
-        "n_zeros": int(zero_mask.sum()),
-        "n_nonzeros": int(nonzero_mask.sum()),
-    }
+    return _compute_metrics_core(y_pred, y_true, sample_labels=sample_labels)
 
 
 # ============================================================================
