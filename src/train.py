@@ -52,11 +52,6 @@ class Trainer:
         self.resume = resume
         self._validate_interpolation_config()
 
-        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and (
-            self.cfg.embedding_path is None or not os.path.exists(self.cfg.embedding_path)
-        ):
-            self.cfg.barcode_data_path = self.cfg.data_path
-
         self.start_epoch = 0
         self.current_epoch = -1
         self.best_val_loss = float("inf")
@@ -529,7 +524,7 @@ class Trainer:
                         valid_mask = torch.ones(inputs.shape[1], dtype=torch.bool, device=inputs.device)
                     inputs_flat = inputs[b][valid_mask]
                     bin_idx_flat = bin_idx[b][valid_mask]
-                    interpolation_mask = valid_mask if use_interpolation else None
+                    interpolation_mask = torch.ones(len(bin_idx_flat), dtype=torch.bool, device=inputs_flat.device) if use_interpolation else None
                     outputs = self.model(
                         inputs_flat,
                         bin_idx_flat,
@@ -903,6 +898,14 @@ class Trainer:
             checkpoint = torch.load(best_ckpt, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint["model_state_dict"])
 
+        _keep = {"best.pt", "latest.pt", PREPROCESSING_STATE_FILENAME}
+        for _ckpt_file in os.listdir(self.checkpoint_dir):
+            if _ckpt_file not in _keep:
+                try:
+                    os.remove(os.path.join(self.checkpoint_dir, _ckpt_file))
+                except OSError:
+                    pass
+
         self._plot_training_progress()
 
         test_loss = self.validate(split="test")
@@ -976,7 +979,7 @@ class Trainer:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Metabarcoding training entrypoint")
-    parser.add_argument("--model", type=str, default="default_src", help="Name of the model variant being trained")
+    parser.add_argument("--model", type=str, default="default", help="Name of the model variant being trained")
     parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
