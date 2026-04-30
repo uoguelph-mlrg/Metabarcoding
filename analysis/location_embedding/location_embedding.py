@@ -107,6 +107,7 @@ def run_comparison(
     location_embedder_batch_size: int = 2048,
     embedders: Optional[list[str]] = None,
     run_group: Optional[str] = None,
+    output_dir: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """
     Train location-embedding variants (no baseline retraining) and return results.
@@ -168,7 +169,7 @@ def run_comparison(
                 tags=["location_embedding", embedder_name, "variant_only"],
                 config={"embedder": embedder_name, **cfg.__dict__},
             ):
-                trainer = BaseTrainer(cfg, model_name=embedder_name)
+                trainer = BaseTrainer(cfg, model_name=embedder_name, results_dir=output_dir)
                 embedder_results = trainer.run(use_wandb=use_wandb)
                 required_keys = ("predictions", "targets", "sample_labels", "bin_labels")
                 missing = [k for k in required_keys if k not in embedder_results]
@@ -292,6 +293,9 @@ if __name__ == "__main__":
     if not use_wandb and not WANDB_AVAILABLE:
         log.warning("wandb is not installed; continuing without wandb logging")
 
+    # Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
+
     # Run comparison
     results, failures = run_comparison(
         use_wandb=use_wandb,
@@ -307,10 +311,10 @@ if __name__ == "__main__":
         location_embedder_batch_size=args.location_embedder_batch_size,
         embedders=args.embedders,
         run_group=run_group,
+        output_dir=output_dir,
     )
 
     # Save results
-    output_dir = make_output_dir(__file__, args.output_dir)
     if not results:
         log.error("No successful location-embedding variants to save.")
         if failures:

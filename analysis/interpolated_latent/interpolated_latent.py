@@ -45,6 +45,7 @@ def run_comparison(
     variant_overrides: Dict[str, Dict[str, Any]],
     use_wandb: bool = True,
     run_group: str | None = None,
+    output_dir: str | None = None,
 ) -> Dict[str, Any]:
     """
     Train selected interpolation variants.
@@ -91,7 +92,7 @@ def run_comparison(
             tags=["interpolated_latent", variant, "variant_only"],
             config={**cfg.__dict__, "variant": variant},
         ):
-            trainer = Trainer(cfg)
+            trainer = Trainer(cfg, model_name=variant, results_dir=output_dir)
             results[variant] = trainer.run(use_wandb=use_wandb)
     
     return results
@@ -190,6 +191,9 @@ if __name__ == "__main__":
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     run_group = make_run_group("interpolated_latent")
     
+    # Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
+
     # Run comparison
     results = run_comparison(
         cfg,
@@ -197,10 +201,10 @@ if __name__ == "__main__":
         variant_overrides=variant_overrides,
         use_wandb=use_wandb,
         run_group=run_group,
+        output_dir=output_dir,
     )
-    
+
     # Save results
-    output_dir = make_output_dir(__file__, args.output_dir)
     for variant, variant_results in results.items():
         save_variant_result(output_dir, "interpolated_latent", variant, variant_results)
     

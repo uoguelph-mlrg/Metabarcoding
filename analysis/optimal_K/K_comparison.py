@@ -45,6 +45,7 @@ def run_comparison(
     k_values: List[int],
     use_wandb: bool = True,
     run_group: str | None = None,
+    output_dir: str | None = None,
 ) -> Dict[str, Any]:
     """
     Train selected K-value variants.
@@ -76,7 +77,7 @@ def run_comparison(
             tags=["K_comparison", variant_name, "variant_only"],
             config={**cfg.__dict__, "K": int(k), "variant": variant_name},
         ):
-            trainer_k = Trainer(cfg_k)
+            trainer_k = Trainer(cfg_k, model_name=variant_name, results_dir=output_dir)
             results[variant_name] = trainer_k.run(use_wandb=use_wandb)
 
     return results
@@ -127,16 +128,19 @@ if __name__ == "__main__":
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     run_group = make_run_group("K_comparison")
     
+    # Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
+
     # Run comparison
     results = run_comparison(
         cfg,
         k_values=args.k_values,
         use_wandb=use_wandb,
         run_group=run_group,
+        output_dir=output_dir,
     )
-    
+
     # Save results
-    output_dir = make_output_dir(__file__, args.output_dir)
     for variant, variant_results in results.items():
         save_variant_result(output_dir, "K_comparison", variant, variant_results)
     

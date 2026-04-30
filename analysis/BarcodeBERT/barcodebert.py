@@ -40,6 +40,7 @@ except ImportError:
 def run_comparison(
     use_wandb: bool = True,
     run_group: Optional[str] = None,
+    output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Train BarcodeBERT variant and return result dict keyed by variant name."""
     results: Dict[str, Any] = {}
@@ -68,6 +69,7 @@ def run_comparison(
         barcode_trainer = Trainer(
             cfg=cfg,
             model_name="taxonomy",
+            results_dir=output_dir,
         )
         payload = barcode_trainer.run(use_wandb=use_wandb)
         results["taxonomy"] = payload
@@ -106,14 +108,17 @@ if __name__ == "__main__":
     if not use_wandb and not WANDB_AVAILABLE:
         log.warning("wandb is not installed; continuing without wandb logging")
 
+    # Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
+
     # Run comparison
     results = run_comparison(
         use_wandb=use_wandb,
         run_group=run_group,
+        output_dir=output_dir,
     )
 
     # Save results
-    output_dir = make_output_dir(__file__, args.output_dir)
     results_path = save_variant_result(output_dir, "taxonomy", "taxonomy", results["taxonomy"])
 
     log.info("\n" + "=" * 78)

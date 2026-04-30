@@ -58,6 +58,7 @@ def run_comparison(
     use_wandb: bool = True,
     dimensions: Optional[List[int]] = None,
     run_group: Optional[str] = None,
+    output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Train selected dimensionality variants.
@@ -98,7 +99,7 @@ def run_comparison(
             tags=["dimensionality_analysis", variant, "variant_only"],
             config={"embed_dim": cfg.embed_dim, "gating_fn": cfg.gating_fn},
         ):
-            trainer = train_module.Trainer(cfg)
+            trainer = train_module.Trainer(cfg, model_name=variant, results_dir=output_dir)
             log.info(f"Model type: {type(trainer.model).__name__}")
             log.info(f"Gating function: {cfg.gating_fn}")
             
@@ -139,15 +140,18 @@ if __name__ == "__main__":
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     run_group = make_run_group("dimensionality_analysis")
     
+    # Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
+    
     # Run comparison
     results = run_comparison(
         use_wandb=use_wandb,
         dimensions=args.dimensions,
+        output_dir=output_dir,
         run_group=run_group,
     )
     
     # Save results
-    output_dir = make_output_dir(__file__, args.output_dir)
     for variant, variant_results in results.items():
         save_variant_result(output_dir, "dimensionality_analysis", variant, variant_results)
     

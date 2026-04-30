@@ -62,6 +62,7 @@ def run_comparison(
     use_wandb: bool = True,
     gating_functions: Optional[List[str]] = None,
     run_group: Optional[str] = None,
+    output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Train selected gating-function variants.
@@ -102,7 +103,7 @@ def run_comparison(
             tags=["gating_comparison", gating_fn, "variant_only"],
             config={"embed_dim": cfg.embed_dim, "gating_fn": cfg.gating_fn},
         ):
-            trainer = train_module.Trainer(cfg)
+            trainer = train_module.Trainer(cfg, model_name=gating_fn, results_dir=output_dir)
             log.info(f"Model type: {type(trainer.model).__name__}")
             log.info(f"Gating function: {trainer.model.gating_fn}")
             
@@ -142,15 +143,18 @@ if __name__ == "__main__":
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     run_group = make_run_group("gating_comparison")
     
+    # Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
+    
     # Run comparison
     results = run_comparison(
         use_wandb=use_wandb,
         gating_functions=args.gating_functions,
+        output_dir=output_dir,
         run_group=run_group,
     )
     
     # Save results
-    output_dir = make_output_dir(__file__, args.output_dir)
     for variant, variant_results in results.items():
         save_variant_result(output_dir, "gating_comparison", variant, variant_results)
     

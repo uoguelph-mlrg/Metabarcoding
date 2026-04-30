@@ -45,6 +45,7 @@ def run_comparison(
     variants: List[str],
     use_wandb: bool = True,
     run_group: str | None = None,
+    output_dir: str | None = None,
 ) -> Dict[str, Any]:
     """
     Train selected loss variants.
@@ -73,7 +74,7 @@ def run_comparison(
             tags=["loss_comparison", variant, "variant_only"],
             config={**cfg.__dict__, "variant": variant},
         ):
-            trainer = Trainer(cfg)
+            trainer = Trainer(cfg, model_name=variant, results_dir=output_dir)
             results[variant] = trainer.run(use_wandb=use_wandb)
     
     return results
@@ -123,17 +124,20 @@ if __name__ == "__main__":
     
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     run_group = make_run_group("loss_comparison")
-    
+
+    # Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
+
     # Run comparison
     results = run_comparison(
         cfg,
         variants=args.variants,
         use_wandb=use_wandb,
         run_group=run_group,
+        output_dir=output_dir,
     )
     
     # Save results
-    output_dir = make_output_dir(__file__, args.output_dir)
     for variant, variant_results in results.items():
         save_variant_result(output_dir, "loss_comparison", variant, variant_results)
     
