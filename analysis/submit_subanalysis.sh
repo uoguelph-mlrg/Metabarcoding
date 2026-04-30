@@ -222,7 +222,7 @@ resolve_target() {
   FIGURES_DIR=""
   DEFAULT_LABELS_JSON=""
   DEFAULT_COLORS_JSON=""
-  DEFAULT_TIME="8:00:00"
+  DEFAULT_TIME="1:00:00"
 
   case "$target" in
     BarcodeBERT)
@@ -232,7 +232,7 @@ resolve_target() {
       FIGURES_DIR='figures/BarcodeBERT'
       DEFAULT_LABELS_JSON='{"baseline":"BarcodeBERT","taxonomy":"Taxonomy"}'
       DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","taxonomy":"#9b59b6"}'
-      DEFAULT_TIME="1:00:00"
+      DEFAULT_TIME="0:45:00"
       ;;
     baselines_comparison)
       TARGET_DIR="baselines"
@@ -241,7 +241,7 @@ resolve_target() {
       FIGURES_DIR='figures/baselines_comparison'
       DEFAULT_LABELS_JSON='{"mean":"Mean","zero":"Zero","linear_regression":"Linear Regression","ridge":"Ridge","elasticnet":"ElasticNet","decision_tree":"Decision Tree","random_forest":"Random Forest","gradient_boosting":"Gradient Boosting","knn":"KNN","two_stage":"Two-Stage","zero_inflated_ridge":"Zero-Inflated Ridge","tweedie":"Tweedie","log_transform":"Log-Transform","quantile_rf":"Quantile RF"}'
       DEFAULT_COLORS_JSON='{"mean":"#808080","zero":"#4d4d4d","linear_regression":"#f28e2b","ridge":"#4e79a7","elasticnet":"#e15759","decision_tree":"#76b7b2","random_forest":"#59a14f","gradient_boosting":"#edc948","knn":"#b07aa1","two_stage":"#9c755f","zero_inflated_ridge":"#bab0ab","tweedie":"#ff9da7","log_transform":"#8cd17d","quantile_rf":"#af7aa1"}'
-      DEFAULT_TIME="0:45:00"
+      DEFAULT_TIME="0:30:00"
       ;;
     interpolated_latent)
       TARGET_DIR="interpolated_latent"
@@ -250,7 +250,7 @@ resolve_target() {
       FIGURES_DIR='figures/interpolated_latent'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline","default_with_interpolation":"Interpolation (20%)","include_self_false":"Interpolation (20%, no self latent)","inference_true":"Interpolation (20%, at inference)","train_mlp_false":"Interpolation (20%, no MLP interpolation)","fraction_0p1":"Interpolation (10%)","fraction_0p5":"Interpolation (50%)","fraction_1p0":"Interpolation (100%)"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","default_with_interpolation":"#e74c3c","include_self_false":"#e67e22","inference_true":"#f39c12","train_mlp_false":"#2ecc71","fraction_0p1":"#3498db","fraction_0p5":"#9b59b6","fraction_1p0":"#1abc9c"}'
-      DEFAULT_TIME="6:00:00"
+      DEFAULT_TIME="5:30:00"
       ;;
     location_embedding)
       TARGET_DIR="location_embedding"
@@ -286,7 +286,7 @@ resolve_target() {
       FIGURES_DIR='figures/loss_comparison'
       DEFAULT_LABELS_JSON='{"baseline":"Cross-Entropy","logistic":"Logistic (BCE)"}'
       DEFAULT_COLORS_JSON='{"cross_entropy":"#2ecc71","logistic":"#9b59b6"}'
-      DEFAULT_TIME="1:30:00"
+      DEFAULT_TIME="1:00:00"
       ;;
     optimal_K)
       TARGET_DIR='optimal_K'
@@ -295,7 +295,7 @@ resolve_target() {
       FIGURES_DIR='figures/optimal_K'
       DEFAULT_LABELS_JSON='{"K_5":"K=5","baseline":"K=25","K_100":"K=100","K_500":"K=500"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","K_5":"#824e05","K_25":"#e74c3c","K_100":"#e67e22","K_500":"#f39c12"}'
-      DEFAULT_TIME="8:00:00"
+      DEFAULT_TIME="4:15:00"
       ;;
     preprocessing)
       TARGET_DIR='preprocessing'
@@ -304,7 +304,7 @@ resolve_target() {
       FIGURES_DIR='figures/preprocessing'
       DEFAULT_LABELS_JSON='{"original":"Original (raw counts)","normalized":"Normalized Only","logarithm":"Logarithm Only"}'
       DEFAULT_COLORS_JSON='{"original":"#ff7f0e","normalized":"#1f77b4","logarithm":"#2ca02c"}'
-      DEFAULT_TIME="3:00:00"
+      DEFAULT_TIME="2:15:00"
       ;;
     dimensionality_increase/gating_function)
       TARGET_DIR='dimensionality_increase/gating_function'
@@ -313,7 +313,7 @@ resolve_target() {
       FIGURES_DIR='figures/dimensionality_gating'
       DEFAULT_LABELS_JSON='{"baseline":"Baseline (Additive)","exp":"Exponential","scaled_exp":"Scaled Exponential","additive":"Additive (1+h)","softplus":"Softplus","tanh":"Tanh","sigmoid":"Sigmoid","dot_product":"Dot Product"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","exp":"#e74c3c","scaled_exp":"#e67e22","additive":"#f39c12","softplus":"#2ecc71","tanh":"#3498db","sigmoid":"#9b59b6","dot_product":"#1abc9c"}'
-      DEFAULT_TIME="6:00:00"
+      DEFAULT_TIME="4:00:00"
       ;;
     dimensionality_increase/vector_size)
       TARGET_DIR='dimensionality_increase/vector_size'
@@ -322,7 +322,7 @@ resolve_target() {
       FIGURES_DIR='figures/dimensionality_vector'
       DEFAULT_LABELS_JSON='{"baseline":"Dim=1 (Baseline)","dim_2":"Dim=2","dim_5":"Dim=5","dim_6":"Dim=6","dim_8":"Dim=8","dim_10":"Dim=10","dim_12":"Dim=12","dim_15":"Dim=15","dim_20":"Dim=20","dim_50":"Dim=50"}'
       DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","dim_2":"#824e05","dim_5":"#e74c3c","dim_6":"#e67e22","dim_8":"#f39c12","dim_10":"#f1c40f","dim_12":"#a2f10f","dim_15":"#2ecc71","dim_20":"#1d8d4b","dim_50":"#3498db"}'
-      DEFAULT_TIME="9:00:00"
+      DEFAULT_TIME="4:15:00"
       ;;
     *)
       return 1
@@ -337,7 +337,7 @@ submit_baseline() {
   local baseline_results_dir="$baseline_train_dir/results/baseline"
   mkdir -p "$baseline_results_dir"
 
-  local walltime="2:00:00"
+  local walltime="0:45:00"
   if [[ -n "$TIME_OVERRIDE" ]]; then
     walltime="$TIME_OVERRIDE"
   fi
