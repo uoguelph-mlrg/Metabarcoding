@@ -166,7 +166,7 @@ def main(best_ckpt_path: Optional[Path], late_ckpt_path: Optional[Path], out_dir
     cfg = Config(**{k: v for k, v in sample_cfg_ckpt["config"].items() if k in valid_keys})
 
     set_seed()
-    data, _, bin_index, sample_index, _ = load(cfg, save_data=False)
+    data, _, _, _, bin_index, sample_index, _, _ = load(cfg)
     input_dim = data["val"]["X"].shape[1]
 
     val_dataset  = MBDataset(data["val"],   bin_index, sample_index, loss_mode="sample")

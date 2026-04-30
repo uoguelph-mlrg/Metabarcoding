@@ -3,6 +3,7 @@ from typing import Tuple, Dict, Any, Literal, Optional, List
 import os
 import sys
 import pickle
+import shutil
 import tempfile
 import pandas as pd
 import numpy as np
@@ -153,15 +154,12 @@ def _load_or_compute_embeddings(
     bin_uris_ordered: List[str],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Load or compute DNA sequence embeddings for BINs.
+    Compute DNA sequence embeddings for BINs via BarcodeBERT.
 
-    Priority:
-        1. Load from config.embedding_path if the file exists.
-        2. Otherwise compute via BarcodeBERT using config.data_path and save to
-            config.embedding_path (if provided) so future runs skip inference.
+    Caching to disk is handled by the preprocessed_dir mechanism in load().
 
     Args:
-        config: Configuration object with embedding_path, data_path, and device settings.
+        config: Configuration object with data_path and device settings.
         bin_uris_ordered: List of bin URIs in the order they appear in taxonomy_df.
 
     Returns:
@@ -169,27 +167,10 @@ def _load_or_compute_embeddings(
         - embeddings: np.ndarray of shape [n_bins, emb_dim]
         - bins_with_embedding: np.ndarray of shape [n_bins] (bool) indicating which bins have valid embeddings
     """
-    embedding_path = config.embedding_path
     n_bins = len(bin_uris_ordered)
+    log.info(f"Running BarcodeBERT inference on {config.data_path}")
+    emb_dict = _compute_barcodebert_embeddings(config)
 
-    emb_dict: Dict[str, np.ndarray] = {}  # bin_uri -> np.ndarray
-
-    if embedding_path is not None and os.path.exists(embedding_path):
-        log.info(f"Loading precomputed embeddings from {embedding_path}")
-        emb_dict = np.load(embedding_path, allow_pickle=True).item()
-    else:
-        log.info(
-            f"Precomputed embeddings not found; running BarcodeBERT inference "
-            f"on {config.data_path}"
-        )
-        emb_dict = _compute_barcodebert_embeddings(config)
-        # Cache to disk for future runs
-        if embedding_path is not None:
-            os.makedirs(os.path.dirname(os.path.abspath(embedding_path)), exist_ok=True)
-            np.save(embedding_path, np.array(emb_dict, dtype=object), allow_pickle=True)
-            log.info(f"Saved computed embeddings to {embedding_path}")
-
-    # Determine embedding dimension from first available vector
     emb_dim = next(iter(emb_dict.values())).shape[0]
     embeddings = np.zeros((n_bins, emb_dim), dtype=np.float32)
     bins_with_embedding = np.zeros(n_bins, dtype=bool)
@@ -209,15 +190,115 @@ def _load_or_compute_embeddings(
     return embeddings, bins_with_embedding
 
 
+def _save_to_preprocessed_dir(
+    out_dir: str,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    taxonomy_df: pd.DataFrame,
+    embeddings_array: Optional[np.ndarray],
+    bins_with_embedding_arr: Optional[np.ndarray],
+    bin_index: Dict[Any, int],
+    sample_index: Dict[Any, int],
+    split_indices: Dict[str, np.ndarray],
+    state_path: str,
+) -> None:
+    """Save all preprocessed artifacts to out_dir and write a sentinel file last."""
+    os.makedirs(out_dir, exist_ok=True)
+    sentinel = os.path.join(out_dir, "_complete")
+    if os.path.exists(sentinel):
+        os.remove(sentinel)
+
+    for X, y, split in [(X_train, y_train, "train"), (X_val, y_val, "val"), (X_test, y_test, "test")]:
+        X.to_csv(os.path.join(out_dir, f"X_{split}.csv"))
+        pd.Series(y).to_csv(os.path.join(out_dir, f"y_{split}.csv"), index=False)
+    taxonomy_df.to_csv(os.path.join(out_dir, "bins_data.csv"), index=False)
+
+    emb = embeddings_array if embeddings_array is not None else np.array([], dtype=np.float32)
+    np.save(os.path.join(out_dir, "embeddings_array.npy"), emb)
+    bwe = bins_with_embedding_arr if bins_with_embedding_arr is not None else np.array([], dtype=bool)
+    np.save(os.path.join(out_dir, "bins_with_embedding_arr.npy"), bwe)
+
+    with open(os.path.join(out_dir, "bin_index.pkl"), "wb") as f:
+        pickle.dump(bin_index, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(os.path.join(out_dir, "sample_index.pkl"), "wb") as f:
+        pickle.dump(sample_index, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(os.path.join(out_dir, "split_indices.pkl"), "wb") as f:
+        pickle.dump(split_indices, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    shutil.copy2(state_path, os.path.join(out_dir, PREPROCESSING_STATE_FILENAME))
+    open(sentinel, "w").close()
+    log.info(f"Saved complete preprocessed cache to {out_dir}")
+
+
+def _load_from_preprocessed_dir(
+    cache_dir: str,
+) -> Tuple[
+    Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray],
+    Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str
+]:
+    """Load all preprocessing artifacts from a directory written by _save_to_preprocessed_dir."""
+    def _read_X(split: str) -> pd.DataFrame:
+        X = pd.read_csv(os.path.join(cache_dir, f"X_{split}.csv"))
+        return X.set_index(["sample_id", "bin_uri"])
+
+    def _read_y(split: str) -> pd.Series:
+        y_df = pd.read_csv(os.path.join(cache_dir, f"y_{split}.csv"))
+        return y_df.iloc[:, 0].astype(np.float32)
+
+    X_train = _read_X("train")
+    X_val   = _read_X("val")
+    X_test  = _read_X("test")
+    y_train = _read_y("train")
+    y_val   = _read_y("val")
+    y_test  = _read_y("test")
+
+    taxonomy_df = pd.read_csv(os.path.join(cache_dir, "bins_data.csv"))
+
+    emb_arr = np.load(os.path.join(cache_dir, "embeddings_array.npy"))
+    embeddings_array = emb_arr if emb_arr.size > 0 else None
+
+    bwe_arr = np.load(os.path.join(cache_dir, "bins_with_embedding_arr.npy"))
+    bins_with_embedding_arr = bwe_arr if bwe_arr.size > 0 else None
+
+    with open(os.path.join(cache_dir, "bin_index.pkl"), "rb") as f:
+        bin_index = pickle.load(f)
+    with open(os.path.join(cache_dir, "sample_index.pkl"), "rb") as f:
+        sample_index = pickle.load(f)
+    with open(os.path.join(cache_dir, "split_indices.pkl"), "rb") as f:
+        split_indices = pickle.load(f)
+
+    state_path = os.path.join(cache_dir, PREPROCESSING_STATE_FILENAME)
+
+    return (
+        {
+            "train": {"X": X_train, "y": y_train, "y_prob": y_train},
+            "val":   {"X": X_val,   "y": y_val,   "y_prob": y_val},
+            "test":  {"X": X_test,  "y": y_test,  "y_prob": y_test},
+        },
+        taxonomy_df,
+        embeddings_array,
+        bins_with_embedding_arr,
+        bin_index,
+        sample_index,
+        split_indices,
+        state_path,
+    )
+
+
 def load(
-    config: Config, 
-    save_data: bool = True,
+    config: Config,
+    save_data: bool = False,  # Deprecated — use preprocessed_dir instead
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
     read_count_preprocessing: Literal["original", "normalized", "logarithm"] = "original",
     preprocessing_state_path: Optional[str] = None,
     preprocessing_state_filename: str = PREPROCESSING_STATE_FILENAME,
+    preprocessed_dir: Optional[str] = None,
 ) -> Tuple[
-    Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray], 
+    Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray],
     Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str
 ]:
     """
@@ -225,15 +306,17 @@ def load(
 
     Args:
         config: Configuration object with train_frac, val_frac
-        save_data: Whether to save split CSVs to disk
-        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample 
+        save_data: Deprecated. Use preprocessed_dir instead.
+        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample
             indices for reproducible splits across different calls
         read_count_preprocessing: One of "original" (no preprocessing), "normalized" (normalize per
                                 sample), or "logarithm" (only apply log transform)
-        preprocessing_state_path: Optional path to preprocessing state file; used for replay mode 
-            when the file already exists. If missing, preprocessing is computed and the artifact is 
+        preprocessing_state_path: Optional path to preprocessing state file; used for replay mode
+            when the file already exists. If missing, preprocessing is computed and the artifact is
             written there.
         preprocessing_state_filename: Artifact filename used when writing default state
+        preprocessed_dir: If set, save all artifacts here on first run and fast-path load on
+            subsequent runs (skips CSV parsing and BarcodeBERT inference).
 
     Returns:
     Tuple containing:
@@ -244,8 +327,17 @@ def load(
         - bin_index: mapping bin_uri -> col index
         - sample_index: mapping sample_id -> row index
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
-        - preprocessing_state_path: path to the saved preprocessing state artifact 
+        - preprocessing_state_path: path to the saved preprocessing state artifact
     """
+    if save_data:
+        log.warning("load(): save_data=True is deprecated; use preprocessed_dir instead. Ignoring.")
+
+    if preprocessed_dir is not None:
+        sentinel = os.path.join(preprocessed_dir, "_complete")
+        if os.path.exists(sentinel):
+            log.info(f"load(): cache hit at {preprocessed_dir} — loading from disk, skipping preprocessing.")
+            return _load_from_preprocessed_dir(preprocessed_dir)
+
     replay_state: Optional[Dict[str, Any]] = None
     if preprocessing_state_path is not None and os.path.exists(preprocessing_state_path):
         replay_state = load_preprocessing_state(preprocessing_state_path)
@@ -527,7 +619,6 @@ def load(
                 for idx, uri in enumerate(taxonomy_df["bin_uri"])
             }
             state["embeddings_dict"] = embeddings_dict
-            state["embedding_path"] = config.embedding_path
             state["use_embedding"] = True
         save_preprocessing_state(resolved_state_path, state)
 
@@ -548,115 +639,99 @@ def load(
     log.info(f"  Train: {len(train_sample_idx)} samples ({100 * config.train_frac:.0f}%)")
     log.info(f"  Val: {len(val_sample_idx)} samples ({100 * config.val_frac:.0f}%)")
     log.info(f"  Test: {len(test_sample_idx)} samples ({100 * (1 - config.train_frac - config.val_frac):.0f}%)")
-    
-    # Save the data splits in the `data` folder
-    if save_data:
-        data_path_root = os.path.dirname(config.data_path)
-        # Create subdirectory for this preprocessing method
-        data_path = os.path.join(data_path_root, config.read_count_preprocessing)
-        os.makedirs(data_path, exist_ok=True)
 
-        for X, y, split in [(X_train,y_train,"train"), (X_val,y_val,"val"), (X_test,y_test,"test")]:
-            X.to_csv(f"{data_path}/X_{split}.csv")
-            pd.Series(y).to_csv(f"{data_path}/y_{split}.csv", index=False)
-        taxonomy_df.to_csv(f"{data_path}/bins_data.csv", index=False)
+    if preprocessed_dir is not None:
+        _save_to_preprocessed_dir(
+            preprocessed_dir,
+            X_train, y_train, X_val, y_val, X_test, y_test,
+            taxonomy_df, embeddings_array, bins_with_embedding_arr,
+            bin_index, sample_index, split_indices, resolved_state_path,
+        )
 
     result = (
         {
             "train": {"X": X_train, "y": y_train, "y_prob": y_train},
             "val": {"X": X_val, "y": y_val, "y_prob": y_val},
             "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-        }, 
-        taxonomy_df,                    # flat DataFrame: bin_uri + taxonomy only
-        embeddings_array,           # np.ndarray [n_bins, emb_dim] or None
-        bins_with_embedding_arr,    # np.ndarray [n_bins] bool or None
-        bin_index, 
-        sample_index, 
-        split_indices, 
-        resolved_state_path
+        },
+        taxonomy_df,
+        embeddings_array,
+        bins_with_embedding_arr,
+        bin_index,
+        sample_index,
+        split_indices,
+        resolved_state_path,
     )
 
     return result
 
 
 def load_processed(
-    data_dir: str
+    data_dir: str,
 ) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
     """
-    Load preprocessed splits saved by `load()` from a directory.
+    Load preprocessed splits from a directory.
 
-    Expected files in `data_dir`:
-    - X_train.csv, X_val.csv, X_test.csv (MultiIndex: sample_id, bin_uri)
-    - y_train.csv, y_val.csv, y_test.csv (single column, aligned to X_*.csv row order)
-    - bins_data.csv (must include bin_uri and taxonomy or embedding columns)
-
-    Returns the same objects as `load()`, except `split_indices` is empty
-    (since the original sample-index permutation is not recoverable from files alone).
+    If the directory contains a `_complete` sentinel (written by `load()` with
+    `preprocessed_dir` set), all artifacts including index pickles are loaded.
+    Otherwise falls back to legacy CSV-only loading.
     """
+    sentinel = os.path.join(data_dir, "_complete")
+    if os.path.exists(sentinel):
+        splits, taxonomy_df, _, _, bin_index, sample_index, split_indices, _ = _load_from_preprocessed_dir(data_dir)
+        return splits, taxonomy_df, bin_index, sample_index, split_indices
+
+    # Legacy CSV-only path.
     def _read_X(split: str) -> pd.DataFrame:
         path = os.path.join(data_dir, f"X_{split}.csv")
         X = pd.read_csv(path)
         if "sample_id" not in X.columns or "bin_uri" not in X.columns:
             raise ValueError(f"{path} must contain columns 'sample_id' and 'bin_uri'")
-        X = X.set_index(["sample_id", "bin_uri"])
-        return X
+        return X.set_index(["sample_id", "bin_uri"])
 
     def _read_y(split: str, n_rows: int) -> pd.Series:
         path = os.path.join(data_dir, f"y_{split}.csv")
         y_df = pd.read_csv(path)
-        if y_df.shape[1] == 1:
-            y = y_df.iloc[:, 0]
-        else:
-            # fallback: try a known column name
-            # Contract: if rel_abundance is absent, first column is treated as target.
-            y = y_df["rel_abundance"] if "rel_abundance" in y_df.columns else y_df.iloc[:, 0]
+        y = y_df["rel_abundance"] if "rel_abundance" in y_df.columns else y_df.iloc[:, 0]
         if len(y) != n_rows:
             raise ValueError(f"{path} has {len(y)} rows but X_{split}.csv has {n_rows}")
         return y.astype(np.float32)
 
     X_train = _read_X("train")
-    X_val = _read_X("val")
-    X_test = _read_X("test")
-
+    X_val   = _read_X("val")
+    X_test  = _read_X("test")
     y_train = _read_y("train", len(X_train))
-    y_val = _read_y("val", len(X_val))
-    y_test = _read_y("test", len(X_test))
+    y_val   = _read_y("val",   len(X_val))
+    y_test  = _read_y("test",  len(X_test))
 
     bins_path = os.path.join(data_dir, "bins_data.csv")
     taxonomy_df = pd.read_csv(bins_path)
     if "bin_uri" not in taxonomy_df.columns:
         raise ValueError(f"{bins_path} must contain 'bin_uri'")
 
-    # Build index mappings from the processed splits (ensures consistency)
-    unique_samples = pd.Index(
-        pd.concat([
-            X_train.reset_index()["sample_id"],
-            X_val.reset_index()["sample_id"],
-            X_test.reset_index()["sample_id"],
-        ]).unique()
-    )
+    unique_samples = pd.Index(pd.concat([
+        X_train.reset_index()["sample_id"],
+        X_val.reset_index()["sample_id"],
+        X_test.reset_index()["sample_id"],
+    ]).unique())
     sample_index = {s: i for i, s in enumerate(unique_samples)}
 
-    unique_bins = pd.Index(
-        pd.concat([
-            X_train.reset_index()["bin_uri"],
-            X_val.reset_index()["bin_uri"],
-            X_test.reset_index()["bin_uri"],
-        ]).unique()
-    )
+    unique_bins = pd.Index(pd.concat([
+        X_train.reset_index()["bin_uri"],
+        X_val.reset_index()["bin_uri"],
+        X_test.reset_index()["bin_uri"],
+    ]).unique())
     bin_index = {b: i for i, b in enumerate(unique_bins)}
 
-    # Reorder taxonomy_df to match bin_index where possible
     taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
     taxonomy_df = taxonomy_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
 
-    # No split_indices available when loading from disk
     split_indices: Dict[str, np.ndarray] = {"train": np.array([]), "val": np.array([]), "test": np.array([])}
 
     return {
         "train": {"X": X_train, "y": y_train, "y_prob": y_train},
-        "val": {"X": X_val, "y": y_val, "y_prob": y_val},
-        "test": {"X": X_test, "y": y_test, "y_prob": y_test},
+        "val":   {"X": X_val,   "y": y_val,   "y_prob": y_val},
+        "test":  {"X": X_test,  "y": y_test,  "y_prob": y_test},
     }, taxonomy_df, bin_index, sample_index, split_indices
 
 
@@ -683,32 +758,34 @@ if __name__ == "__main__":
     log.info("GENERATING DATASETS WITH DIFFERENT PREPROCESSING METHODS")
     log.info("="*70)
     
-    # First pass: generate the split indices
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # First pass: generate the split indices (no caching needed here)
     log.info("\nGenerating split indices...")
     _, _, _, _, _, _, split_indices, _ = load(
-        cfg, 
-        save_data=False,
-        read_count_preprocessing="original"
+        cfg,
+        read_count_preprocessing="original",
     )
-    
-    # Second pass: generate datasets using the same split indices
+
+    # Second pass: generate and cache each variant
     for method in preprocessing_methods:
         log.info(f"\n{'='*70}")
         log.info(f"Preprocessing method: {method.upper()}")
         log.info(f"{'='*70}")
-        
+
+        out_dir = os.path.join(script_dir, "data", method)
         _ = load(
             cfg,
-            save_data=True,
             fixed_split_indices=split_indices,
-            read_count_preprocessing=method
+            read_count_preprocessing=method,
+            preprocessed_dir=out_dir,
         )
-        
-        log.info(f"✓ Saved {method} dataset to data/{method}/")
-    
+
+        log.info(f"✓ Saved {method} dataset to {out_dir}")
+
     log.info("\n" + "="*70)
     log.info("DATASET GENERATION COMPLETE")
     log.info("="*70)
     log.info("\nGenerated datasets:")
     for method in preprocessing_methods:
-        log.info(f"  - data/{method}/")
+        log.info(f"  - {os.path.join(script_dir, 'data', method)}/")

@@ -180,7 +180,7 @@ def main(ckpt_dir: Path, out_dir: Path, data_dir: Optional[Path] = None) -> None
     # ------------------------------------------------------------------
     print("\nLoading validation data (no neighbor graph, should be fast)...")
     set_seed()
-    data, _, bin_index, sample_index, _ = load(cfg_ref, save_data=False)
+    data, _, _, _, bin_index, sample_index, _, _ = load(cfg_ref)
 
     input_dim = data["val"]["X"].shape[1]
     print(f"  Val set: {len(data['val']['X'])} observations, {input_dim} features")

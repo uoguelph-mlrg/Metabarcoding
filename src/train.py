@@ -75,7 +75,6 @@ class Trainer:
 
         data, taxonomy_df, embeddings_array, bins_with_embedding_arr, bin_index, sample_index, split_indices, preprocessing_state_path = load(
             self.cfg,
-            save_data=False,
             fixed_split_indices=fixed_split_indices,
             preprocessing_state_path=self.preprocessing_state_path,
         )

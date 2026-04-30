@@ -378,8 +378,7 @@ class NeighbourGraph:
 
         if len(emb_indices) == 0:
             raise ValueError(
-                "No bins have embeddings. Check that bin_uri values in cfg.embedding_path "
-                "match those in the training data."
+                "No bins have embeddings. Ensure BarcodeBERT inference ran correctly and embeddings were loaded."
             )
 
         # Optionally L2-normalise for cosine distance
@@ -435,8 +434,7 @@ class NeighbourGraph:
 
         if len(emb_indices) == 0:
             raise ValueError(
-                "No bins have embeddings. Check that bin_uri values in cfg.embedding_path "
-                "match those in the training data."
+                "No bins have embeddings. Ensure BarcodeBERT inference ran correctly and embeddings were loaded."
             )
 
         # Optionally L2-normalise for cosine distance

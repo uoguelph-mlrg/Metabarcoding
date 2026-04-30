@@ -11,6 +11,7 @@ class Config:
     # Run configuration
     data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
     results_dir: str = os.path.join(PROJECT_ROOT, "results")  # Directory where run artifacts are saved
+    preprocessed_dir: Optional[str] = None  # If set, save all preprocessing artifacts here on first run and load from there on subsequent runs, skipping CSV parsing and BarcodeBERT inference
     checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
 
@@ -42,7 +43,6 @@ class Config:
     interpolation_method: Literal["nw", "llr"] = "nw"  # interpolation method for latent solver: "nw" for Nadaraya-Watson, "llr" for locally linear regression
 
     # DNA embedding settings (used when use_embedding=True)
-    embedding_path: Optional[str] = None #os.path.join(PROJECT_ROOT, "data", "embeddings_ecuador.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
     # MLP - architecture & optimization settings
