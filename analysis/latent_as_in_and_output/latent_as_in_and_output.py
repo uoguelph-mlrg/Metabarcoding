@@ -52,12 +52,11 @@ def load_variant_trainer(local_dir: str, src_path: str):
 	importlib.invalidate_caches()
 
 	# Clear cached modules that could shadow local config
-	for mod in ["config", "train", "model", "latent_solver"]:
+	for mod in ["config", "train", "model"]:
 		if mod in sys.modules:
 			del sys.modules[mod]
 
 	local_model = importlib.import_module("model")
-	importlib.import_module("latent_solver")
 	local_train = importlib.import_module("train")
 	local_config = importlib.import_module("config")
 
@@ -156,9 +155,9 @@ if __name__ == "__main__":
 
 	use_wandb = WANDB_AVAILABLE and not args.no_wandb
 	run_group = make_run_group("latent_as_in_and_output_comparison")
- 
+
 	# Create output dir before training so Trainer artifacts land inside it
-    output_dir = make_output_dir(__file__, args.output_dir)
+	output_dir = make_output_dir(__file__, args.output_dir)
 
 	# Run comparison
 	results = run_comparison(use_wandb=use_wandb, run_group=run_group, output_dir=output_dir)

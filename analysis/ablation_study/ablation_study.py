@@ -382,7 +382,7 @@ class MLPOnlyTrainer:
             ).to(self.device)
         
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+            self.model.parameters(), lr=cfg.mlp_lr, weight_decay=cfg.weight_decay
         )
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='min', factor=0.5, patience=3
@@ -553,12 +553,6 @@ class MLPOnlyTrainer:
             if val_loss < best_val - 1e-4:
                 best_val = val_loss
                 self.save_model()
-                no_improve = 0
-            else:
-                no_improve += 1
-                if self.cfg.patience and no_improve >= self.cfg.patience:
-                    log.info(f"Early stopping at epoch {epoch}")
-                    break
         
         # Final evaluation
         predictions, targets, sample_labels, bin_labels = self.get_predictions(self.test_loader)
