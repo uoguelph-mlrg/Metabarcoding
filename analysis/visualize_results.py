@@ -79,6 +79,22 @@ DEFAULT_PALETTE = np.concatenate([["#95a5a6"], sns.color_palette("tab10").as_hex
     sns.color_palette("pastel").as_hex(), sns.color_palette("dark").as_hex()
 ]).flatten()])
 
+def _sorted_models(results: Dict[str, Any], labels: Optional[Dict[str, str]] = None) -> List[str]:
+    """Return model keys in display order.
+
+    Priority:
+    1. If *labels* is provided, follow its insertion order (keys not in labels
+       fall back to baseline-first then alphabetical and are appended at the end).
+    2. Otherwise: "baseline" first, then the remaining keys in alphabetical order.
+    """
+    keys = list(results.keys())
+    if labels:
+        ordered = [k for k in labels if k in results]
+        remainder = sorted([k for k in keys if k not in labels], key=lambda k: (k != "baseline", k.lower()))
+        return ordered + remainder
+    return sorted(keys, key=lambda k: (k != "baseline", k.lower()))
+
+
 def _default_colors(labels: Dict[str, str]) -> Dict[str, str]:
     """Generate a default color mapping for *n* models, using *labels* if available."""
     keys = list(labels.keys())
@@ -435,7 +451,7 @@ def plot_metrics_comparison(
 ) -> None:
     """Bar plots of key metrics, one bar per model, with 95 % bootstrap CIs."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
 
     ext = {
         model: compute_extended_metrics(
@@ -592,7 +608,7 @@ def plot_scatter_actual_vs_predicted(
 ) -> None:
     """Scatter plots (actual vs predicted) with density colouring, one panel per model."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     n = len(models)
     n_rows, n_cols = _scatter_grid(n)
 
@@ -665,7 +681,7 @@ def plot_scatter_zoomed(
 ) -> None:
     """Scatter plots zoomed on ground-truth values below *max_actual*."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     n = len(models)
     n_rows, n_cols = _scatter_grid(n)
 
@@ -748,7 +764,7 @@ def plot_loglog_scatter_actual_vs_predicted(
 ) -> None:
     """Log-log scatter plots of actual vs predicted."""
     set_style()
-    keys = list(results.keys())
+    keys = _sorted_models(results, labels)
     n = len(keys)
     n_rows, n_cols = _scatter_grid(n)
 
@@ -896,7 +912,7 @@ def plot_mae_per_range(
 ) -> None:
     """Grouped bar chart of MAE per abundance range with 95 % CIs."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     bins = [
         ("zero", "Zero"),
         (0, 0.001, ">0% to 0.1%"),
@@ -951,7 +967,7 @@ def plot_mae_per_range_zoomed(
 ) -> None:
     """Grouped bar chart of MAE over fine-grained bins in the <1 % range."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     bins = [
         ("zero", "Zero"),
         (0, 0.0011, "0-0.11%"),
@@ -1006,7 +1022,7 @@ def plot_RAE_per_range(
 ) -> None:
     """Grouped bar chart of Relative Absolute Error per abundance range (non-zero only)."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     bins = [
         (0, 0.001, ">0% to 0.1%"),
         (0.001, 0.01, "0.1-1%"),
@@ -1056,7 +1072,7 @@ def plot_residual_distribution(
 ) -> None:
     """Overlapping residual histograms + KDE, one series per model."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     fig, ax = plt.subplots(figsize=(9, 5))
 
     all_res: List[float] = []
@@ -1118,7 +1134,7 @@ def plot_zero_vs_nonzero_comparison(
 ) -> None:
     """Paired bars showing MAE on zero vs non-zero ground-truth values."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     fig, ax = plt.subplots(figsize=(max(8, 2 * len(models) + 2), 5))
     x = np.arange(len(models))
     width = 0.35
@@ -1193,7 +1209,7 @@ def plot_training_progress_comparison(
             [l for *_, l in model_results.get("val_losses", [])],
         )
 
-    models = [model for model in results if _has_training_data(results[model])]
+    models = [model for model in _sorted_models(results, labels) if _has_training_data(results[model])]
     if not models:
         log.info("  (Skipping training progress plot — no training data found.)")
         return
@@ -1259,6 +1275,7 @@ def plot_training_progress_comparison(
 def plot_latent_diagnostics(
     results: Dict[str, Any],
     output_dir: str,
+    labels: Optional[Dict[str, str]] = None,
 ) -> None:
     """Visualise whether the MLP actually uses the latent embedding.
 
@@ -1269,7 +1286,8 @@ def plot_latent_diagnostics(
     4. Delta bars (validation loss minus ablated loss).
     """
     model_keys = [
-        key for key in results if isinstance(results.get(key), dict) and results[key].get("latent_diagnostics")
+        key for key in _sorted_models(results, labels)
+        if isinstance(results.get(key), dict) and results[key].get("latent_diagnostics")
     ]
     if not model_keys:
         log.info("  (Skipping latent diagnostics — no model provides latent_diagnostics.)")
@@ -1496,7 +1514,7 @@ def plot_latent_comparison(
     - Reduces histogram bins for faster rendering.
     - Skips KDE for very large datasets (>100k points).
     """
-    latent_models = [m for m in results if isinstance(results[m], dict) and results[m].get("latent_vector") is not None]
+    latent_models = [m for m in _sorted_models(results, labels) if isinstance(results[m], dict) and results[m].get("latent_vector") is not None]
     if len(latent_models) < 2:
         log.info("  (Skipping latent comparison — fewer than two models provide latent vectors.)")
         return
@@ -1506,10 +1524,7 @@ def plot_latent_comparison(
         from itertools import combinations
         pairs = list(combinations(latent_models, 2))
     else:
-        if "baseline" in latent_models:
-            anchor = "baseline"
-        else:
-            anchor = latent_models[0]
+        anchor = latent_models[0]
         pairs = [(anchor, m) for m in latent_models if m != anchor]
 
     def _render_row(ax_row, m1: str, m2: str, row_label: bool) -> None:
@@ -1700,7 +1715,7 @@ def plot_summary_table(
 ) -> pd.DataFrame:
     """Render a summary metrics table as a PNG (with best values highlighted) and a CSV."""
     set_style()
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     ext = {
         model: compute_extended_metrics(
                 results[model]["targets"], results[model]["predictions"],
@@ -1840,7 +1855,7 @@ def create_all_visualizations(
     plot_training_progress_comparison(results, output_dir, colors, labels)
 
     log.info("11. Latent importance diagnostics (if available)...")
-    plot_latent_diagnostics(results, output_dir)
+    plot_latent_diagnostics(results, output_dir, labels)
 
     log.info("12. Latent vector comparison (if available)...")
     plot_latent_comparison(results, output_dir, colors, labels)
@@ -1864,7 +1879,7 @@ def print_comparison(
     title: str = "MODEL COMPARISON RESULTS",
 ) -> None:
     """Print a comparison table and win summary to the console."""
-    models = list(results.keys())
+    models = _sorted_models(results, labels)
     ext = {
         model: compute_extended_metrics(
             results[model]["targets"], results[model]["predictions"],
