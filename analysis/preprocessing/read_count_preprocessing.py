@@ -43,6 +43,7 @@ def run_comparison(
     methods: List[str],
     use_wandb: bool = True,
     run_group: str | None = None,
+    output_dir: str | None = None,
 ) -> Dict[str, Any]:
     """
     Train selected preprocessing variants.
@@ -84,7 +85,9 @@ def run_comparison(
             tags=["preprocessing", method, "variant_only"],
             config={**cfg.__dict__, "variant": method},
         ):
-            trainer = Trainer(cfg, data_dir=data_dir)
+            cfg = Config(**cfg.__dict__)  # Create a copy of the config
+            cfg.data_path = data_dir  # Override data directory for this variant
+            trainer = Trainer(cfg, model_name=method, results_dir=output_dir)
             method_results = trainer.run(use_wandb=use_wandb)
 
         results[method] = method_results
@@ -138,16 +141,19 @@ if __name__ == "__main__":
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     run_group = make_run_group("preprocessing_comparison")
     
+    # Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
+
     # Run comparison
     results = run_comparison(
         cfg,
         methods=args.methods,
         use_wandb=use_wandb,
         run_group=run_group,
+        output_dir=output_dir,
     )
     
     # Save results
-    output_dir = make_output_dir(__file__, args.output_dir)
     for variant, variant_results in results.items():
         save_variant_result(output_dir, "preprocessing", variant, variant_results)
     

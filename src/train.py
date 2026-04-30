@@ -45,6 +45,7 @@ class Trainer:
         run_id: Optional[str] = None,
         resume: bool = False,
         fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
+        results_dir: Optional[str] = None,
     ) -> None:
         self.cfg = cfg
         self.model_name = model_name
@@ -60,7 +61,8 @@ class Trainer:
         self.train_losses: List[Tuple[int, float]] = []
         self.val_losses: List[Tuple[int, float]] = []
 
-        self.base_artifact_dir = os.path.abspath(os.path.join(self.cfg.results_dir, self.model_name))
+        effective_results_dir = os.path.abspath(results_dir) if results_dir is not None else self.cfg.results_dir
+        self.base_artifact_dir = os.path.abspath(os.path.join(effective_results_dir, self.model_name))
         self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.preprocessing_state_path = self._checkpoint_path(PREPROCESSING_STATE_FILENAME)

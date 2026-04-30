@@ -72,6 +72,7 @@ def load_variant_trainer(local_dir: str, src_path: str):
 def run_comparison(
 	use_wandb: bool = True,
 	run_group: str | None = None,
+	output_dir: str | None = None,
 ) -> Dict[str, Any]:
 	"""Train requested latent variants and return result dict keyed by variant name."""
 	results: Dict[str, Any] = {}
@@ -128,7 +129,7 @@ def run_comparison(
 				"embed_dim": int(embed_dim),
 			},
 		):
-			local_trainer = LocalTrainer(local_cfg, model_name=variant_name)
+			local_trainer = LocalTrainer(local_cfg, model_name=variant_name, results_dir=output_dir)
 			local_results = local_trainer.run(use_wandb=use_wandb)
 			results[variant_name] = local_results
 
@@ -155,12 +156,14 @@ if __name__ == "__main__":
 
 	use_wandb = WANDB_AVAILABLE and not args.no_wandb
 	run_group = make_run_group("latent_as_in_and_output_comparison")
+ 
+	# Create output dir before training so Trainer artifacts land inside it
+    output_dir = make_output_dir(__file__, args.output_dir)
 
 	# Run comparison
-	results = run_comparison(use_wandb=use_wandb, run_group=run_group)
+	results = run_comparison(use_wandb=use_wandb, run_group=run_group, output_dir=output_dir)
 
 	# Save one pickle per variant
-	output_dir = make_output_dir(__file__, args.output_dir)
 	analysis_name = "latent_as_in_and_output"
 	for variant_name, variant_result in results.items():
 		results_path = save_variant_result(output_dir, analysis_name, variant_name, variant_result)
