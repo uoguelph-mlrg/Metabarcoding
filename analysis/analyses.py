@@ -112,10 +112,10 @@ _reg(Analysis(
     variants=[
         Variant(
             name="logistic",
-            config={"loss_type": "logistic"},
+            config={"loss_type": "logistic", "latent_present_only": True},
             label="Logistic (BCE)",
             color="#9b59b6",
-            time="2:00:00",
+            time="2:30:00",
         ),
     ],
     baseline_label="Cross-Entropy (CE)",
@@ -226,8 +226,8 @@ _reg(Analysis(
 
 _optimal_K_default_variants = [
     Variant(name="K_5",   config={"K": 5},   label="K=5",   color="#5c2f00", time="0:45:00"),
-    Variant(name="K_100", config={"K": 100}, label="K=100", color="#e89f2e", time="0:45:00"),
-    Variant(name="K_500", config={"K": 500}, label="K=500", color="#f5c842", time="0:45:00"),
+    Variant(name="K_100", config={"K": 100}, label="K=100", color="#e89f2e", time="1:30:00"),
+    Variant(name="K_500", config={"K": 500}, label="K=500", color="#f5c842", time="3:00:00"),
 ]
 
 
@@ -263,16 +263,16 @@ _reg(Analysis(
 # ---------------------------------------------------------------------------
 
 _dim_vector_default_variants = [
-    Variant(name="dim_1",  config={"embed_dim": 1},  label="Dim=1",  color="#95a5a6", time="0:25:00"),
-    Variant(name="dim_2",  config={"embed_dim": 2},  label="Dim=2",  color="#824e05", time="0:25:00"),
-    Variant(name="dim_5",  config={"embed_dim": 5},  label="Dim=5",  color="#e74c3c", time="0:25:00"),
-    Variant(name="dim_6",  config={"embed_dim": 6},  label="Dim=6",  color="#e67e22", time="0:25:00"),
-    Variant(name="dim_8",  config={"embed_dim": 8},  label="Dim=8",  color="#f39c12", time="0:25:00"),
+    Variant(name="dim_1",  config={"embed_dim": 1},  label="Dim=1",  color="#95a5a6", time="0:45:00"),
+    Variant(name="dim_2",  config={"embed_dim": 2},  label="Dim=2",  color="#824e05", time="0:45:00"),
+    Variant(name="dim_5",  config={"embed_dim": 5},  label="Dim=5",  color="#e74c3c", time="0:45:00"),
+    Variant(name="dim_6",  config={"embed_dim": 6},  label="Dim=6",  color="#e67e22", time="0:45:00"),
+    Variant(name="dim_8",  config={"embed_dim": 8},  label="Dim=8",  color="#f39c12", time="0:45:00"),
     # dim_10 omitted: it is identical to the baseline config (embed_dim=10)
-    Variant(name="dim_12", config={"embed_dim": 12}, label="Dim=12", color="#a2f10f", time="0:25:00"),
-    Variant(name="dim_15", config={"embed_dim": 15}, label="Dim=15", color="#2ecc71", time="0:25:00"),
-    Variant(name="dim_20", config={"embed_dim": 20}, label="Dim=20", color="#1d8d4b", time="0:25:00"),
-    Variant(name="dim_50", config={"embed_dim": 50}, label="Dim=50", color="#3498db", time="0:25:00"),
+    Variant(name="dim_12", config={"embed_dim": 12}, label="Dim=12", color="#a2f10f", time="0:45:00"),
+    Variant(name="dim_15", config={"embed_dim": 15}, label="Dim=15", color="#2ecc71", time="0:45:00"),
+    Variant(name="dim_20", config={"embed_dim": 20}, label="Dim=20", color="#1d8d4b", time="0:45:00"),
+    Variant(name="dim_50", config={"embed_dim": 50}, label="Dim=50", color="#3498db", time="0:45:00"),
 ]
 
 
@@ -292,7 +292,7 @@ def _dim_vector_make_variants(args) -> List[Dict[str, Any]]:
 _reg(Analysis(
     name="dimensionality_vector",
     variants=_dim_vector_default_variants,
-    baseline_label="Dim=10 (default)",
+    baseline_label="Dim=10",
     baseline_color="#f1c40f",
     add_cli_args=_dim_vector_add_cli_args,
     make_variants=_dim_vector_make_variants,
@@ -306,12 +306,12 @@ _reg(Analysis(
 # ---------------------------------------------------------------------------
 
 _dim_gating_default_variants = [
-    Variant(name="exp",         config={"embed_dim": 10, "gating_fn": "exp"},         label="Exponential",        color="#e74c3c", time="0:35:00"),
-    Variant(name="scaled_exp",  config={"embed_dim": 10, "gating_fn": "scaled_exp"},  label="Scaled Exponential", color="#e67e22", time="0:35:00"),
-    Variant(name="additive",    config={"embed_dim": 10, "gating_fn": "additive"},    label="Additive (1+h)",     color="#f39c12", time="0:35:00"),
-    Variant(name="softplus",    config={"embed_dim": 10, "gating_fn": "softplus"},    label="Softplus",           color="#2ecc71", time="0:35:00"),
-    Variant(name="tanh",        config={"embed_dim": 10, "gating_fn": "tanh"},        label="Tanh",               color="#3498db", time="0:35:00"),
-    Variant(name="dot_product", config={"embed_dim": 10, "gating_fn": "dot_product"}, label="Dot Product",        color="#1abc9c", time="0:35:00"),
+    Variant(name="exp",         config={"embed_dim": 10, "gating_fn": "exp"},         label="Exponential",        color="#e74c3c", time="0:45:00"),
+    Variant(name="scaled_exp",  config={"embed_dim": 10, "gating_fn": "scaled_exp"},  label="Scaled Exponential", color="#e67e22", time="0:45:00"),
+    Variant(name="additive",    config={"embed_dim": 10, "gating_fn": "additive"},    label="Additive (1+h)",     color="#f39c12", time="0:45:00"),
+    Variant(name="softplus",    config={"embed_dim": 10, "gating_fn": "softplus"},    label="Softplus",           color="#2ecc71", time="0:45:00"),
+    Variant(name="tanh",        config={"embed_dim": 10, "gating_fn": "tanh"},        label="Tanh",               color="#3498db", time="0:45:00"),
+    Variant(name="dot_product", config={"embed_dim": 10, "gating_fn": "dot_product"}, label="Dot Product",        color="#1abc9c", time="0:45:00"),
     # sigmoid omitted: it is identical to the baseline config (gating_fn=sigmoid)
 ]
 
@@ -336,7 +336,7 @@ def _dim_gating_make_variants(args) -> List[Dict[str, Any]]:
 _reg(Analysis(
     name="dimensionality_gating",
     variants=_dim_gating_default_variants,
-    baseline_label="Sigmoid (default)",
+    baseline_label="Sigmoid",
     baseline_color="#9b59b6",
     add_cli_args=_dim_gating_add_cli_args,
     make_variants=_dim_gating_make_variants,
@@ -353,7 +353,7 @@ _loc_emb_default_variants = [
     Variant(name="satclip",    config={"location_embedder": "satclip",    "use_taxonomy": True, "use_embedding": False}, label="SatCLIP (256D)",   color="#e74c3c", time="0:45:00"),
     Variant(name="range",      config={"location_embedder": "range",      "use_taxonomy": True, "use_embedding": False}, label="RANGE (1280D)",    color="#3498db", time="0:45:00"),
     Variant(name="geoclip",    config={"location_embedder": "geoclip",    "use_taxonomy": True, "use_embedding": False}, label="GeoCLIP (512D)",   color="#2ecc71", time="0:45:00"),
-    Variant(name="alphaearth", config={"location_embedder": "alphaearth", "use_taxonomy": True, "use_embedding": False}, label="AlphaEarth (64D)", color="#f39c12", time="1:30:00"),
+    Variant(name="alphaearth", config={"location_embedder": "alphaearth", "use_taxonomy": True, "use_embedding": False}, label="AlphaEarth (64D)", color="#f39c12", time="0:45:00"),
 ]
 
 
@@ -408,14 +408,14 @@ _reg(Analysis(
             config={"latent_present_only": True},
             label="Present BINs only",
             color="#e74c3c",
-            time="1:00:00",
+            time="0:45:00",
         ),
         Variant(
             name="all_bins",
             config={"latent_present_only": False},
             label="All BINs",
             color="#3498db",
-            time="1:00:00",
+            time="0:45:00",
         ),
     ],
     baseline_label="MLP + Latent (Baseline)",
@@ -437,14 +437,14 @@ _reg(Analysis(
             config={"preprocessed_dir": os.path.join(_PREPROCESSING_DATA, "normalized")},
             label="Normalized",
             color="#1f77b4",
-            time="1:00:00",
+            time="0:45:00",
         ),
         Variant(
             name="original",
             config={"preprocessed_dir": os.path.join(_PREPROCESSING_DATA, "original")},
             label="Raw counts",
             color="#2ca02c",
-            time="1:00:00",
+            time="0:45:00",
         ),
     ],
     baseline_label="Logarithm",
@@ -464,14 +464,14 @@ _reg(Analysis(
             config={},
             label="MLP (no taxonomy)",
             color="#1f77b4",
-            time="1:30:00",
+            time="0:25:00",
         ),
         Variant(
             name="mlp_with_taxonomy",
             config={},
             label="MLP (with taxonomy)",
             color="#2ca02c",
-            time="1:30:00",
+            time="0:25:00",
         ),
     ],
     baseline_label="MLP + Latent",
@@ -492,17 +492,17 @@ _reg(Analysis(
             config={"latent_input_dim": 5, "embed_dim": 5},
             label="Latent In+Out (dim=5)",
             color="#e74c3c",
-            time="1:30:00",
+            time="0:45:00",
         ),
         Variant(
             name="input_only_dim_10",
             config={"latent_input_dim": 10, "embed_dim": 0},
             label="Latent Input Only (dim=10)",
             color="#3498db",
-            time="1:30:00",
+            time="0:45:00",
         ),
     ],
-    baseline_label="Baseline",
+    baseline_label="Latent + MLP (Baseline)",
     baseline_color="#95a5a6",
     latent_concat_keys=["both_dim_5"],
     run_script="latent_as_in_and_output/latent_as_in_and_output.py",

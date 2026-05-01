@@ -255,7 +255,7 @@ for v in d["variants"]:
 ')
 
   # Submit visualization job (depends on all training jobs)
-  local viz_walltime="0:20:00"
+  local viz_walltime="0:05:00"
   local viz_job_file="$JOB_DIR/${analysis_key}_viz_$(date +%Y%m%d_%H%M%S).sbatch"
 
   {
