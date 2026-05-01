@@ -36,8 +36,11 @@ warnings.filterwarnings("ignore")
 def _flat_split(data: Dict[str, Any], split: str) -> tuple:
     """Return (X, y_series, sample_ids, bin_uris) for a given split."""
     X = data[split]["X"]                   # DataFrame indexed by (sample_id, bin_uri)
-    y = data[split]["y_prob"]              # Series of rel_abundance, same index
+    y = data[split]["y_prob"]              # Series of rel_abundance, same MultiIndex
     idx = X.index.to_frame(index=False)   # columns: sample_id, bin_uri
+    # Reset to RangeIndex so boolean masks from y align correctly with X in all models
+    X = X.reset_index(drop=True)
+    y = y.reset_index(drop=True)
     return X, y, idx["sample_id"].to_numpy(), idx["bin_uri"].to_numpy()
 
 

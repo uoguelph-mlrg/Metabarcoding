@@ -291,7 +291,6 @@ def _load_from_preprocessed_dir(
 
 def load(
     config: Config,
-    save_data: bool = False,  # Deprecated — use preprocessed_dir instead
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
     read_count_preprocessing: Literal["original", "normalized", "logarithm"] = "original",
     preprocessing_state_path: Optional[str] = None,
@@ -306,7 +305,6 @@ def load(
 
     Args:
         config: Configuration object with train_frac, val_frac
-        save_data: Deprecated. Use preprocessed_dir instead.
         fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample
             indices for reproducible splits across different calls
         read_count_preprocessing: One of "original" (no preprocessing), "normalized" (normalize per
@@ -329,9 +327,6 @@ def load(
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
         - preprocessing_state_path: path to the saved preprocessing state artifact
     """
-    if save_data:
-        log.warning("load(): save_data=True is deprecated; use preprocessed_dir instead. Ignoring.")
-
     if preprocessed_dir is not None:
         sentinel = os.path.join(preprocessed_dir, "_complete")
         if os.path.exists(sentinel):
@@ -406,13 +401,6 @@ def load(
     else:
         df["collection_day"] = 0
 
-    # Build index mappings
-    unique_samples = df["sample_id"].unique()
-    n_samples = len(unique_samples)
-    sample_index = {s: i for i, s in enumerate(unique_samples)}
-    unique_bins = df["bin_uri"].unique()
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
-
     # Normalize + log-transform occurences to get target y
     sample_totals = df.groupby("sample_id")["occurrences"].transform("sum")
     # Also store actual proportions for cross-entropy loss
@@ -441,7 +429,11 @@ def load(
     else:
         raise ValueError(f"Unknown read_count_preprocessing: {read_count_preprocessing}. "
                         f"Must be one of: 'original', 'normalized', 'logarithm'")
-    # Log a warning if any expected features are missing
+
+    # Build sample index mappings before splitting so split sizes are computed correctly.
+    unique_samples = df["sample_id"].unique()
+    n_samples = len(unique_samples)
+    sample_index = {s: i for i, s in enumerate(unique_samples)}
     
     ################################################################################################
     # Train/val/test split
@@ -488,19 +480,103 @@ def load(
         train_sample_idx = sample_indices[:n_train]
         val_sample_idx = sample_indices[n_train:n_train + n_val]
         test_sample_idx = sample_indices[n_train + n_val:]
-    
+
+    unique_bins = df["bin_uri"].unique()
+    bin_index = {b: i for i, b in enumerate(unique_bins)}
+
     split_indices = {
         "train": train_sample_idx,
         "val": val_sample_idx,
         "test": test_sample_idx,
     }
-    
+
     missing_features = [c for c in OBSERVATION_FEATURES if c not in df.columns]
     if missing_features:
         log.warning(f"Missing features in dataset: {', '.join(missing_features)}.")
     missing_features = [c for c in TAXONOMY_FEATURES if c not in df.columns]
     if config.use_taxonomy and missing_features:
         log.warning(f"Missing taxonomy features in dataset: {', '.join(missing_features)}.")
+
+    ################################################################################################
+    # Location embedding (optional)
+    ################################################################################################
+    location_embedding_cols: List[str] = []
+    if replay_state is None and getattr(config, "location_embedder", None) is not None:
+        from embed_location import build_location_embedder, add_location_embeddings, EmbedderSpec
+        _emb_model = config.location_embedder
+        _cache_path: Optional[str] = None
+        if getattr(config, "preprocessed_dir", None) is not None:
+            _cache_path = os.path.join(
+                os.path.abspath(config.preprocessed_dir),
+                f"loc_emb_{_emb_model}.npy",
+            )
+            _cache_coords_path = _cache_path.replace(".npy", "_coords.npy")
+
+        if _cache_path is not None and os.path.exists(_cache_path) and os.path.exists(_cache_coords_path):
+            cached_embs = np.load(_cache_path)
+            cached_coords = np.load(_cache_coords_path)
+            log.info("Loaded location embeddings from cache: %s", _cache_path)
+            # Re-join cached embeddings to df rows by matching lat/lon
+            n_emb_dims = cached_embs.shape[1]
+            location_embedding_cols = [f"loc_emb_{i:03d}" for i in range(n_emb_dims)]
+            coord_to_idx = {tuple(row): i for i, row in enumerate(cached_coords)}
+            lat = df["latitude"].to_numpy()
+            lon = df["longitude"].to_numpy()
+            row_embs = np.array([
+                cached_embs[coord_to_idx.get((lat[i], lon[i]), -1)]
+                if (lat[i], lon[i]) in coord_to_idx else np.zeros(n_emb_dims, dtype=np.float32)
+                for i in range(len(df))
+            ], dtype=np.float32)
+            for j, col in enumerate(location_embedding_cols):
+                df[col] = row_embs[:, j]
+        else:
+            spec = EmbedderSpec(
+                model_name=_emb_model,
+                device=config.device,
+                satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
+                range_db_path=getattr(config, "range_db_path", None),
+            )
+            embedder = build_location_embedder(spec)
+            df, location_embedding_cols = add_location_embeddings(
+                df, embedder, lat_col="latitude", lon_col="longitude"
+            )
+            log.info("Computed location embeddings via %s (%d dims)", _emb_model, len(location_embedding_cols))
+            if _cache_path is not None:
+                unique_coords = df[["latitude", "longitude"]].drop_duplicates().to_numpy(dtype=np.float64)
+                coord_to_idx = {tuple(row): i for i, row in enumerate(unique_coords)}
+                n_emb_dims = len(location_embedding_cols)
+                uniq_embs = np.zeros((len(unique_coords), n_emb_dims), dtype=np.float32)
+                for j, col in enumerate(location_embedding_cols):
+                    for k, coord in enumerate(unique_coords):
+                        rows_with_coord = (df["latitude"] == coord[0]) & (df["longitude"] == coord[1])
+                        uniq_embs[k, j] = df.loc[rows_with_coord, col].iloc[0]
+                os.makedirs(os.path.dirname(_cache_path), exist_ok=True)
+                np.save(_cache_path, uniq_embs)
+                np.save(_cache_coords_path, unique_coords)
+                log.info("Saved location embedding cache to %s", _cache_path)
+
+    # Build feature list: when using location embedder, replace raw GPS with embedding cols
+    LOCATION_RAW_FEATURES = ["latitude", "longitude"]
+    base_feature_list = list(OBSERVATION_FEATURES)
+    if location_embedding_cols:
+        base_feature_list = [f for f in OBSERVATION_FEATURES if f not in LOCATION_RAW_FEATURES]
+        base_feature_list.extend(location_embedding_cols)
+        if getattr(config, "keep_raw_gps_features", False):
+            base_feature_list.extend(LOCATION_RAW_FEATURES)
+    elif replay_state is not None and getattr(config, "location_embedder", None) is not None:
+        # Replay with location embedder: re-run embedding to recreate columns, then let
+        # feature_cols_present from state take over (which already includes loc_emb_* cols).
+        from embed_location import build_location_embedder, add_location_embeddings, EmbedderSpec
+        spec = EmbedderSpec(
+            model_name=config.location_embedder,
+            device=config.device,
+            satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
+            range_db_path=getattr(config, "range_db_path", None),
+        )
+        embedder = build_location_embedder(spec)
+        df, location_embedding_cols = add_location_embeddings(
+            df, embedder, lat_col="latitude", lon_col="longitude"
+        )
 
     # Build df_long with required columns + features
     base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
@@ -515,7 +591,7 @@ def load(
                 + ", ".join(replay_missing)
             )
     else:
-        feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
+        feature_cols_present = [c for c in base_feature_list if c in df.columns]
     df_long = df[base_cols + feature_cols_present].copy()
 
     # Ensure feature columns are numeric; non-numeric values become NaN and are imputed later.
@@ -524,11 +600,8 @@ def load(
             log.warning(f"Feature column '{col}' is not numeric; attempting to coerce to numeric with NaN for invalid values.")
             df_long[col] = pd.to_numeric(df_long[col], errors="coerce")
 
-    # Build taxonomy_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
-    if config.use_taxonomy:
-        taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
-    else:
-        taxonomy_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
+    # Build taxonomy_df with taxonomy columns
+    taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
 
     # Ensure taxonomy_df is ordered by bin_index
     taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
@@ -648,7 +721,7 @@ def load(
             bin_index, sample_index, split_indices, resolved_state_path,
         )
 
-    result = (
+    return (
         {
             "train": {"X": X_train, "y": y_train, "y_prob": y_train},
             "val": {"X": X_val, "y": y_val, "y_prob": y_val},
@@ -662,77 +735,6 @@ def load(
         split_indices,
         resolved_state_path,
     )
-
-    return result
-
-
-def load_processed(
-    data_dir: str,
-) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
-    """
-    Load preprocessed splits from a directory.
-
-    If the directory contains a `_complete` sentinel (written by `load()` with
-    `preprocessed_dir` set), all artifacts including index pickles are loaded.
-    Otherwise falls back to legacy CSV-only loading.
-    """
-    sentinel = os.path.join(data_dir, "_complete")
-    if os.path.exists(sentinel):
-        splits, taxonomy_df, _, _, bin_index, sample_index, split_indices, _ = _load_from_preprocessed_dir(data_dir)
-        return splits, taxonomy_df, bin_index, sample_index, split_indices
-
-    # Legacy CSV-only path.
-    def _read_X(split: str) -> pd.DataFrame:
-        path = os.path.join(data_dir, f"X_{split}.csv")
-        X = pd.read_csv(path)
-        if "sample_id" not in X.columns or "bin_uri" not in X.columns:
-            raise ValueError(f"{path} must contain columns 'sample_id' and 'bin_uri'")
-        return X.set_index(["sample_id", "bin_uri"])
-
-    def _read_y(split: str, n_rows: int) -> pd.Series:
-        path = os.path.join(data_dir, f"y_{split}.csv")
-        y_df = pd.read_csv(path)
-        y = y_df["rel_abundance"] if "rel_abundance" in y_df.columns else y_df.iloc[:, 0]
-        if len(y) != n_rows:
-            raise ValueError(f"{path} has {len(y)} rows but X_{split}.csv has {n_rows}")
-        return y.astype(np.float32)
-
-    X_train = _read_X("train")
-    X_val   = _read_X("val")
-    X_test  = _read_X("test")
-    y_train = _read_y("train", len(X_train))
-    y_val   = _read_y("val",   len(X_val))
-    y_test  = _read_y("test",  len(X_test))
-
-    bins_path = os.path.join(data_dir, "bins_data.csv")
-    taxonomy_df = pd.read_csv(bins_path)
-    if "bin_uri" not in taxonomy_df.columns:
-        raise ValueError(f"{bins_path} must contain 'bin_uri'")
-
-    unique_samples = pd.Index(pd.concat([
-        X_train.reset_index()["sample_id"],
-        X_val.reset_index()["sample_id"],
-        X_test.reset_index()["sample_id"],
-    ]).unique())
-    sample_index = {s: i for i, s in enumerate(unique_samples)}
-
-    unique_bins = pd.Index(pd.concat([
-        X_train.reset_index()["bin_uri"],
-        X_val.reset_index()["bin_uri"],
-        X_test.reset_index()["bin_uri"],
-    ]).unique())
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
-
-    taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
-    taxonomy_df = taxonomy_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
-
-    split_indices: Dict[str, np.ndarray] = {"train": np.array([]), "val": np.array([]), "test": np.array([])}
-
-    return {
-        "train": {"X": X_train, "y": y_train, "y_prob": y_train},
-        "val":   {"X": X_val,   "y": y_val,   "y_prob": y_val},
-        "test":  {"X": X_test,  "y": y_test,  "y_prob": y_test},
-    }, taxonomy_df, bin_index, sample_index, split_indices
 
 
 if __name__ == "__main__":
