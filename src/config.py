@@ -47,7 +47,7 @@ class Config:
 
     # MLP - architecture & optimization settings
     mlp_hidden_dims: List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
-    mlp_lr: float = 7e-4                        # Learning rate for MLP parameters
+    mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
     weight_decay: float = 1e-4                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
     mlp_warmup_frac: float = 0.1                # Fraction of total training steps used for MLP LR warmup
@@ -62,7 +62,7 @@ class Config:
 
     # Latent solver - optimization settings
     latent_optim_steps: int = 1                 # Number of latent optimization steps per batch / solver call
-    latent_lr: float = 1e-3                     # Learning rate for the latent AdamW optimizer
+    latent_lr: float = 5e-4                     # Learning rate for the latent AdamW optimizer
     latent_init_std: float = 0.0                # Standard deviation for initializing latent embeddings (0 for zeros, >0 for Gaussian noise)
     latent_warmup_start_factor: float = 1e-3    # Initial multiplier for latent LR warmup
     latent_warmup_frac: float = 0.2             # Fraction of total latent solves used for warmup
