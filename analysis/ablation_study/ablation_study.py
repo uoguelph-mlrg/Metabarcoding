@@ -511,9 +511,7 @@ def run_ablation_study(
 
     set_seed()  # Fixed seed for reproducibility
 
-    splits, taxonomy_df, _, _, bin_index, sample_index, _, _ = load(
-        cfg, save_data=False
-    )
+    splits, taxonomy_df, _, _, bin_index, sample_index, _, _ = load(cfg)
 
     # ========================================================================
     # Step 2: Train MLP without taxonomy (same features as MLP + Latent)
@@ -630,6 +628,94 @@ def save_results(results: Dict[str, Any], output_path: str):
     log.info(f"Results saved to {output_path}")
 
 
+VALID_VARIANTS = ["mlp_no_taxonomy", "mlp_with_taxonomy"]
+
+
+def run_one_variant(
+    variant_name: str,
+    cfg: Config,
+    use_wandb: bool,
+    run_group: str,
+    max_epochs: int,
+) -> Dict[str, Any]:
+    """Train a single named variant and return its result dict."""
+    if variant_name not in VALID_VARIANTS:
+        raise ValueError(f"Unknown variant '{variant_name}'. Valid: {VALID_VARIANTS}")
+
+    set_seed()
+    splits, taxonomy_df, _, _, bin_index, sample_index, _, _ = load(cfg)
+
+    if variant_name == "mlp_no_taxonomy":
+        log.info("\n" + "=" * 70)
+        log.info("TRAINING MLP WITHOUT TAXONOMY")
+        log.info("=" * 70)
+        set_seed()
+        if use_wandb:
+            wandb.init(
+                project="metabarcoding",
+                name=f"ablation_study_mlp_no_taxonomy_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
+                group=run_group,
+                tags=["ablation_study", "mlp_no_taxonomy", "variant_only"],
+                config=cfg.__dict__,
+                reinit=True,
+            )
+        try:
+            trainer = MLPOnlyTrainer(cfg, splits, bin_index, sample_index,
+                                     model_name="MLP (no taxonomy)", taxonomy=None)
+            raw = trainer.run(use_wandb=use_wandb, max_epochs=max_epochs)
+        finally:
+            if use_wandb:
+                wandb.finish()
+        metrics = compute_regression_metrics(raw["predictions"], raw["targets"])
+        return {
+            "model_name": "MLP (no taxonomy)",
+            "best_val_loss": raw["best_val_loss"],
+            "predictions": raw["predictions"],
+            "targets": raw["targets"],
+            "sample_labels": raw["sample_labels"],
+            "bin_labels": raw["bin_labels"],
+            "metrics": metrics,
+            "n_features": splits["train"]["X"].shape[1],
+        }
+
+    # mlp_with_taxonomy
+    log.info("\n" + "=" * 70)
+    log.info("TRAINING MLP WITH TAXONOMY")
+    log.info("=" * 70)
+    set_seed()
+    if use_wandb:
+        wandb.init(
+            project="metabarcoding",
+            name=f"ablation_study_mlp_with_taxonomy_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
+            group=run_group,
+            tags=["ablation_study", "mlp_with_taxonomy", "variant_only"],
+            config=cfg.__dict__,
+            reinit=True,
+        )
+    tax_ids_per_bin, card = _build_taxonomy_id_matrix(
+        bins_df=taxonomy_df, n_bins=len(bin_index), taxonomy_cols=TAXONOMY_COLS)
+    taxonomy_spec = {"tax_ids_per_bin": tax_ids_per_bin, "cardinalities": card,
+                     "taxonomy_cols": TAXONOMY_COLS}
+    try:
+        trainer = MLPOnlyTrainer(cfg, splits, bin_index, sample_index,
+                                  model_name="MLP (with taxonomy)", taxonomy=taxonomy_spec)
+        raw = trainer.run(use_wandb=use_wandb, max_epochs=max_epochs)
+    finally:
+        if use_wandb:
+            wandb.finish()
+    metrics = compute_regression_metrics(raw["predictions"], raw["targets"])
+    return {
+        "model_name": "MLP (with taxonomy)",
+        "best_val_loss": raw["best_val_loss"],
+        "predictions": raw["predictions"],
+        "targets": raw["targets"],
+        "sample_labels": raw["sample_labels"],
+        "bin_labels": raw["bin_labels"],
+        "metrics": metrics,
+        "n_features": splits["train"]["X"].shape[1],
+    }
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Ablation Study: MLP variants vs MLP + Latent"
@@ -639,50 +725,39 @@ if __name__ == "__main__":
     parser.add_argument("--no_wandb", action="store_true",
                         help="Disable Weights & Biases logging")
     parser.add_argument("--output_dir", type=str, default="results",
-                        help="Output directory for results")
+                        help="Output directory base (relative to analysis/)")
     parser.add_argument("--max_epochs", type=int, default=100,
                         help="Maximum epochs for MLP-only training")
+    parser.add_argument("--variant", type=str, default=None,
+                        choices=VALID_VARIANTS,
+                        help="Train only this variant (default: all)")
+    parser.add_argument("--run_id", type=str, default=None,
+                        help="Shared run ID for output directory (default: current timestamp)")
     args = parser.parse_args()
-    
-    # Setup
+
     set_seed()
     cfg = Config()
-    
+
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
-    
+
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
-    run_group = f"ablation_study_{time.strftime('%Y%m%d_%H%M%S')}"
-    
-    # Run ablation study
-    results = run_ablation_study(
-        cfg,
-        use_wandb=use_wandb,
-        max_epochs=args.max_epochs,
-        run_group=run_group,
-    )
-    
-    # Save results in a timestamped subdirectory so successive runs don't collide.
+    run_id = args.run_id or time.strftime("%Y%m%d_%H%M%S")
+    run_group = f"ablation_study_{run_id}"
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, args.output_dir, time.strftime("%Y%m%d_%H%M%S"))
-    for variant, variant_results in results.items():
-        results_path = os.path.join(output_dir, f"ablation_study_{variant}.pkl")
-        save_results({variant: variant_results}, results_path)
-    
-    # Print summary
-    log.info(f"\n{'='*70}")
-    log.info("ABLATION VARIANT TRAINING COMPLETE")
-    log.info(f"{'='*70}")
-    
-    log.info("\nSummary:")
-    for key, result in results.items():
+    analysis_root = os.path.abspath(os.path.join(script_dir, ".."))
+    output_dir = os.path.join(analysis_root, args.output_dir, "ablation_study", run_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    variants_to_run = [args.variant] if args.variant else VALID_VARIANTS
+    for vname in variants_to_run:
+        result = run_one_variant(vname, cfg, use_wandb, run_group, args.max_epochs)
+        results_path = os.path.join(output_dir, f"ablation_study_{vname}.pkl")
+        save_results({vname: result}, results_path)
         metrics = result["metrics"]
         log.info(f"\n{result['model_name']} ({result['n_features']} features):")
-        log.info(f"  MAE: {metrics['mae_all']:.6f}")
-        log.info(f"  MSE: {metrics['mse_all']:.6f}")
-        log.info(f"  Correlation: {metrics['correlation']:.4f}")
-        log.info(f"  MAE (zero): {metrics['mae_zero']:.6f}")
-        log.info(f"  MAE (non-zero): {metrics['mae_nonzero']:.6f}")
-    
+        log.info(f"  MAE: {metrics['mae_all']:.6f}  MSE: {metrics['mse_all']:.6f}"
+                 f"  Correlation: {metrics['correlation']:.4f}")
+
     log.info(f"\nResults saved to: {output_dir}")
-    log.info(f"Run visualization with one or more files from: {output_dir}")

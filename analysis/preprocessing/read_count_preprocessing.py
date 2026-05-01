@@ -23,7 +23,7 @@ sys.path.insert(0, '..')
 from config import Config, set_seed
 from train import Trainer
 from variant_helpers import (
-    make_output_dir,
+    make_output_dir_for_analysis,
     make_run_group,
     save_variant_result,
     variant_wandb_run,
@@ -104,61 +104,71 @@ def save_results(results: Dict[str, Any], output_path: str):
     log.info(f"Results saved to {output_path}")
 
 
+VALID_VARIANTS = ["normalized", "logarithm"]
+
+
 if __name__ == "__main__":
+    import time as _time
+
     parser = argparse.ArgumentParser(
         description="Read Count Preprocessing Comparison"
     )
-    parser.add_argument("--verbose", "-v", action="store_true", 
+    parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable verbose logging")
-    parser.add_argument("--no_wandb", action="store_true", 
+    parser.add_argument("--no_wandb", action="store_true",
                         help="Disable Weights & Biases logging")
-    parser.add_argument("--output_dir", type=str, default="results", 
-                        help="Output directory for results pickle")
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=None,
-        help="Optional epoch override for quick dry-runs",
-    )
-    parser.add_argument(
-        "--methods",
-        nargs="+",
-        default=["original", "normalized", "logarithm"],
-        choices=["original", "normalized", "logarithm"],
-        help="Preprocessing variants to train (default: normalized logarithm)",
-    )
+    parser.add_argument("--output_dir", type=str, default="results",
+                        help="Output directory base (relative to analysis/)")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Optional epoch override for quick dry-runs")
+    parser.add_argument("--variant", type=str, default=None,
+                        choices=VALID_VARIANTS,
+                        help="Train only this variant (default: all)")
+    parser.add_argument("--run_id", type=str, default=None,
+                        help="Shared run ID for output directory (default: current timestamp)")
+    # Keep --methods for backward compatibility (ignored when --variant is set)
+    parser.add_argument("--methods", nargs="+", default=None,
+                        choices=VALID_VARIANTS,
+                        help="(Legacy) Preprocessing variants to train")
     args = parser.parse_args()
-    
+
     # Setup
     set_seed()
     cfg = Config()
     if args.epochs is not None:
         cfg.epochs = args.epochs
-    
+
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
-    
-    use_wandb = WANDB_AVAILABLE and not args.no_wandb
-    run_group = make_run_group("preprocessing_comparison")
-    
-    # Create output dir before training so Trainer artifacts land inside it
-    output_dir = make_output_dir(__file__, args.output_dir)
 
-    # Run comparison
+    use_wandb = WANDB_AVAILABLE and not args.no_wandb
+    run_id = args.run_id or _time.strftime("%Y%m%d_%H%M%S")
+    run_group = make_run_group("preprocessing_comparison", run_id)
+
+    analysis_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    output_dir = os.path.join(analysis_root, args.output_dir, "preprocessing", run_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --variant takes priority; fall back to --methods; default to all
+    if args.variant:
+        methods = [args.variant]
+    elif args.methods:
+        methods = args.methods
+    else:
+        methods = VALID_VARIANTS
+
     results = run_comparison(
         cfg,
-        methods=args.methods,
+        methods=methods,
         use_wandb=use_wandb,
         run_group=run_group,
         output_dir=output_dir,
     )
-    
-    # Save results
+
     for variant, variant_results in results.items():
         save_variant_result(output_dir, "preprocessing", variant, variant_results)
-    
+
     log.info(f"\n{'='*70}")
     log.info("VARIANT TRAINING COMPLETE")
     log.info(f"{'='*70}")
     log.info(f"Results saved to: {output_dir}")
-    log.info(f"Run visualization with one or more files from: {output_dir}")

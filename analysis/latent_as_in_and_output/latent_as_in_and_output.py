@@ -24,7 +24,7 @@ ANALYSIS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ANALYSIS_DIR not in sys.path:
 	sys.path.insert(0, ANALYSIS_DIR)
 from variant_helpers import (
-	make_output_dir,
+	make_output_dir_for_analysis,
 	make_run_group,
 	save_variant_result,
 	variant_wandb_run,
@@ -68,10 +68,27 @@ def load_variant_trainer(local_dir: str, src_path: str):
 	return local_train.Trainer, local_config.Config, local_config.set_seed
 
 
+VARIANT_SPECS = [
+	{
+		"variant_name": "both_dim_5",
+		"latent_input_dim": 5,
+		"embed_dim": 5,
+		"tags": ["latent_as_in_and_output", "variant_only", "input_and_output", "dim_5"],
+	},
+	{
+		"variant_name": "input_only_dim_10",
+		"latent_input_dim": 10,
+		"embed_dim": 0,
+		"tags": ["latent_as_in_and_output", "variant_only", "input_only", "dim_10"],
+	},
+]
+
+
 def run_comparison(
 	use_wandb: bool = True,
 	run_group: str | None = None,
 	output_dir: str | None = None,
+	variants_filter: set | None = None,
 ) -> Dict[str, Any]:
 	"""Train requested latent variants and return result dict keyed by variant name."""
 	results: Dict[str, Any] = {}
@@ -82,23 +99,11 @@ def run_comparison(
 
 	LocalTrainer, LocalConfig, local_set_seed = load_variant_trainer(root_dir, src_path)
 
-	variant_specs = [
-		{
-			"variant_name": "both_dim_5",
-			"latent_input_dim": 5,
-			"embed_dim": 5,
-			"tags": ["latent_as_in_and_output", "variant_only", "input_and_output", "dim_5"],
-		},
-		{
-			"variant_name": "input_only_dim_10",
-			"latent_input_dim": 10,
-			"embed_dim": 0,
-			"tags": ["latent_as_in_and_output", "variant_only", "input_only", "dim_10"],
-		},
-	]
-
-	for variant in variant_specs:
+	for variant in VARIANT_SPECS:
 		variant_name = variant["variant_name"]
+		if variants_filter is not None and variant_name not in variants_filter:
+			continue
+
 		latent_input_dim = variant["latent_input_dim"]
 		embed_dim = variant["embed_dim"]
 
@@ -135,7 +140,12 @@ def run_comparison(
 	return results
 
 
+VALID_VARIANTS = [v["variant_name"] for v in VARIANT_SPECS]
+
+
 if __name__ == "__main__":
+	import time as _time
+
 	parser = argparse.ArgumentParser(
 		description="Latent variants: in-and-output dim=5 and input-only dim=10"
 	)
@@ -145,8 +155,13 @@ if __name__ == "__main__":
 		"--output_dir",
 		type=str,
 		default="results",
-		help="Output directory for results pickle",
+		help="Output directory base (relative to analysis/)",
 	)
+	parser.add_argument("--variant", type=str, default=None,
+	                    choices=VALID_VARIANTS,
+	                    help="Train only this variant (default: all)")
+	parser.add_argument("--run_id", type=str, default=None,
+	                    help="Shared run ID for output directory (default: current timestamp)")
 	args = parser.parse_args()
 
 	# Setup logging
@@ -154,15 +169,21 @@ if __name__ == "__main__":
 	log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
 	use_wandb = WANDB_AVAILABLE and not args.no_wandb
-	run_group = make_run_group("latent_as_in_and_output_comparison")
+	run_id = args.run_id or _time.strftime("%Y%m%d_%H%M%S")
+	run_group = make_run_group("latent_as_in_and_output_comparison", run_id)
 
-	# Create output dir before training so Trainer artifacts land inside it
-	output_dir = make_output_dir(__file__, args.output_dir)
+	analysis_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+	output_dir = os.path.join(analysis_root, args.output_dir, "latent_as_in_and_output", run_id)
+	os.makedirs(output_dir, exist_ok=True)
 
-	# Run comparison
-	results = run_comparison(use_wandb=use_wandb, run_group=run_group, output_dir=output_dir)
+	variants_filter = {args.variant} if args.variant else None
+	results = run_comparison(
+		use_wandb=use_wandb,
+		run_group=run_group,
+		output_dir=output_dir,
+		variants_filter=variants_filter,
+	)
 
-	# Save one pickle per variant
 	analysis_name = "latent_as_in_and_output"
 	for variant_name, variant_result in results.items():
 		results_path = save_variant_result(output_dir, analysis_name, variant_name, variant_result)

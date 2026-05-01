@@ -19,437 +19,112 @@ NO_WANDB="0"
 DRY_RUN="0"
 ALL_TARGETS="0"
 BASELINE_TRAIN="0"
-INCLUDE_BASELINE="1"
-BASELINE_RESULTS=""
-BASELINE_KEY="baseline"
-LABELS_JSON_OVERRIDE=""
-COLORS_JSON_OVERRIDE=""
 
 declare -a TARGETS=()
-declare -a DEFAULT_TARGETS=(
-  "BarcodeBERT"
-  "baselines_comparison"
-  "interpolated_latent"
-  "location_embedding"
-  "latent_as_in_and_output"
-  "ablation_study"
-  "loss_comparison"
-  "optimal_K"
-  "preprocessing"
-  "dimensionality_increase/gating_function"
-  "dimensionality_increase/vector_size"
-)
 LIST_TARGETS="0"
 
 usage() {
-  cat <<'EOF'
+  # List valid targets from the registry at usage time
+  local all_keys
+  all_keys=$(cd "$SCRIPT_DIR" && python -c "
+import sys; sys.path.insert(0, '.')
+from analyses import REGISTRY
+print('  ' + '  '.join(sorted(REGISTRY)))
+" 2>/dev/null || echo "(unavailable)")
+
+  cat <<EOF
 Usage:
   ./submit_subanalysis.sh --target interpolated_latent
   ./submit_subanalysis.sh --target interpolated_latent --target location_embedding
   ./submit_subanalysis.sh --all
   ./submit_subanalysis.sh --baseline-train
-  ./submit_subanalysis.sh --baseline-train --target interpolated_latent
+  ./submit_subanalysis.sh --baseline-train --target optimal_K
 
 Options:
-  --target PATH            Subanalysis folder path under analysis/
-  --all                    Submit all default targets
-  --baseline-train         Train src baseline model once (from Metabarcoding/src/train.py)
-  --list-targets           Print supported targets and exit
-  --baseline-results PATH  Path to one reusable baseline pickle from src/train.py
-  --baseline-key KEY       Model key to use for baseline in merged visualization (default: baseline)
-  --no-baseline            Do not include baseline in visualization input
-  --labels-json JSON       Override labels passed to visualize_results.py
-  --colors-json JSON       Override colors passed to visualize_results.py
-  --no-wandb               Append --no_wandb to supported training commands
+  --target NAME            Analysis key to submit (from analyses.py registry)
+  --all                    Submit all registered analyses
+  --baseline-train         Train src baseline model once (from src/train.py)
+  --list-targets           Print all registered analysis keys and exit
+  --no-wandb               Disable Weights & Biases logging
   --gpu SPEC               SLURM --gres gpu spec (default: l40s:1)
   --cpus N                 SLURM cpus-per-task (default: 8)
   --mem SIZE               SLURM memory (default: 32G)
-  --time HH:MM:SS          Override walltime for all targets
+  --time HH:MM:SS          Override walltime for all variant jobs
   --qos NAME               SLURM QoS (default: normal)
   --venv-activate PATH     Venv activate script (default: ~/barcode/bin/activate)
-  --module-load "A B C"     Modules for `module load` (default: python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0)
-  --dry-run                Print generated sbatch script path and command, do not submit
+  --module-load "A B C"    Modules for module load (default: python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0)
+  --dry-run                Print generated sbatch scripts, do not submit
   -h, --help               Show this help
 
-Supported targets (first batch):
-  BarcodeBERT
-  baselines_comparison
-  interpolated_latent
-  location_embedding
-  latent_as_in_and_output
-  ablation_study
-  loss_comparison
-  optimal_K
-  preprocessing
-  dimensionality_increase/gating_function
-  dimensionality_increase/vector_size
+Registered analyses (targets):
+$all_keys
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --target)
-      TARGETS+=("$2")
-      shift 2
-      ;;
-    --all)
-      ALL_TARGETS="1"
-      shift
-      ;;
-    --baseline-train)
-      BASELINE_TRAIN="1"
-      shift
-      ;;
-    --list-targets)
-      LIST_TARGETS="1"
-      shift
-      ;;
-    --baseline-results)
-      BASELINE_RESULTS="$2"
-      shift 2
-      ;;
-    --baseline-key)
-      BASELINE_KEY="$2"
-      shift 2
-      ;;
-    --no-baseline)
-      INCLUDE_BASELINE="0"
-      shift
-      ;;
-    --labels-json)
-      LABELS_JSON_OVERRIDE="$2"
-      shift 2
-      ;;
-    --colors-json)
-      COLORS_JSON_OVERRIDE="$2"
-      shift 2
-      ;;
-    --no-wandb)
-      NO_WANDB="1"
-      shift
-      ;;
-    --gpu)
-      GPU="$2"
-      shift 2
-      ;;
-    --cpus)
-      CPUS="$2"
-      shift 2
-      ;;
-    --mem)
-      MEM="$2"
-      shift 2
-      ;;
-    --time)
-      TIME_OVERRIDE="$2"
-      shift 2
-      ;;
-    --qos)
-      QOS="$2"
-      shift 2
-      ;;
-    --venv-activate)
-      VENV_ACTIVATE="$2"
-      shift 2
-      ;;
-    --module-load)
-      MODULE_LOAD="$2"
-      shift 2
-      ;;
-    --dry-run)
-      DRY_RUN="1"
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      usage
-      exit 1
-      ;;
+    --target)         TARGETS+=("$2"); shift 2 ;;
+    --all)            ALL_TARGETS="1"; shift ;;
+    --baseline-train) BASELINE_TRAIN="1"; shift ;;
+    --list-targets)   LIST_TARGETS="1"; shift ;;
+    --no-wandb)       NO_WANDB="1"; shift ;;
+    --gpu)            GPU="$2"; shift 2 ;;
+    --cpus)           CPUS="$2"; shift 2 ;;
+    --mem)            MEM="$2"; shift 2 ;;
+    --time)           TIME_OVERRIDE="$2"; shift 2 ;;
+    --qos)            QOS="$2"; shift 2 ;;
+    --venv-activate)  VENV_ACTIVATE="$2"; shift 2 ;;
+    --module-load)    MODULE_LOAD="$2"; shift 2 ;;
+    --dry-run)        DRY_RUN="1"; shift ;;
+    -h|--help)        usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-if [[ "$ALL_TARGETS" == "1" && ${#TARGETS[@]} -gt 0 ]]; then
-  echo "Use either --all or --target, not both." >&2
-  exit 1
-fi
-
 if [[ "$LIST_TARGETS" == "1" ]]; then
-  cat <<'EOF'
-BarcodeBERT
-baselines_comparison
-interpolated_latent
-location_embedding
-latent_as_in_and_output
-ablation_study
-loss_comparison
-optimal_K
-preprocessing
-dimensionality_increase/gating_function
-dimensionality_increase/vector_size
-EOF
+  cd "$SCRIPT_DIR" && python - <<'PY'
+import sys; sys.path.insert(0, '.')
+from analyses import REGISTRY
+for k in sorted(REGISTRY): print(k)
+PY
   exit 0
 fi
 
+if [[ "$ALL_TARGETS" == "1" && ${#TARGETS[@]} -gt 0 ]]; then
+  echo "Use either --all or --target, not both." >&2; exit 1
+fi
+
 if [[ "$ALL_TARGETS" == "1" ]]; then
-  TARGETS=("${DEFAULT_TARGETS[@]}")
+  mapfile -t TARGETS < <(cd "$SCRIPT_DIR" && python - <<'PY'
+import sys; sys.path.insert(0, '.')
+from analyses import REGISTRY
+for k in sorted(REGISTRY): print(k)
+PY
+  )
 fi
 
 if [[ ${#TARGETS[@]} -eq 0 && "$BASELINE_TRAIN" == "0" ]]; then
-  echo "No targets specified. Use --target or --all." >&2
-  usage
-  exit 1
+  echo "No targets specified. Use --target NAME or --all." >&2; usage; exit 1
 fi
 
-if ! [[ "$CPUS" =~ ^[0-9]+$ ]]; then
-  echo "Invalid --cpus value: $CPUS (must be an integer)" >&2
-  exit 1
+if ! [[ "$CPUS" =~ ^[0-9]+$ ]] || (( CPUS > 16 )); then
+  echo "Invalid --cpus value: $CPUS (must be integer ≤ 16)" >&2; exit 1
 fi
 
-if (( CPUS > 16 )); then
-  echo "Invalid --cpus value: $CPUS (maximum supported is 16)" >&2
-  exit 1
-fi
+# ---------------------------------------------------------------------------
+# Shared SLURM header generator
+# ---------------------------------------------------------------------------
 
-resolve_target() {
-  local target="$1"
-  TARGET_DIR=""
-  TRAIN_CMD_TEMPLATE=""
-  RESULTS_PATTERNS=""
-  FIGURES_DIR=""
-  DEFAULT_LABELS_JSON=""
-  DEFAULT_COLORS_JSON=""
-  DEFAULT_TIME="1:00:00"
-
-  case "$target" in
-    BarcodeBERT)
-      TARGET_DIR="BarcodeBERT"
-      TRAIN_CMD_TEMPLATE='python barcodebert.py __NO_WANDB__'
-      RESULTS_PATTERNS='BarcodeBERT/results/*/barcodebert_*.pkl'
-      FIGURES_DIR='figures/BarcodeBERT'
-      DEFAULT_LABELS_JSON='{"baseline":"BarcodeBERT","taxonomy":"Taxonomy"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#2ecc71","taxonomy":"#9b59b6"}'
-      DEFAULT_TIME="0:45:00"
-      ;;
-    baselines_comparison)
-      TARGET_DIR="baselines"
-      TRAIN_CMD_TEMPLATE='python run_baselines.py --data_path __PROJECT_ROOT__/data/ecuador_training_data.csv --output_dir results'
-      RESULTS_PATTERNS='baselines/results/*/baseline_model_comparison_results_*.pkl'
-      FIGURES_DIR='figures/baselines_comparison'
-      DEFAULT_LABELS_JSON='{"mean":"Mean","zero":"Zero","linear_regression":"Linear Regression","ridge":"Ridge","elasticnet":"ElasticNet","decision_tree":"Decision Tree","random_forest":"Random Forest","gradient_boosting":"Gradient Boosting","knn":"KNN","two_stage":"Two-Stage","zero_inflated_ridge":"Zero-Inflated Ridge","tweedie":"Tweedie","log_transform":"Log-Transform","quantile_rf":"Quantile RF"}'
-      DEFAULT_COLORS_JSON='{"mean":"#808080","zero":"#4d4d4d","linear_regression":"#f28e2b","ridge":"#4e79a7","elasticnet":"#e15759","decision_tree":"#76b7b2","random_forest":"#59a14f","gradient_boosting":"#edc948","knn":"#b07aa1","two_stage":"#9c755f","zero_inflated_ridge":"#bab0ab","tweedie":"#ff9da7","log_transform":"#8cd17d","quantile_rf":"#af7aa1"}'
-      DEFAULT_TIME="0:30:00"
-      ;;
-    interpolated_latent)
-      TARGET_DIR="interpolated_latent"
-      TRAIN_CMD_TEMPLATE='python interpolated_latent.py __NO_WANDB__'
-      RESULTS_PATTERNS='interpolated_latent/results/*/interpolated_latent_*.pkl'
-      FIGURES_DIR='figures/interpolated_latent'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","default_with_interpolation":"Interpolation (20%)","include_self_false":"Interpolation (20%, no self latent)","inference_true":"Interpolation (20%, at inference)","train_mlp_false":"Interpolation (20%, no MLP interpolation)","fraction_0p1":"Interpolation (10%)","fraction_0p5":"Interpolation (50%)","fraction_1p0":"Interpolation (100%)"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","default_with_interpolation":"#e74c3c","include_self_false":"#e67e22","inference_true":"#f39c12","train_mlp_false":"#2ecc71","fraction_0p1":"#3498db","fraction_0p5":"#9b59b6","fraction_1p0":"#1abc9c"}'
-      DEFAULT_TIME="5:30:00"
-      ;;
-    location_embedding)
-      TARGET_DIR="location_embedding"
-      TRAIN_CMD_TEMPLATE='python location_embedding.py __NO_WANDB__'
-      RESULTS_PATTERNS='location_embedding/results/*/location_embedding_*.pkl'
-      FIGURES_DIR='figures/location_embedding'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline (No Location Embedding)","satclip":"SatCLIP (256D)","range":"RANGE (1280D)","geoclip":"GeoCLIP (512D)","alphaearth":"AlphaEarth (64D)"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","satclip":"#e74c3c","range":"#3498db","geoclip":"#2ecc71","alphaearth":"#f39c12"}'
-      DEFAULT_TIME="3:00:00"
-      ;;
-    latent_as_in_and_output)
-      TARGET_DIR='latent_as_in_and_output'
-      TRAIN_CMD_TEMPLATE='python latent_as_in_and_output.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='latent_as_in_and_output/results/*/latent_as_in_and_output_*.pkl'
-      FIGURES_DIR='figures/latent_as_in_and_output'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline","both_dim_5":"Latent In+Out (dim=5)","input_only_dim_10":"Latent Input Only (dim=10)"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","both_dim_5":"#e74c3c","input_only_dim_10":"#3498db"}'
-      DEFAULT_TIME="1:30:00"
-      ;;
-    ablation_study)
-      TARGET_DIR='ablation_study'
-      TRAIN_CMD_TEMPLATE='python ablation_study.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='ablation_study/results/*/ablation_study_*.pkl'
-      FIGURES_DIR='figures/ablation_study'
-      DEFAULT_LABELS_JSON='{"baseline":"MLP + Latent","mlp_no_taxonomy":"MLP (no taxonomy)","mlp_with_taxonomy":"MLP (with taxonomy)"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#ff7f0e","mlp_no_taxonomy":"#1f77b4","mlp_with_taxonomy":"#2ca02c"}'
-      DEFAULT_TIME="1:30:00"
-      ;;
-    loss_comparison)
-      TARGET_DIR='loss_comparison'
-      TRAIN_CMD_TEMPLATE='python loss_comparison.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='loss_comparison/results/*/loss_comparison_*.pkl'
-      FIGURES_DIR='figures/loss_comparison'
-      DEFAULT_LABELS_JSON='{"baseline":"Cross-Entropy","logistic":"Logistic (BCE)"}'
-      DEFAULT_COLORS_JSON='{"cross_entropy":"#2ecc71","logistic":"#9b59b6"}'
-      DEFAULT_TIME="2:00:00"
-      ;;
-    optimal_K)
-      TARGET_DIR='optimal_K'
-      TRAIN_CMD_TEMPLATE='python K_comparison.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='optimal_K/results/*/K_comparison_*.pkl'
-      FIGURES_DIR='figures/optimal_K'
-      DEFAULT_LABELS_JSON='{"K_5":"K=5","baseline":"K=25","K_100":"K=100","K_500":"K=500"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","K_5":"#824e05","K_25":"#e74c3c","K_100":"#e67e22","K_500":"#f39c12"}'
-      DEFAULT_TIME="4:15:00"
-      ;;
-    preprocessing)
-      TARGET_DIR='preprocessing'
-      TRAIN_CMD_TEMPLATE='python utils_test.py && python read_count_preprocessing.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='preprocessing/results/*/preprocessing_*.pkl'
-      FIGURES_DIR='figures/preprocessing'
-      DEFAULT_LABELS_JSON='{"original":"Original (raw counts)","normalized":"Normalized Only","logarithm":"Logarithm Only"}'
-      DEFAULT_COLORS_JSON='{"original":"#ff7f0e","normalized":"#1f77b4","logarithm":"#2ca02c"}'
-      DEFAULT_TIME="2:15:00"
-      ;;
-    dimensionality_increase/gating_function)
-      TARGET_DIR='dimensionality_increase/gating_function'
-      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='dimensionality_increase/gating_function/results/*/gating_comparison_*.pkl'
-      FIGURES_DIR='figures/dimensionality_gating'
-      DEFAULT_LABELS_JSON='{"baseline":"Baseline (Additive)","exp":"Exponential","scaled_exp":"Scaled Exponential","additive":"Additive (1+h)","softplus":"Softplus","tanh":"Tanh","sigmoid":"Sigmoid","dot_product":"Dot Product"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","exp":"#e74c3c","scaled_exp":"#e67e22","additive":"#f39c12","softplus":"#2ecc71","tanh":"#3498db","sigmoid":"#9b59b6","dot_product":"#1abc9c"}'
-      DEFAULT_TIME="4:00:00"
-      ;;
-    dimensionality_increase/vector_size)
-      TARGET_DIR='dimensionality_increase/vector_size'
-      TRAIN_CMD_TEMPLATE='python dimensionality_increase.py __NO_WANDB__ --output_dir results'
-      RESULTS_PATTERNS='dimensionality_increase/vector_size/results/*/dimensionality_analysis_*.pkl'
-      FIGURES_DIR='figures/dimensionality_vector'
-      DEFAULT_LABELS_JSON='{"baseline":"Dim=1 (Baseline)","dim_2":"Dim=2","dim_5":"Dim=5","dim_6":"Dim=6","dim_8":"Dim=8","dim_10":"Dim=10","dim_12":"Dim=12","dim_15":"Dim=15","dim_20":"Dim=20","dim_50":"Dim=50"}'
-      DEFAULT_COLORS_JSON='{"baseline":"#95a5a6","dim_2":"#824e05","dim_5":"#e74c3c","dim_6":"#e67e22","dim_8":"#f39c12","dim_10":"#f1c40f","dim_12":"#a2f10f","dim_15":"#2ecc71","dim_20":"#1d8d4b","dim_50":"#3498db"}'
-      DEFAULT_TIME="4:15:00"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-
-  return 0
-}
-
-submit_baseline() {
-  local baseline_train_dir="$(dirname "$SCRIPT_DIR")"
-  local baseline_results_dir="$baseline_train_dir/results/baseline"
-  mkdir -p "$baseline_results_dir"
-
-  local walltime="0:45:00"
-  if [[ -n "$TIME_OVERRIDE" ]]; then
-    walltime="$TIME_OVERRIDE"
-  fi
-
-  local safe_baseline="baseline"
-  local job_file="$JOB_DIR/${safe_baseline}_$(date +%Y%m%d_%H%M%S).sbatch"
-  local job_name="baseline"
-
-  cat > "$job_file" <<EOF
+_slurm_header() {
+  local job_name="$1" walltime="$2" out_pattern="$3"
+  cat <<EOF
 #!/usr/bin/env bash
 #SBATCH --gres=gpu:$GPU
 #SBATCH --cpus-per-task=$CPUS
 #SBATCH --mem=$MEM
 #SBATCH --time=$walltime
 #SBATCH --job-name=$job_name
-#SBATCH --output=$SLOG_DIR/%x_%A.out
-#SBATCH --qos=$QOS
-#SBATCH --open-mode=append
-
-set -euo pipefail
-
-export OMP_NUM_THREADS=$CPUS
-export OPENBLAS_NUM_THREADS=$CPUS
-export MKL_NUM_THREADS=$CPUS
-export NUMEXPR_NUM_THREADS=$CPUS
-
-module load $MODULE_LOAD
-source ~/.bashrc
-source $VENV_ACTIVATE
-export PYTHONPATH="$baseline_train_dir:$baseline_train_dir/src:\${PYTHONPATH:-}"
-
-cd "$baseline_train_dir"
-echo "[$(date)] Training baseline model"
-python src/train.py --model baseline
-echo "[$(date)] Baseline training completed"
-EOF
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "[DRY-RUN] Generated baseline job: $job_file"
-    echo "[DRY-RUN] Would submit: sbatch $job_file"
-    echo "[DRY-RUN] Baseline results will be saved to: $baseline_results_dir/"
-    return 0
-  fi
-
-  local sbatch_output
-  sbatch_output="$(sbatch "$job_file")"
-  echo "$sbatch_output"
-  echo "Submitted baseline training with script: $job_file"
-  echo "Results will be saved to: $baseline_results_dir/"
-}
-
-submit_target() {
-  local target="$1"
-
-  if ! resolve_target "$target"; then
-    echo "Unsupported target: $target" >&2
-    return 1
-  fi
-
-  local target_dir_abs="$SCRIPT_DIR/$TARGET_DIR"
-  if [[ ! -d "$target_dir_abs" ]]; then
-    echo "Target directory does not exist: $target_dir_abs" >&2
-    return 1
-  fi
-
-  local labels_json="$DEFAULT_LABELS_JSON"
-  local colors_json="$DEFAULT_COLORS_JSON"
-  if [[ -n "$LABELS_JSON_OVERRIDE" ]]; then
-    labels_json="$LABELS_JSON_OVERRIDE"
-  fi
-  if [[ -n "$COLORS_JSON_OVERRIDE" ]]; then
-    colors_json="$COLORS_JSON_OVERRIDE"
-  fi
-
-  local baseline_results_abs=""
-  if [[ -n "$BASELINE_RESULTS" ]]; then
-    if [[ "$BASELINE_RESULTS" = /* ]]; then
-      baseline_results_abs="$BASELINE_RESULTS"
-    elif [[ -e "$BASELINE_RESULTS" ]]; then
-      baseline_results_abs="$PWD/$BASELINE_RESULTS"
-    else
-      baseline_results_abs="$SCRIPT_DIR/$BASELINE_RESULTS"
-    fi
-  fi
-
-  local train_cmd="$TRAIN_CMD_TEMPLATE"
-  local wandb_arg=""
-  if [[ "$NO_WANDB" == "1" ]]; then
-    wandb_arg="--no_wandb"
-  fi
-  train_cmd="${train_cmd//__NO_WANDB__/$wandb_arg}"
-  train_cmd="${train_cmd//__PROJECT_ROOT__/$PROJECT_ROOT}"
-
-  local walltime="$DEFAULT_TIME"
-  if [[ -n "$TIME_OVERRIDE" ]]; then
-    walltime="$TIME_OVERRIDE"
-  fi
-
-  local safe_target
-  safe_target="${target//\//_}"
-
-  local job_file="$JOB_DIR/${safe_target}_$(date +%Y%m%d_%H%M%S).sbatch"
-  local job_name="${safe_target}"
-
-  cat > "$job_file" <<EOF
-#!/usr/bin/env bash
-#SBATCH --gres=gpu:$GPU
-#SBATCH --cpus-per-task=$CPUS
-#SBATCH --mem=$MEM
-#SBATCH --time=$walltime
-#SBATCH --job-name=$job_name
-#SBATCH --output=$SLOG_DIR/%x_%A.out
+#SBATCH --output=$out_pattern
 #SBATCH --qos=$QOS
 #SBATCH --open-mode=append
 
@@ -464,95 +139,167 @@ module load $MODULE_LOAD
 source ~/.bashrc
 source $VENV_ACTIVATE
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src:\${PYTHONPATH:-}"
-
-cd "$target_dir_abs"
-echo "[$(date)] Target: $target"
-if [[ "$target" == "baselines_comparison" ]]; then
-  echo "[$(date)] Running baselines_comparison (analysis/baselines); this is separate from --baseline-train (src/train.py --model baseline)"
-fi
-echo "[$(date)] Train command: $train_cmd"
-$train_cmd
-
-cd "$SCRIPT_DIR"
-RESULT_PATTERNS='$RESULTS_PATTERNS'
-INCLUDE_BASELINE='$INCLUDE_BASELINE'
-BASELINE_RESULTS='$baseline_results_abs'
-BASELINE_KEY='$BASELINE_KEY'
-LABELS_JSON='$labels_json'
-COLORS_JSON='$colors_json'
-
-IFS=';' read -r -a result_patterns <<< "\$RESULT_PATTERNS"
-RESULT_FILES=()
-shopt -s nullglob
-for pattern in "\${result_patterns[@]}"; do
-  for file in "$SCRIPT_DIR"/\$pattern; do
-    RESULT_FILES+=("\$file")
-  done
-done
-shopt -u nullglob
-
-if [[ \${#RESULT_FILES[@]} -eq 0 ]]; then
-  echo "[$(date)] No result files matched patterns: \$RESULT_PATTERNS" >&2
-  exit 1
-fi
-
-if [[ "\$INCLUDE_BASELINE" == "1" && -n "\$BASELINE_RESULTS" ]]; then
-  if [[ -f "\$BASELINE_RESULTS" ]]; then
-    BASELINE_NORMALIZED="$JOB_DIR/${safe_target}_baseline_normalized.pkl"
-    python - "\$BASELINE_RESULTS" "\$BASELINE_NORMALIZED" "\$BASELINE_KEY" <<'PY'
-import pickle
-import sys
-
-baseline_path, output_path, key = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(baseline_path, "rb") as f:
-    payload = pickle.load(f)
-
-if isinstance(payload, dict) and "predictions" in payload and "targets" in payload:
-    normalized = {key: payload}
-else:
-    normalized = payload
-
-with open(output_path, "wb") as f:
-    pickle.dump(normalized, f)
-PY
-    RESULT_FILES=("\$BASELINE_NORMALIZED" "\${RESULT_FILES[@]}")
-  else
-    echo "[$(date)] Baseline file not found: \$BASELINE_RESULTS (continuing without baseline)"
-  fi
-fi
-
-echo "[$(date)] Visualization inputs: \${RESULT_FILES[*]}"
-viz_cmd=(python visualize_results.py --results_paths "\${RESULT_FILES[@]}" --output_dir "$FIGURES_DIR")
-if [[ -n "\$LABELS_JSON" ]]; then
-  viz_cmd+=(--labels "\$LABELS_JSON")
-fi
-if [[ -n "\$COLORS_JSON" ]]; then
-  viz_cmd+=(--colors "\$COLORS_JSON")
-fi
-"\${viz_cmd[@]}"
-echo "[$(date)] Completed target: $target"
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# Baseline training job
+# ---------------------------------------------------------------------------
+
+submit_baseline() {
+  local baseline_results_dir="$SCRIPT_DIR/results/baseline"
+  mkdir -p "$baseline_results_dir"
+  local walltime="${TIME_OVERRIDE:-0:45:00}"
+  local job_file="$JOB_DIR/baseline_$(date +%Y%m%d_%H%M%S).sbatch"
+
+  {
+    _slurm_header "baseline" "$walltime" "$SLOG_DIR/%x_%A.out"
+    echo ""
+    echo "cd \"$PROJECT_ROOT\""
+    echo "echo \"[\$(date)] Training baseline model\""
+    echo "python src/train.py --model baseline --results_dir \"$baseline_results_dir\""
+    echo "echo \"[\$(date)] Baseline training completed\""
+  } > "$job_file"
 
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "[DRY-RUN] Generated: $job_file"
+    echo "[DRY-RUN] Generated baseline job: $job_file"
     echo "[DRY-RUN] Would submit: sbatch $job_file"
     return 0
   fi
-
-  local sbatch_output
-  sbatch_output="$(sbatch "$job_file")"
-  echo "$sbatch_output"
-  echo "Submitted target '$target' with script: $job_file"
+  sbatch "$job_file"
+  echo "Submitted baseline training: $job_file"
 }
 
-# Execute baseline training if requested
-if [[ "$BASELINE_TRAIN" == "1" ]]; then
-  submit_baseline
-fi
+# ---------------------------------------------------------------------------
+# Main target submission: one SLURM job per variant + visualization dependency
+#
+# For generic analyses (run_script=None):
+#   python run_analysis.py --analysis KEY --variant NAME --run_id RUN_ID
+# For legacy analyses (run_script set):
+#   python RUN_SCRIPT --variant NAME --run_id RUN_ID
+# ---------------------------------------------------------------------------
 
-# Execute target submissions
-if [[ ${#TARGETS[@]} -gt 0 ]]; then
-  for target in "${TARGETS[@]}"; do
-    submit_target "$target"
-  done
-fi
+submit_target() {
+  local analysis_key="$1"
+
+  # Query the registry for variant names, walltimes, and run_script
+  local meta_json
+  meta_json=$(
+    cd "$SCRIPT_DIR" && python - "$analysis_key" <<'PY'
+import sys, json
+sys.path.insert(0, '.')
+from analyses import REGISTRY
+key = sys.argv[1]
+if key not in REGISTRY:
+    print(json.dumps({"error": f"Unknown analysis key: {key}"}))
+    sys.exit(1)
+a = REGISTRY[key]
+print(json.dumps({
+    "variants": [{"name": v.name, "time": v.time} for v in a.variants],
+    "run_script": a.run_script,
+}))
+PY
+  )
+
+  local run_script
+  run_script="$(echo "$meta_json" | python -c 'import sys,json; d=json.load(sys.stdin); print(d["run_script"] or "")')"
+
+  local run_id
+  run_id="$(date +%Y%m%d_%H%M%S)"
+  local safe_key="${analysis_key//_/-}"   # for job names (underscores fine, but dashes look cleaner)
+  safe_key="${analysis_key}"
+  local wandb_arg=""
+  [[ "$NO_WANDB" == "1" ]] && wandb_arg="--no_wandb"
+
+  local -a job_ids=()
+
+  # Submit one training job per variant
+  while IFS= read -r variant_json; do
+    local vname vtime
+    vname="$(echo "$variant_json" | python -c 'import sys,json; d=json.load(sys.stdin); print(d["name"])')"
+    vtime="$(echo "$variant_json" | python -c 'import sys,json; d=json.load(sys.stdin); print(d["time"])')"
+    [[ -n "$TIME_OVERRIDE" ]] && vtime="$TIME_OVERRIDE"
+
+    local job_name="${analysis_key}_${vname}"
+    local job_file="$JOB_DIR/${job_name}_$(date +%Y%m%d_%H%M%S%N).sbatch"
+
+    {
+      _slurm_header "$job_name" "$vtime" "$SLOG_DIR/%x_%A.out"
+      echo ""
+      echo "cd \"$SCRIPT_DIR\""
+      echo "echo \"[\$(date)] ${analysis_key} / ${vname}\""
+      if [[ -z "$run_script" ]]; then
+        # Generic runner
+        echo "python run_analysis.py --analysis ${analysis_key} --variant ${vname} --run_id ${run_id} ${wandb_arg}"
+      else
+        # Legacy script — must support --variant and --run_id
+        echo "python ${run_script} --variant ${vname} --run_id ${run_id} ${wandb_arg}"
+      fi
+      echo "echo \"[\$(date)] Done: ${vname}\""
+    } > "$job_file"
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+      echo "[DRY-RUN] Generated: $job_file"
+    else
+      local jid
+      jid="$(sbatch --parsable "$job_file")"
+      job_ids+=("$jid")
+      echo "Submitted ${analysis_key}/${vname} → job $jid"
+    fi
+
+  done < <(echo "$meta_json" | python -c '
+import sys, json
+d = json.load(sys.stdin)
+for v in d["variants"]:
+    print(json.dumps(v))
+')
+
+  # Submit visualization job (depends on all training jobs)
+  local viz_walltime="0:20:00"
+  local viz_job_file="$JOB_DIR/${analysis_key}_viz_$(date +%Y%m%d_%H%M%S).sbatch"
+
+  {
+    _slurm_header "${analysis_key}_viz" "$viz_walltime" "$SLOG_DIR/%x_%A.out"
+    echo ""
+    echo "cd \"$SCRIPT_DIR\""
+    echo "echo \"[\$(date)] Visualizing ${analysis_key}\""
+    echo "python run_all_visualizations.py ${analysis_key}"
+    echo "echo \"[\$(date)] Visualization complete: ${analysis_key}\""
+  } > "$viz_job_file"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[DRY-RUN] Generated viz job: $viz_job_file"
+    echo "[DRY-RUN] Would submit with dependency on training jobs"
+    return 0
+  fi
+
+  if [[ ${#job_ids[@]} -gt 0 ]]; then
+    local dep
+    dep="afterok:$(IFS=:; echo "${job_ids[*]}")"
+    local viz_jid
+    viz_jid="$(sbatch --parsable --dependency="$dep" "$viz_job_file")"
+    echo "Submitted ${analysis_key} visualization → job $viz_jid (depends on: ${job_ids[*]})"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+[[ "$BASELINE_TRAIN" == "1" ]] && submit_baseline
+
+for target in "${TARGETS[@]}"; do
+  cd "$SCRIPT_DIR"
+  # Validate target exists in registry
+  if ! python - "$target" <<'PY' 2>/dev/null; then
+import sys; sys.path.insert(0, '.')
+from analyses import REGISTRY
+if sys.argv[1] not in REGISTRY:
+    print(f"Unknown target: {sys.argv[1]}", file=sys.stderr)
+    sys.exit(1)
+PY
+    echo "Unknown target: $target. Run --list-targets for valid keys." >&2
+    exit 1
+  fi
+  submit_target "$target"
+done
