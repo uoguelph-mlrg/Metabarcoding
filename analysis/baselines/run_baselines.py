@@ -1,323 +1,256 @@
 #!/usr/bin/env python
 """
-Main training and evaluation script for baseline models.
-Trains all baseline models and compares their performance.
+Train and evaluate all baseline models, then save a unified pickle for visualize_results.py.
 
 Usage:
-    python run_baselines.py --data_path data/data_merged.csv
-    python run_baselines.py --data_path data/data_merged.csv --models two_stage ridge random_forest
-    python run_baselines.py --data_path data/data_merged.csv --zero_inflated_only
+    python run_baselines.py
+    python run_baselines.py --data_path ../../data/data_merged.csv
+    python run_baselines.py --models two_stage ridge random_forest
+    python run_baselines.py --output_dir results
 """
 import os
 import sys
 import argparse
-import warnings
 import pickle
+import warnings
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import numpy as np
 import pandas as pd
 
-from preprocess import DataPreprocessor, load_data
-from models import get_all_models, get_zero_inflated_models, BaselineModel, TwoStageModel
-from evaluate import compute_metrics, compute_sample_level_metrics, print_metrics_table, save_results_to_csv
+# Make src/ importable
+_SRC = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
-warnings.filterwarnings('ignore')
+from config import Config, set_seed
+from metrics import compute_metrics
+from utils import load
+
+from models import get_all_models, TwoStageModel
+
+warnings.filterwarnings("ignore")
 
 
-def train_and_evaluate_model(
-    model: BaselineModel,
+def _flat_split(data: Dict[str, Any], split: str) -> tuple:
+    """Return (X, y_series, sample_ids, bin_uris) for a given split."""
+    X = data[split]["X"]                   # DataFrame indexed by (sample_id, bin_uri)
+    y = data[split]["y_prob"]              # Series of rel_abundance, same index
+    idx = X.index.to_frame(index=False)   # columns: sample_id, bin_uri
+    return X, y, idx["sample_id"].to_numpy(), idx["bin_uri"].to_numpy()
+
+
+def train_and_evaluate(
+    model,
     X_train: pd.DataFrame,
     y_train: pd.Series,
-    X_val: pd.DataFrame,
-    y_val: pd.Series,
     X_test: pd.DataFrame,
     y_test: pd.Series,
-    metadata: Dict,
-    verbose: bool = True
+    test_sample_labels: np.ndarray,
+    test_bin_labels: np.ndarray,
+    verbose: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Train a single model and evaluate on validation and test sets.
-    
-    Returns:
-        Dictionary with 'val' and 'test' metric dicts
-    """
+    """Fit a model and return its unified payload dict."""
     if verbose:
-        print(f"\n{'='*60}")
-        print(f"Training: {model.name}")
-        print(f"{'='*60}")
-    
-    # Special handling for two-stage model
+        print(f"  {model.name} ...", end=" ", flush=True)
+
     if isinstance(model, TwoStageModel):
-        presence_train = metadata['presence_train']
-        model.fit(
-            X_train, y_train,
-            presence=presence_train
-        )
+        # presence can be derived from y — TwoStageModel.fit() already handles None
+        model.fit(X_train, y_train)
     else:
         model.fit(X_train, y_train)
-    
-    # Predict on validation set
-    val_preds = model.predict(X_val)
-    val_metrics = compute_metrics(y_val.to_numpy(), val_preds)
-    
-    # Sample-level metrics for validation
-    val_sample_metrics = compute_sample_level_metrics(
-        y_val, val_preds, 
-        metadata['val_meta']['sample_id']
-    )
-    val_metrics.update(val_sample_metrics)
-    
-    # Predict on test set
-    test_preds = model.predict(X_test)
-    test_metrics = compute_metrics(y_test.to_numpy(), test_preds)
-    
-    # Sample-level metrics for test
-    test_sample_metrics = compute_sample_level_metrics(
-        y_test, test_preds,
-        metadata['test_meta']['sample_id']
-    )
-    test_metrics.update(test_sample_metrics)
-    
+
+    test_preds = np.asarray(model.predict(X_test), dtype=np.float32)
+    y_true = np.asarray(y_test.to_numpy(), dtype=np.float32)
+
+    metrics = compute_metrics(test_preds, y_true, sample_labels=test_sample_labels)
+
     if verbose:
-        print(f"  Validation - RMSE: {val_metrics['rmse']:.4f}, MAE: {val_metrics['mae']:.4f}, R²: {val_metrics['r2']:.4f}")
-        print(f"  Test       - RMSE: {test_metrics['rmse']:.4f}, MAE: {test_metrics['mae']:.4f}, R²: {test_metrics['r2']:.4f}")
-        print(f"  Zero Recall (test): {test_metrics['zero_recall']:.2%}")
-    
-    test_sample_labels = metadata['test_meta']['sample_id'].to_numpy()
-    test_bin_labels = metadata['test_meta']['bin_uri'].to_numpy()
-    unified_payload = {
-        "model": model.name,
-        "run_id": "baseline",
-        "best_val_loss": float('nan'),
-        "test_loss": float(test_metrics.get('rmse', np.nan)),
-        "predictions": np.asarray(test_preds, dtype=np.float32),
-        "targets": np.asarray(y_test.to_numpy(), dtype=np.float32),
-        "sample_labels": np.asarray(test_sample_labels),
-        "bin_labels": np.asarray(test_bin_labels),
-        "latent_vector": np.array([np.nan], dtype=np.float32),
-        "train_losses": [],
-        "val_losses": [],
-        "val_metrics": val_metrics,
-        "test_metrics": test_metrics,
-    }
+        print(
+            f"MAE(micro)={metrics['MAE (micro)']:.4f}  "
+            f"KL={metrics['KL Divergence']:.4f}  "
+            f"R²(Shannon)={metrics['R² (Shannon diversity)']:.3f}"
+        )
 
     return {
-        'val': val_metrics,
-        'test': test_metrics,
-        'payload': unified_payload,
+        "predictions": test_preds,
+        "targets": y_true,
+        "sample_labels": test_sample_labels,
+        "bin_labels": test_bin_labels,
+        "test_metrics": metrics,
+        "train_losses": [],
+        "val_losses": [],
     }
 
 
 def run_all_baselines(
     data_path: str,
     model_names: Optional[List[str]] = None,
-    zero_inflated_only: bool = False,
     output_dir: str = "results",
     random_state: int = 14,
-    verbose: bool = True
-) -> Dict[str, Dict[str, float]]:
+    verbose: bool = True,
+) -> str:
     """
-    Run all baseline models and return comparison results.
-    
-    Args:
-        data_path: Path to data_merged.csv
-        model_names: List of model names to run (None = all)
-        zero_inflated_only: Only run zero-inflated models
-        output_dir: Directory to save results
-        random_state: Random seed for reproducibility
-        verbose: Print progress
-        
-    Returns:
-        Dictionary of model_name -> test metrics
+    Train all baseline models and save a unified pkl for visualize_results.py.
+
+    Returns the path to the saved pkl file.
     """
-    # Load and preprocess data
-    print("\n" + "="*60)
-    print("LOADING AND PREPROCESSING DATA")
-    print("="*60)
-    
-    X_train, X_val, X_test, y_train, y_val, y_test, metadata = load_data(
-        data_path, random_state=random_state
+    set_seed(random_state)
+
+    # --- Load data via src/utils.py ---
+    cfg = Config(data_path=os.path.abspath(data_path))
+    cfg.use_embedding = False   # baselines don't use DNA embeddings
+    cfg.use_taxonomy = False    # taxonomy is label-encoded inside models.py directly
+
+    print(f"Loading data from: {cfg.data_path}")
+    data, _taxonomy_df, _emb, _bwe, _bin_idx, _sample_idx, split_indices, _state = load(cfg)
+
+    X_train, y_train, train_sample_ids, _ = _flat_split(data, "train")
+    X_test,  y_test,  test_sample_ids,  test_bin_ids  = _flat_split(data, "test")
+
+    print(
+        f"  train={len(X_train):,} obs  "
+        f"test={len(X_test):,} obs  "
+        f"zero%={100*(y_test == 0).mean():.1f}%"
     )
-    
-    # Get models to run
-    if zero_inflated_only:
-        all_models = get_zero_inflated_models()
-    else:
-        all_models = get_all_models()
-    
-    if model_names is not None:
-        models = {name: all_models[name] for name in model_names if name in all_models}
-        if len(models) < len(model_names):
-            missing = set(model_names) - set(models.keys())
-            print(f"Warning: Models not found: {missing}")
+
+    # --- Select models ---
+    all_models = get_all_models()
+    if model_names:
+        missing = set(model_names) - set(all_models)
+        if missing:
+            print(f"Warning: unknown model keys: {missing}")
+        models = {k: all_models[k] for k in model_names if k in all_models}
     else:
         models = all_models
-    
+
     print(f"\nRunning {len(models)} baseline models:")
-    for name in models.keys():
-        print(f"  - {name}")
-    
-    # Train and evaluate each model
-    all_results = {}
-    test_results = {}
-    unified_results = {}
-    
+
+    # --- Train & evaluate ---
+    unified: Dict[str, Dict] = {}
     for name, model in models.items():
         try:
-            results = train_and_evaluate_model(
+            payload = train_and_evaluate(
                 model,
                 X_train, y_train,
-                X_val, y_val,
-                X_test, y_test,
-                metadata,
-                verbose=verbose
+                X_test,  y_test,
+                test_sample_ids, test_bin_ids,
+                verbose=verbose,
             )
-            all_results[name] = results
-            test_results[name] = results['test']
-            unified_results[name] = results['payload']
-        except Exception as e:
-            print(f"Error training {name}: {e}")
-            continue
+            unified[name] = payload
+        except Exception as exc:
+            import traceback
+            print(f"\n  ERROR in {name}: {exc}")
+            traceback.print_exc()
 
-    # Print comparison table
-    print_metrics_table(test_results)
-    
-    # Save results in a timestamped subdirectory so successive runs don't collide.
+    # --- Save unified pkl ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(output_dir, timestamp)
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Save test results
-    test_filepath = os.path.join(output_dir, f"baseline_results_test_{timestamp}.csv")
-    save_results_to_csv(test_results, test_filepath)
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), output_dir, timestamp)
+    os.makedirs(out_dir, exist_ok=True)
 
-    # Save unified model payloads for centralized visualization.
-    unified_filepath = os.path.join(output_dir, f"baseline_model_comparison_results_{timestamp}.pkl")
-    with open(unified_filepath, "wb") as f:
-        pickle.dump(unified_results, f)
-    print(f"Unified visualization payload saved to: {unified_filepath}")
-    
-    # Save validation results
-    val_results = {name: res['val'] for name, res in all_results.items()}
-    val_filepath = os.path.join(output_dir, f"baseline_results_val_{timestamp}.csv")
-    save_results_to_csv(val_results, val_filepath)
-    
-    # Create summary report
-    create_summary_report(test_results, output_dir, timestamp)
-    
-    return test_results
+    pkl_path = os.path.join(out_dir, f"baselines_{timestamp}.pkl")
+    with open(pkl_path, "wb") as fh:
+        pickle.dump(unified, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
+    print(f"\nSaved {len(unified)} model payloads → {pkl_path}")
+    return pkl_path
 
 
-def create_summary_report(results: Dict[str, Dict[str, float]], 
-                          output_dir: str, timestamp: str) -> None:
-    """Create a text summary report of model performance."""
-    
-    report_path = os.path.join(output_dir, f"baseline_summary_{timestamp}.txt")
-    
-    with open(report_path, 'w') as f:
-        f.write("="*80 + "\n")
-        f.write("BASELINE MODELS SUMMARY REPORT\n")
-        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("="*80 + "\n\n")
-        
-        # Sort by RMSE
-        sorted_models = sorted(results.items(), key=lambda x: x[1].get('rmse', float('inf')))
-        
-        f.write("RANKING BY RMSE (lower is better):\n")
-        f.write("-"*60 + "\n")
-        for rank, (name, metrics) in enumerate(sorted_models, 1):
-            f.write(f"{rank:2d}. {name:30s} RMSE={metrics['rmse']:.4f}  R²={metrics['r2']:.4f}\n")
-        
-        f.write("\n\nDETAILED METRICS FOR TOP 5 MODELS:\n")
-        f.write("-"*60 + "\n")
-        
-        for name, metrics in sorted_models[:5]:
-            f.write(f"\n{name}:\n")
-            f.write(f"  Standard Metrics:\n")
-            f.write(f"    RMSE:        {metrics['rmse']:.4f}\n")
-            f.write(f"    MAE:         {metrics['mae']:.4f}\n")
-            f.write(f"    R²:          {metrics['r2']:.4f}\n")
-            f.write(f"  Zero-Inflation Metrics:\n")
-            f.write(f"    MSE (zeros):    {metrics['mse_zeros']:.6f}\n")
-            f.write(f"    MSE (non-zeros):{metrics['mse_nonzeros']:.6f}\n")
-            f.write(f"    Zero Recall:    {metrics['zero_recall']:.2%}\n")
-            f.write(f"  Sample-Level Metrics:\n")
-            f.write(f"    Sample R² (mean):   {metrics.get('sample_r2_mean', 0):.4f} ± {metrics.get('sample_r2_std', 0):.4f}\n")
-            f.write(f"    Sample RMSE (mean): {metrics.get('sample_rmse_mean', 0):.4f} ± {metrics.get('sample_rmse_std', 0):.4f}\n")
-            f.write(f"    Sample MAE (mean):  {metrics.get('sample_mae_mean', 0):.4f} ± {metrics.get('sample_mae_std', 0):.4f}\n")
-        
-        f.write("\n\nZERO-INFLATION ANALYSIS:\n")
-        f.write("-"*60 + "\n")
-        # Find best model for zero handling
-        best_zero = min(results.items(), key=lambda x: x[1].get('mse_zeros', float('inf')))
-        f.write(f"Best for predicting zeros: {best_zero[0]} (MSE_zeros={best_zero[1]['mse_zeros']:.6f})\n")
-        
-        best_nonzero = min(results.items(), key=lambda x: x[1].get('mse_nonzeros', float('inf')))
-        f.write(f"Best for non-zeros: {best_nonzero[0]} (MSE_nonzeros={best_nonzero[1]['mse_nonzeros']:.6f})\n")
-        
-        f.write("\n" + "="*80 + "\n")
-    
-    print(f"Summary report saved to: {report_path}")
+def run_one_variant(
+    variant_name: str,
+    data_path: str,
+    output_dir: str,
+    run_id: str,
+    random_state: int = 14,
+    verbose: bool = True,
+) -> None:
+    """Train a single named baseline model and save its per-variant pickle."""
+    all_models = get_all_models()
+    if variant_name not in all_models:
+        print(f"Error: unknown model key '{variant_name}'. Valid: {sorted(all_models)}")
+        sys.exit(1)
+
+    set_seed(random_state)
+
+    cfg = Config(data_path=os.path.abspath(data_path))
+    cfg.use_embedding = False
+    cfg.use_taxonomy = False
+
+    print(f"Loading data from: {cfg.data_path}")
+    data, _taxonomy_df, _emb, _bwe, _bin_idx, _sample_idx, _split_indices, _state = load(cfg)
+
+    X_train, y_train, _, _ = _flat_split(data, "train")
+    X_test,  y_test,  test_sample_ids, test_bin_ids = _flat_split(data, "test")
+
+    model = all_models[variant_name]
+    payload = train_and_evaluate(
+        model,
+        X_train, y_train,
+        X_test,  y_test,
+        test_sample_ids, test_bin_ids,
+        verbose=verbose,
+    )
+
+    analysis_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    out_dir = os.path.join(analysis_root, output_dir, "baselines_comparison", run_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    pkl_path = os.path.join(out_dir, f"baselines_comparison_{variant_name}.pkl")
+    with open(pkl_path, "wb") as fh:
+        pickle.dump({variant_name: payload}, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"Saved {variant_name} → {pkl_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train and evaluate baseline models for metabarcoding abundance prediction"
+        description="Train baseline models for metabarcoding abundance prediction"
     )
     parser.add_argument(
-        "--data_path", 
-        type=str, 
-        default="../../data/data_merged.csv",
-        help="Path to the data_merged.csv file"
+        "--data_path",
+        default=os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "data_merged.csv"
+        ),
+        help="Path to data CSV (default: data/data_merged.csv)",
     )
     parser.add_argument(
         "--models",
-        type=str,
         nargs="+",
         default=None,
-        help="List of model names to run (default: all models)"
-    )
-    parser.add_argument(
-        "--zero_inflated_only",
-        action="store_true",
-        help="Only run zero-inflated models"
+        help="Subset of model keys to run (default: all).",
     )
     parser.add_argument(
         "--output_dir",
-        type=str,
         default="results",
-        help="Directory to save results"
+        help="Output directory base (relative to analysis/)",
     )
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress verbose output"
-    )
-    
+    parser.add_argument("--quiet", action="store_true", help="Suppress per-model output")
+    parser.add_argument("--variant", type=str, default=None,
+                        help="Train only this single model key (used by SLURM per-variant dispatch)")
+    parser.add_argument("--run_id", type=str, default=None,
+                        help="Shared run ID for output directory (default: current timestamp)")
     args = parser.parse_args()
-    
-    # Check if data file exists
+
     if not os.path.exists(args.data_path):
-        print(f"Error: Data file not found: {args.data_path}")
-        print("Please provide the correct path to data_merged.csv")
+        print(f"Error: data file not found: {args.data_path}")
         sys.exit(1)
-    
-    # Run baselines
-    results = run_all_baselines(
-        data_path=args.data_path,
-        model_names=args.models,
-        zero_inflated_only=args.zero_inflated_only,
-        output_dir=args.output_dir,
-        verbose=not args.quiet
-    )
-    
-    # Print best model
-    best_model = min(results.items(), key=lambda x: x[1]['rmse'])
-    print(f"\n🏆 Best model by RMSE: {best_model[0]} (RMSE={best_model[1]['rmse']:.4f})")
-    
-    return results
+
+    if args.variant:
+        run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_one_variant(
+            variant_name=args.variant,
+            data_path=args.data_path,
+            output_dir=args.output_dir,
+            run_id=run_id,
+            verbose=not args.quiet,
+        )
+    else:
+        run_all_baselines(
+            data_path=args.data_path,
+            model_names=args.models,
+            output_dir=args.output_dir,
+            verbose=not args.quiet,
+        )
 
 
 if __name__ == "__main__":

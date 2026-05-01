@@ -2,17 +2,14 @@
 Baseline models for metabarcoding relative abundance prediction.
 Includes simple baselines, linear models, tree-based models, and zero-inflated models.
 """
-import os
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from sklearn.linear_model import Ridge, LinearRegression, LogisticRegression, ElasticNet
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, RandomForestClassifier
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.neighbors import KNeighborsRegressor
-from sklearn.svm import SVR
-from sklearn.dummy import DummyRegressor
 
 
 class BaselineModel(ABC):
@@ -420,70 +417,6 @@ class QuantileRandomForest(BaselineModel):
         preds = np.percentile(all_preds, self.quantile * 100, axis=0)
         return np.clip(preds, 0, 1)
 
-
-# =============================================================================
-# Latent + MLP Model (from src/)
-# =============================================================================
-
-class LatentMLPModel(BaselineModel):
-    """
-    Wrapper around the Latent+MLP Trainer from src/.
-    Uses cross-entropy loss (softmax per sample).
-    Requires fixed_split_indices matching the baselines' random split to ensure
-    the same test set is used for fair comparison.
-    """
-
-    def __init__(self, fixed_split_indices: Optional[Dict] = None):
-        super().__init__(name="Latent MLP")
-        self.fixed_split_indices = fixed_split_indices
-        # (sample_id, bin_uri) -> predicted relative abundance
-        self._pred_lookup: Dict[tuple, float] = {}
-        self.fitted = False
-
-    def fit(self, X, y, **kwargs) -> "LatentMLPModel":
-        """Train the Latent+MLP model using the Trainer from src/."""
-        import sys
-        src_path = os.path.normpath(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src')
-        )
-        if src_path not in sys.path:
-            sys.path.insert(0, src_path)
-        from config import Config, set_seed
-        from train import Trainer
-
-        set_seed()
-        cfg = Config()
-        trainer = Trainer(
-            cfg,
-            fixed_split_indices=self.fixed_split_indices,
-        )
-        trainer.run(use_wandb=False)
-
-        # Build (sample_id, bin_uri) -> prediction lookup from flat labeled arrays.
-        preds_flat, _, sample_labels, bin_labels = trainer.get_predictions("test")
-        self._pred_lookup = {
-            (str(sample_labels[i]), str(bin_labels[i])): float(preds_flat[i])
-            for i in range(len(preds_flat))
-        }
-
-        self.fitted = True
-        return self
-
-    def predict(self, X, test_meta=None) -> np.ndarray:
-        """
-        Return predictions aligned to the baseline test set ordering.
-        test_meta must be a DataFrame with columns 'sample_id' and 'bin_uri'
-        (from metadata['test_meta'] in run_visualization).
-        """
-        if not self.fitted:
-            raise RuntimeError("Model not fitted yet. Call fit() first.")
-        if test_meta is None:
-            return np.array(list(self._pred_lookup.values()), dtype=np.float64)
-        return np.array(
-            [self._pred_lookup.get((row.sample_id, row.bin_uri), 0.0)
-             for row in test_meta.itertuples()],
-            dtype=np.float64,
-        )
 
 
 # =============================================================================
