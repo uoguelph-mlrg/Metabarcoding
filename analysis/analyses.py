@@ -427,27 +427,28 @@ _reg(Analysis(
 # Preprocessing  (uses src Trainer — generic runner with preprocessed_dir override)
 # ---------------------------------------------------------------------------
 
+_PREPROCESSING_DATA = os.path.join(_ANALYSIS_DIR, "preprocessing", "data")
+
 _reg(Analysis(
     name="preprocessing",
     variants=[
         Variant(
             name="normalized",
-            config={"preprocessed_dir": "data/normalized"},
+            config={"preprocessed_dir": os.path.join(_PREPROCESSING_DATA, "normalized")},
             label="Normalized",
             color="#1f77b4",
             time="1:00:00",
         ),
         Variant(
-            name="logarithm",
-            config={"preprocessed_dir": "data/logarithm"},
-            label="Logarithm",
+            name="original",
+            config={"preprocessed_dir": os.path.join(_PREPROCESSING_DATA, "original")},
+            label="Raw counts",
             color="#2ca02c",
             time="1:00:00",
         ),
     ],
-    baseline_label="Original (raw counts)",
+    baseline_label="Logarithm",
     baseline_color="#ff7f0e",
-    run_script="preprocessing/read_count_preprocessing.py",
 ))
 
 
