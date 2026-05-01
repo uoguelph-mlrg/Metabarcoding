@@ -1,6 +1,37 @@
 """
 Baseline models for metabarcoding relative abundance prediction.
 Includes simple baselines, linear models, tree-based models, and zero-inflated models.
+
+# Metabarcoding Baseline Models
+
+This folder contains a set of baseline models for predicting relative abundance from metabarcoding data.
+
+## Models Included
+
+### Simple Baselines
+- **Mean Baseline**: Always predicts the training mean
+- **Median Baseline**: Always predicts the training median
+- **Zero Baseline**: Always predicts zero (useful sanity check for zero-inflated data)
+
+### Linear Models
+- **Linear Regression**: Standard OLS regression
+- **Ridge Regression**: L2-regularized linear regression
+- **ElasticNet**: L1 + L2 regularized linear regression
+
+### Tree-Based Models
+- **Decision Tree**: Single decision tree regressor
+- **Random Forest**: Ensemble of decision trees
+- **Gradient Boosting**: Sequential boosting ensemble
+
+### Other Models
+- **KNN**: K-Nearest Neighbors regression
+
+### Zero-Inflated Models (specialized for handling excess zeros)
+- **Two-Stage (Hurdle) Model**: Combines classification (presence/absence) + regression (abundance given presence)
+- **Zero-Inflated Ridge**: Logistic regression for zeros + Ridge regression on log-transformed positives
+- **Tweedie Regression**: GLM with Tweedie distribution (naturally handles zeros)
+- **Log-Transform Model**: Random Forest on log-transformed targets
+- **Quantile Random Forest**: Predicts median (robust to zero-inflation)
 """
 import numpy as np
 import pandas as pd
