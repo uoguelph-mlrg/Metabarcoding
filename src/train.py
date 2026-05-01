@@ -811,6 +811,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="default", help="Name of the model variant being trained")
     parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--results_dir", type=str, default=None, help="Override results directory (default: cfg.results_dir)")
     args = parser.parse_args()
 
     set_seed()
@@ -820,7 +821,8 @@ if __name__ == "__main__":
     cfg = Config()
 
     run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.abspath(os.path.join(cfg.results_dir, args.model))
+    results_base = args.results_dir if args.results_dir else cfg.results_dir
+    run_dir = os.path.abspath(os.path.join(results_base, args.model, run_id))
     os.makedirs(run_dir, exist_ok=True)
 
     use_wandb = WANDB_AVAILABLE
