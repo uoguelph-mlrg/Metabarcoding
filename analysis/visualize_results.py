@@ -1090,10 +1090,15 @@ def plot_training_progress_comparison(
     if not models:
         log.info("  (Skipping training progress plot — no training data found.)")
         return
+    
+    keys = _sorted_models(results, labels)
+    n = len(keys)
+    n_rows, n_cols = _scatter_grid(n)
 
     set_style()
     n = len(models)
-    fig, axes = plt.subplots(1, n, figsize=(8 * n, 5), sharey=True)
+    n_rows, n_cols = _scatter_grid(n)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(8 * n_cols, 5 * n_rows), sharey=True)
     axes = np.array(axes).flatten() if n > 1 else np.array([axes])
 
     for idx, model in enumerate(models):
@@ -1348,7 +1353,7 @@ def plot_latent_diagnostics(
             dy = [value for _, value in delta_pairs]
             colors = ["#2ca02c" if value >= 0 else "#d62728" for value in dy]
             width = max(1, (dx[-1] - dx[0]) / max(len(dx), 1) * 0.8) if len(dx) > 1 else 5
-            ax.bar(dx, dy, width=width, color=bar_colors, alpha=0.8)
+            ax.bar(dx, dy, width=width, color=colors, alpha=0.8)
             ax.axhline(0.0, color="gray", ls="--", lw=1, alpha=0.8)
         ax.set_title("delta bars")
         ax.set_ylabel(delta_label)

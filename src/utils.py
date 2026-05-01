@@ -225,7 +225,6 @@ def _save_to_preprocessed_dir(
         pickle.dump(split_indices, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     shutil.copy2(state_path, os.path.join(out_dir, PREPROCESSING_STATE_FILENAME))
-
     open(sentinel, "w").close()
     log.info(f"Saved complete preprocessed cache to {out_dir}")
 
@@ -287,7 +286,6 @@ def _load_from_preprocessed_dir(
 
 def load(
     config: Config,
-    save_data: bool = False,  # Deprecated — use config.preprocessed_dir instead
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
     preprocessing_state_path: Optional[str] = None,
     preprocessing_state_filename: str = PREPROCESSING_STATE_FILENAME,
@@ -300,7 +298,6 @@ def load(
 
     Args:
         config: Configuration object with train_frac, val_frac
-        save_data: Deprecated. Use config.preprocessed_dir instead.
         fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample
             indices for reproducible splits across different calls
         preprocessing_state_path: Optional path to preprocessing state file; used for replay mode
@@ -319,9 +316,6 @@ def load(
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
         - preprocessing_state_path: path to the saved preprocessing state artifact
     """
-    if save_data:
-        log.warning("load(): save_data=True is deprecated; use config.preprocessed_dir instead. Ignoring.")
-
     # Fast-path: load everything from a previously written cache directory.
     if config.preprocessed_dir is not None:
         sentinel = os.path.join(config.preprocessed_dir, "_complete")
@@ -402,7 +396,7 @@ def load(
     # Also store actual proportions for cross-entropy loss
     df["rel_abundance"] = df["occurrences"] / (sample_totals + 1e-10)
 
-    # Apply logarithmic preprocessing (only log transform, no sample normalization)
+    # Apply log transform (no sample normalization)
     df["total_reads_per_sample"] = np.log1p(df["total_reads_per_sample"])
     df["total_reads_norm"] = np.log1p(df["total_reads"])
     df["avg_reads_norm"] = np.log1p(df["avg_reads"])
@@ -513,6 +507,7 @@ def load(
                 model_name=_emb_model,
                 device=config.device,
                 satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
+                range_db_path=getattr(config, "range_db_path", None),
             )
             embedder = build_location_embedder(spec)
             df, location_embedding_cols = add_location_embeddings(
@@ -549,6 +544,7 @@ def load(
             model_name=config.location_embedder,
             device=config.device,
             satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
+            range_db_path=getattr(config, "range_db_path", None),
         )
         embedder = build_location_embedder(spec)
         df, location_embedding_cols = add_location_embeddings(
@@ -712,74 +708,3 @@ def load(
         split_indices,
         resolved_state_path,
     )
-
-
-def load_processed(
-    data_dir: str,
-) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
-    """
-    Load preprocessed splits from a directory.
-
-    If the directory contains a `_complete` sentinel (written by `load()` with
-    `config.preprocessed_dir` set), all artifacts — including bin/sample index pickles
-    and split_indices — are loaded directly.
-
-    Otherwise falls back to the legacy CSV-only path (no index pickles, no split_indices).
-    """
-    sentinel = os.path.join(data_dir, "_complete")
-    if os.path.exists(sentinel):
-        splits, taxonomy_df, _, _, bin_index, sample_index, split_indices, _ = _load_from_preprocessed_dir(data_dir)
-        return splits, taxonomy_df, bin_index, sample_index, split_indices
-
-    # Legacy path: CSV-only directory without pickled indices.
-    def _read_X(split: str) -> pd.DataFrame:
-        path = os.path.join(data_dir, f"X_{split}.csv")
-        X = pd.read_csv(path)
-        if "sample_id" not in X.columns or "bin_uri" not in X.columns:
-            raise ValueError(f"{path} must contain columns 'sample_id' and 'bin_uri'")
-        return X.set_index(["sample_id", "bin_uri"])
-
-    def _read_y(split: str, n_rows: int) -> pd.Series:
-        path = os.path.join(data_dir, f"y_{split}.csv")
-        y_df = pd.read_csv(path)
-        y = y_df["rel_abundance"] if "rel_abundance" in y_df.columns else y_df.iloc[:, 0]
-        if len(y) != n_rows:
-            raise ValueError(f"{path} has {len(y)} rows but X_{split}.csv has {n_rows}")
-        return y.astype(np.float32)
-
-    X_train = _read_X("train")
-    X_val   = _read_X("val")
-    X_test  = _read_X("test")
-    y_train = _read_y("train", len(X_train))
-    y_val   = _read_y("val",   len(X_val))
-    y_test  = _read_y("test",  len(X_test))
-
-    bins_path = os.path.join(data_dir, "bins_data.csv")
-    taxonomy_df = pd.read_csv(bins_path)
-    if "bin_uri" not in taxonomy_df.columns:
-        raise ValueError(f"{bins_path} must contain 'bin_uri'")
-
-    unique_samples = pd.Index(pd.concat([
-        X_train.reset_index()["sample_id"],
-        X_val.reset_index()["sample_id"],
-        X_test.reset_index()["sample_id"],
-    ]).unique())
-    sample_index = {s: i for i, s in enumerate(unique_samples)}
-
-    unique_bins = pd.Index(pd.concat([
-        X_train.reset_index()["bin_uri"],
-        X_val.reset_index()["bin_uri"],
-        X_test.reset_index()["bin_uri"],
-    ]).unique())
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
-
-    taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
-    taxonomy_df = taxonomy_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
-
-    split_indices: Dict[str, np.ndarray] = {"train": np.array([]), "val": np.array([]), "test": np.array([])}
-
-    return {
-        "train": {"X": X_train, "y": y_train, "y_prob": y_train},
-        "val":   {"X": X_val,   "y": y_val,   "y_prob": y_val},
-        "test":  {"X": X_test,  "y": y_test,  "y_prob": y_test},
-    }, taxonomy_df, bin_index, sample_index, split_indices
