@@ -81,11 +81,6 @@ class EmbedderSpec:
 	batch_size: int = 2048
 	satclip_ckpt_path: Optional[str] = None
 	range_db_path: Optional[str] = None
-	range_model_name: str = "RANGE+"
-	range_beta: float = 0.5
-	alphaearth_year: int = 2024
-	alphaearth_scale_meters: int = 10
-	alphaearth_project: Optional[str] = 'metabarcoding-491221'
 
 
 class BaseLocationEmbedder:
@@ -324,8 +319,8 @@ class RANGEEmbedder(_RangeBackedEmbedder):
 		batch_size: int = 4096,
 		satclip_ckpt_path: Optional[str] = None,
 		range_db_path: Optional[str] = None,
-		range_model_name: str = "RANGE+",
-		range_beta: float = 0.5,
+		range_model_name: str = "RANGE+",  # "RANGE" or "RANGE+"
+		range_beta: float = 0.5,           # interpolation weight for RANGE+ (0=RANGE, 1=RANGE+)
 	) -> None:
 		super().__init__(
 			model_name=range_model_name,
@@ -344,9 +339,9 @@ class AlphaEarthEmbedder(BaseLocationEmbedder):
 		self,
 		device: str = "cpu",
 		batch_size: int = 256,
-		year: int = 2024,
-		scale_meters: int = 10,
-		project: Optional[str] = 'metabarcoding-vector',
+		year: int = 2024,           # satellite imagery year
+		scale_meters: int = 10,     # sampling resolution in metres
+		project: Optional[str] = "metabarcoding-491221",  # GCP project for Earth Engine
 	) -> None:
 		super().__init__(device=device, batch_size=batch_size)
 		try:
@@ -473,19 +468,11 @@ def build_location_embedder(spec: EmbedderSpec) -> BaseLocationEmbedder:
 			batch_size=spec.batch_size,
 			satclip_ckpt_path=spec.satclip_ckpt_path,
 			range_db_path=spec.range_db_path,
-			range_model_name=spec.range_model_name,
-			range_beta=spec.range_beta,
 		)
 	if model_name == "geoclip":
 		return GeoCLIPEmbedder(device=spec.device, batch_size=spec.batch_size)
 	if model_name == "alphaearth":
-		return AlphaEarthEmbedder(
-			device=spec.device,
-			batch_size=spec.batch_size,
-			year=spec.alphaearth_year,
-			scale_meters=spec.alphaearth_scale_meters,
-			project=spec.alphaearth_project,
-		)
+		return AlphaEarthEmbedder(device=spec.device, batch_size=spec.batch_size)
 	raise ValueError(f"Unsupported model_name '{spec.model_name}'")
 
 
