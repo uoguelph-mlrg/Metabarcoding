@@ -117,6 +117,20 @@ class Config:
     satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
 
 
+# prepare.py is missing several stdlib imports at module level (Path, importlib, json, sys,
+# Iterable, dataclass). Inject them via builtins so Python's name-lookup fallback finds them.
+import builtins as _builtins
+import importlib as _importlib
+import json as _json
+from pathlib import Path as _Path
+from typing import Iterable as _Iterable
+from dataclasses import dataclass as _dataclass
+_builtins.Path = _Path
+_builtins.importlib = _importlib
+_builtins.json = _json
+_builtins.Iterable = _Iterable
+_builtins.dataclass = _dataclass
+
 # When train.py is the __main__ script, sys.modules['train'] is absent.
 # prepare.py imports Config from 'train', which would re-import train.py fresh and
 # cause a circular import. Aliasing fixes it by making 'train' resolve to this module.
