@@ -12,7 +12,7 @@ class Config:
     data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
     results_dir: str = os.path.join(PROJECT_ROOT, "results")  # Directory where run artifacts are saved
     preprocessed_dir: Optional[str] = os.path.join(PROJECT_ROOT, "data", "preprocessed")  # If set, save all preprocessing artifacts here on first run and load from there on subsequent runs, skipping CSV parsing and BarcodeBERT inference
-    checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
+    checkpoint_every: int = 20                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
 
     # Train / val / test split
@@ -72,10 +72,10 @@ class Config:
     latent_hop_knn_cap: int = 64                # Max number of neighbors to include in latent optimization (used when latent_k_hop_mode="knn")
 
     # Training with interpolated latents settings
-    interpolated_sample_fraction: float = 0.0   # Fraction of training samples using interpolated latent (set to 0 to disable interpolation during training)
-    train_MLP_with_interpolation: bool = False  # Whether to train the MLP on interpolated latents too (instead of only using them in the latent solver)
-    inference_with_interpolation: bool = False  # Whether to use interpolated latents during inference (if False, uses BINs own latent)
-    include_self_in_interpolation: bool = False # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
+    interpolated_sample_fraction: float = 0.2   # Fraction of training samples using interpolated latent (set to 0 to disable interpolation during training)
+    train_MLP_with_interpolation: bool = True  # Whether to train the MLP on interpolated latents too (instead of only using them in the latent solver)
+    inference_with_interpolation: bool = True  # Whether to use interpolated latents during inference (if False, uses BINs own latent)
+    include_self_in_interpolation: bool = True # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
 
     # Sizes and combination modalities for latent and intrinsic vectors
     embed_dim: int = 10                         # Embedding dimension d for both latent and intrinsic vectors (set to 1 for scalars)
@@ -86,7 +86,7 @@ class Config:
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
 
     # Location embedding (optional; None disables it and keeps raw lat/lon features)
-    location_embedder: Optional[str] = None      # None | "satclip" | "geoclip" | "range" | "alphaearth"
+    location_embedder: Optional[str] = "satclip"      # None | "satclip" | "geoclip" | "range" | "alphaearth"
     keep_raw_gps_features: bool = False          # Keep raw lat/lon alongside location embeddings
     satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
 
