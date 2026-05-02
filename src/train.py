@@ -550,20 +550,17 @@ class Trainer:
                     bin_idx = bin_idx.unsqueeze(0)
                     sample_idx = sample_idx.unsqueeze(0)
 
-                for i in range(inputs.shape[0]):
-                    s_idx = int(sample_idx[i].item())
-                    b_idx = int(bin_idx[i].item())
-                    interpolation_mask = torch.ones(1, dtype=torch.bool, device=self.device) if use_interpolation else None
-                    output = self.model(
-                        inputs[i].unsqueeze(0),
-                        bin_idx[i].unsqueeze(0),
-                        interpolation_mask=interpolation_mask,
-                    )
-                    prob = float(torch.sigmoid(output).cpu().numpy().item())
-                    y_true = float(targets[i].cpu().numpy().item())
-                    sample_pred.setdefault(s_idx, []).append(prob)
-                    sample_true.setdefault(s_idx, []).append(y_true)
-                    sample_bins.setdefault(s_idx, []).append(b_idx)
+                interpolation_mask = torch.ones(inputs.shape[0], dtype=torch.bool, device=self.device) if use_interpolation else None
+                outputs = self.model(inputs, bin_idx, interpolation_mask=interpolation_mask)
+                probs = torch.sigmoid(outputs).cpu().numpy()
+                y_trues = targets.cpu().numpy()
+                s_idxs = sample_idx.cpu().numpy()
+                b_idxs = bin_idx.cpu().numpy()
+                for i in range(len(probs)):
+                    s_idx = int(s_idxs[i])
+                    sample_pred.setdefault(s_idx, []).append(float(probs[i]))
+                    sample_true.setdefault(s_idx, []).append(float(y_trues[i]))
+                    sample_bins.setdefault(s_idx, []).append(int(b_idxs[i]))
 
         if self.loss_type == "logistic":
             for s_idx, preds in sample_pred.items():
