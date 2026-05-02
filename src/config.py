@@ -23,8 +23,8 @@ class Config:
     # Basic training settings
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
     device: str = (
-        "mps" if torch.backends.mps.is_available() else 
-        "cuda" if torch.cuda.is_available() else 
+        "mps" if torch.backends.mps.is_available() else
+        "cuda" if torch.cuda.is_available() else
         "cpu"
     )
     batch_size_bin: int = 1024                  # Batch size (in number of observations not samples)
@@ -67,7 +67,7 @@ class Config:
     latent_warmup_start_factor: float = 1e-3    # Initial multiplier for latent LR warmup
     latent_warmup_frac: float = 0.2             # Fraction of total latent solves used for warmup
     latent_lr_eta_min: float = 1e-6             # Minimum latent LR reached by cosine decay
-    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"  # Method for selecting subset of neighbors for latent optimization 
+    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"  # Method for selecting subset of neighbors for latent optimization
     latent_k_hop_threshold: int = 2             # Number of neighbor graph hops to select BINs from (used when latent_k_hop_mode="threshold")
     latent_hop_knn_cap: int = 64                # Max number of neighbors to include in latent optimization (used when latent_k_hop_mode="knn")
 

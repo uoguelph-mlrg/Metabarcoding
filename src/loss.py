@@ -37,7 +37,7 @@ class Loss:
             self.criterion = nn.BCEWithLogitsLoss()
         else:
             raise ValueError(f"Unknown task {task}")
-    
+
     def cross_entropy_soft_targets(
         self, logits: torch.Tensor, targets: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
