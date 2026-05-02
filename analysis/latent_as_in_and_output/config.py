@@ -81,15 +81,15 @@ class Config:
 
     # Sizes and combination modalities for latent and intrinsic vectors
     latent_input_dim: int = 10                  # Dimension of input latent embedding Z per BIN
-    embed_dim: int = 10                         # Embedding dimension d for output latent D and intrinsic vectors (set to 1 for scalar D, 0 to disable output latent D)
-    gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid"  # Gating function for combining latent and intrinsic vectors
+    embed_dim: int = 50                         # Embedding dimension d for output latent D and intrinsic vectors (set to 1 for scalar D, 0 to disable output latent D)
+    gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "scaled_exp"  # Gating function for combining latent and intrinsic vectors
     gating_alpha: float = 0.5                   # Scaling factor for scaled_exp gating (in (0,1])
     gating_kappa: float = 0.5                   # Scaling factor for tanh gating
     gating_epsilon: float = 0.693               # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
 
     # Location embedding (optional; None disables it and keeps raw lat/lon features)
-    location_embedder: Optional[str] = "satclip"      # None | "satclip" | "geoclip" | "range" | "alphaearth"
+    location_embedder: Optional[str] = "range"        # None | "satclip" | "geoclip" | "range" | "alphaearth"
     keep_raw_gps_features: bool = False          # Keep raw lat/lon alongside location embeddings
     satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
 
