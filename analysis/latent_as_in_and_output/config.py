@@ -11,24 +11,24 @@ class Config:
     # Run configuration
     data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
     results_dir: str = os.path.join(os.path.dirname(__file__), "results")  # Directory where run artifacts are saved
-    preprocessed_dir: Optional[str] = None  # If set, load preprocessing artifacts from here instead of re-running
-    checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
+    preprocessed_dir: Optional[str] = os.path.join(PROJECT_ROOT, "data", "preprocessed")  # If set, save all preprocessing artifacts here on first run and load from there on subsequent runs, skipping CSV parsing and BarcodeBERT inference
+    checkpoint_every: int = 20                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
 
     # Train / val / test split
     train_frac: float = 0.8
     val_frac: float = 0.1
-    remove_excess: bool = False
-
+    remove_excess: bool = False                 # If True, remove all samples with excess from train/val set and build test set only from excess samples (instead of random splitting)
+    
     # Basic training settings
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
     device: str = (
-        "mps" if torch.backends.mps.is_available() else 
-        "cuda" if torch.cuda.is_available() else 
+        "mps" if torch.backends.mps.is_available() else
+        "cuda" if torch.cuda.is_available() else
         "cpu"
     )
     batch_size_bin: int = 1024                  # Batch size (in number of observations not samples)
-    batch_size_sample: int = 8                  # Batch size in number of samples
+    batch_size_sample: int = 16                 # Batch size in number of samples
     epochs: int = 200                           # Epochs per training phase
     grad_clip: Optional[float] = 1.0            # Gradient clipping value (None to disable)
 
@@ -43,13 +43,12 @@ class Config:
     interpolation_method: Literal["nw", "llr"] = "nw"  # interpolation method for latent solver: "nw" for Nadaraya-Watson, "llr" for locally linear regression
 
     # DNA embedding settings (used when use_embedding=True)
-    embedding_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "embeddings.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
     # MLP - architecture & optimization settings
     mlp_hidden_dims: List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
     mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
-    weight_decay: float = 1e-5                  # Weight decay for MLP parameters
+    weight_decay: float = 1e-4                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
     mlp_warmup_frac: float = 0.1                # Fraction of total training steps used for MLP LR warmup
     mlp_lr_eta_min: float = 1e-6                # Minimum MLP LR reached by cosine decay
@@ -70,15 +69,15 @@ class Config:
     latent_warmup_start_factor: float = 1e-3    # Initial multiplier for latent LR warmup
     latent_warmup_frac: float = 0.2             # Fraction of total latent solves used for warmup
     latent_lr_eta_min: float = 1e-6             # Minimum latent LR reached by cosine decay
-    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"  # Method for selecting subset of neighbors for latent optimization 
+    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"  # Method for selecting subset of neighbors for latent optimization
     latent_k_hop_threshold: int = 2             # Number of neighbor graph hops to select BINs from (used when latent_k_hop_mode="threshold")
     latent_hop_knn_cap: int = 64                # Max number of neighbors to include in latent optimization (used when latent_k_hop_mode="knn")
 
     # Training with interpolated latents settings
-    interpolated_sample_fraction: float = 0.0   # Fraction of training samples using interpolated latent (set to 0 to disable interpolation during training)
-    train_MLP_with_interpolation: bool = False  # Whether to train the MLP on interpolated latents too (instead of only using them in the latent solver)
-    inference_with_interpolation: bool = False  # Whether to use interpolated latents during inference (if False, uses BINs own latent)
-    include_self_in_interpolation: bool = False # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
+    interpolated_sample_fraction: float = 0.2   # Fraction of training samples using interpolated latent (set to 0 to disable interpolation during training)
+    train_MLP_with_interpolation: bool = True  # Whether to train the MLP on interpolated latents too (instead of only using them in the latent solver)
+    inference_with_interpolation: bool = True  # Whether to use interpolated latents during inference (if False, uses BINs own latent)
+    include_self_in_interpolation: bool = True # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
 
     # Sizes and combination modalities for latent and intrinsic vectors
     latent_input_dim: int = 10                  # Dimension of input latent embedding Z per BIN
@@ -88,6 +87,11 @@ class Config:
     gating_kappa: float = 0.5                   # Scaling factor for tanh gating
     gating_epsilon: float = 0.693               # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
+
+    # Location embedding (optional; None disables it and keeps raw lat/lon features)
+    location_embedder: Optional[str] = "satclip"      # None | "satclip" | "geoclip" | "range" | "alphaearth"
+    keep_raw_gps_features: bool = False          # Keep raw lat/lon alongside location embeddings
+    satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
 
 
 def set_seed(seed: int = 14) -> None:

@@ -5,6 +5,7 @@ import os
 import pickle
 import sys
 import time
+import warnings
 from dataclasses import asdict
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging as log
@@ -26,7 +27,7 @@ from config import Config, set_seed
 from dataset import MBDataset, collate_samples
 from latent_solver import LatentSolver
 from loss import Loss
-from metrics import compute_metrics as _compute_metrics_fn, metric_key
+from metrics import compute_metrics, metric_key
 from mlp import MLPModel
 from model import Model
 from neighbor_graph import NeighbourGraph
@@ -99,6 +100,8 @@ class Trainer:
             gating_fn=self.cfg.gating_fn,
         )
         latent_solver.build_interpolation_matrix()
+
+        set_seed()
 
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
@@ -501,7 +504,7 @@ class Trainer:
                     interpolation_mask = interpolation_mask[valid]
 
                 inputs_flat = inputs_flat[valid.view(-1)]
-                y = targets[valid]
+                targets = targets[valid]
                 bin_ids = bin_ids[valid]
                 sample_ids = sample_grid[valid]
 
@@ -530,7 +533,7 @@ class Trainer:
 
         try:
             latent_d, timings = self.model.latent_solver.solve(
-                y=y,
+                y=targets,
                 intrinsic=intrinsic,
                 final_weights=self.model.final_linear.weight if self.cfg.embed_dim > 1 else None,
                 bin_ids=bin_ids,
@@ -541,7 +544,9 @@ class Trainer:
                 latent=self.model.latent_d,
                 optimizer=self.latent_optimizer,
             )
-            self.latent_scheduler.step()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.latent_scheduler.step()
         finally:
             self.model.latent_d.requires_grad_(previous_requires_grad)
 
@@ -576,7 +581,7 @@ class Trainer:
                         valid_mask = torch.ones(inputs.shape[1], dtype=torch.bool, device=inputs.device)
                     inputs_flat = inputs[b][valid_mask]
                     bin_idx_flat = bin_idx[b][valid_mask]
-                    interpolation_mask = valid_mask if use_interpolation else None
+                    interpolation_mask = torch.ones(len(bin_idx_flat), dtype=torch.bool, device=inputs_flat.device) if use_interpolation else None
                     outputs = self.model(
                         inputs_flat,
                         bin_idx_flat,
@@ -599,20 +604,17 @@ class Trainer:
                     bin_idx = bin_idx.unsqueeze(0)
                     sample_idx = sample_idx.unsqueeze(0)
 
-                for i in range(inputs.shape[0]):
-                    s_idx = int(sample_idx[i].item())
-                    b_idx = int(bin_idx[i].item())
-                    interpolation_mask = torch.ones(1, dtype=torch.bool, device=self.device) if use_interpolation else None
-                    output = self.model(
-                        inputs[i].unsqueeze(0),
-                        bin_idx[i].unsqueeze(0),
-                        interpolation_mask=interpolation_mask,
-                    )
-                    prob = float(torch.sigmoid(output).cpu().numpy().item())
-                    y_true = float(targets[i].cpu().numpy().item())
-                    sample_pred.setdefault(s_idx, []).append(prob)
-                    sample_true.setdefault(s_idx, []).append(y_true)
-                    sample_bins.setdefault(s_idx, []).append(b_idx)
+                interpolation_mask = torch.ones(inputs.shape[0], dtype=torch.bool, device=self.device) if use_interpolation else None
+                outputs = self.model(inputs, bin_idx, interpolation_mask=interpolation_mask)
+                probs = torch.sigmoid(outputs).cpu().numpy()
+                y_trues = targets.cpu().numpy()
+                s_idxs = sample_idx.cpu().numpy()
+                b_idxs = bin_idx.cpu().numpy()
+                for i in range(len(probs)):
+                    s_idx = int(s_idxs[i])
+                    sample_pred.setdefault(s_idx, []).append(float(probs[i]))
+                    sample_true.setdefault(s_idx, []).append(float(y_trues[i]))
+                    sample_bins.setdefault(s_idx, []).append(int(b_idxs[i]))
 
         if self.loss_type == "logistic":
             for s_idx, preds in sample_pred.items():
@@ -645,8 +647,15 @@ class Trainer:
         split: Literal["train", "val", "test"],
         predictions: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None,
     ) -> Dict[str, float]:
+        """Compute per-observation and per-sample evaluation metrics.
+
+        Args:
+            split: Dataset split to evaluate.
+            predictions: Optional pre-computed output of get_predictions(). When
+                provided the forward pass is skipped.
+        """
         y_pred, y_true, sample_labels, _ = predictions if predictions is not None else self.get_predictions(split=split)
-        return _compute_metrics_fn(y_pred, y_true, sample_labels=sample_labels)
+        return compute_metrics(y_pred, y_true, sample_labels=sample_labels)
 
     def run(self, use_wandb: bool = True) -> Dict[str, Any]:
         log.info(
@@ -675,7 +684,9 @@ class Trainer:
                     latent_s = time.perf_counter() - latent_start
 
                 loss_value, mlp_timings = self._train_batch(batch)
-                self.mlp_scheduler.step()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.mlp_scheduler.step()
 
                 total_s = time.perf_counter() - batch_start
 
@@ -772,6 +783,14 @@ class Trainer:
         if os.path.exists(best_ckpt):
             checkpoint = torch.load(best_ckpt, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint["model_state_dict"])
+
+        _keep = {"best.pt", "latest.pt", PREPROCESSING_STATE_FILENAME}
+        for _ckpt_file in os.listdir(self.checkpoint_dir):
+            if _ckpt_file not in _keep:
+                try:
+                    os.remove(os.path.join(self.checkpoint_dir, _ckpt_file))
+                except OSError:
+                    pass
 
         test_loss = self.validate(split="test")
         test_preds = self.get_predictions(split="test")
@@ -934,6 +953,9 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True, help="Name of the model variant being trained")
     parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--results_dir", type=str, default=None, help="Override results directory (default: cfg.results_dir)")
+    parser.add_argument("--epochs", type=int, default=None, help="Override epoch count (default: cfg.epochs)")
+    parser.add_argument("--data_path", type=str, default=None, help="Override data CSV path (default: cfg.data_path)")
     args = parser.parse_args()
 
     set_seed()
@@ -941,9 +963,15 @@ if __name__ == "__main__":
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
     cfg = Config()
+    if args.epochs is not None:
+        cfg.epochs = args.epochs
+    if args.data_path is not None:
+        cfg.data_path = os.path.abspath(args.data_path)
+        cfg.preprocessed_dir = None  # don't reuse cached preprocessed data for a different dataset
 
     run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.abspath(os.path.join(cfg.results_dir, args.model))
+    results_base = args.results_dir if args.results_dir else cfg.results_dir
+    run_dir = os.path.abspath(os.path.join(results_base, args.model, run_id))
     os.makedirs(run_dir, exist_ok=True)
 
     use_wandb = WANDB_AVAILABLE
