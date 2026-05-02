@@ -1825,7 +1825,39 @@ class Trainer:
             embeddings=embeddings_array,
             bins_with_embedding=bins_with_embedding_arr,
         )
-        self.neighbour_graph.build()
+
+        # Cache neighbor graph and H matrix to skip expensive rebuild on subsequent runs.
+        _graph_cache_key = (
+            f"ng_K{self.cfg.K}_mode{self.cfg.neighbor_mode}_metric{self.cfg.emb_distance_metric}"
+            f"_interp{self.cfg.interpolation_method}_self{self.cfg.include_self_in_interpolation}"
+        )
+        _graph_cache_path = os.path.join(
+            os.path.dirname(self.cfg.preprocessed_dir or os.path.join(PROJECT_ROOT, "data")),
+            f"{_graph_cache_key}.pkl",
+        ) if self.cfg.preprocessed_dir else None
+
+        _graph_loaded = False
+        if _graph_cache_path and os.path.exists(_graph_cache_path):
+            try:
+                with open(_graph_cache_path, "rb") as _f:
+                    _cached = pickle.load(_f)
+                self.neighbour_graph.neighbours = _cached["neighbours"]
+                self.neighbour_graph.distances = _cached["distances"]
+                log.info("Loaded neighbor graph from cache: %s", _graph_cache_path)
+                _graph_loaded = True
+            except Exception as _e:
+                log.warning("Failed to load neighbor graph cache (%s); rebuilding.", _e)
+
+        if not _graph_loaded:
+            self.neighbour_graph.build()
+            if _graph_cache_path:
+                try:
+                    with open(_graph_cache_path, "wb") as _f:
+                        pickle.dump({"neighbours": self.neighbour_graph.neighbours,
+                                     "distances": self.neighbour_graph.distances}, _f, protocol=pickle.HIGHEST_PROTOCOL)
+                    log.info("Saved neighbor graph cache: %s", _graph_cache_path)
+                except Exception as _e:
+                    log.warning("Failed to save neighbor graph cache: %s", _e)
 
         latent_solver = LatentSolver(
             self.cfg,
@@ -1833,7 +1865,41 @@ class Trainer:
             embed_dim=self.cfg.embed_dim,
             gating_fn=self.cfg.gating_fn,
         )
-        latent_solver.build_interpolation_matrix()
+
+        # Cache H matrix (sparse operators) — keyed separately since it also depends on embed params.
+        _H_cache_path = _graph_cache_path.replace(".pkl", "_H.pkl") if _graph_cache_path else None
+        _H_loaded = False
+        if _H_cache_path and os.path.exists(_H_cache_path):
+            try:
+                with open(_H_cache_path, "rb") as _f:
+                    _Hcached = pickle.load(_f)
+                latent_solver.H_smooth = _Hcached["H_smooth"]
+                latent_solver.I_minus_H_smooth = _Hcached["I_minus_H_smooth"]
+                latent_solver._I_minus_H_smooth_csc = _Hcached["I_minus_H_smooth_csc"]
+                latent_solver._H_interp_csr = _Hcached["H_interp_csr"]
+                latent_solver._graph_neighbors = _Hcached["graph_neighbors"]
+                latent_solver.H_interp[False] = latent_solver._csr_to_torch(latent_solver._H_interp_csr[False])
+                latent_solver.H_interp[True] = latent_solver._csr_to_torch(latent_solver._H_interp_csr[True])
+                log.info("Loaded H matrix from cache: %s", _H_cache_path)
+                _H_loaded = True
+            except Exception as _e:
+                log.warning("Failed to load H matrix cache (%s); rebuilding.", _e)
+
+        if not _H_loaded:
+            latent_solver.build_interpolation_matrix()
+            if _H_cache_path:
+                try:
+                    with open(_H_cache_path, "wb") as _f:
+                        pickle.dump({
+                            "H_smooth": latent_solver.H_smooth,
+                            "I_minus_H_smooth": latent_solver.I_minus_H_smooth,
+                            "I_minus_H_smooth_csc": latent_solver._I_minus_H_smooth_csc,
+                            "H_interp_csr": latent_solver._H_interp_csr,
+                            "graph_neighbors": latent_solver._graph_neighbors,
+                        }, _f, protocol=pickle.HIGHEST_PROTOCOL)
+                    log.info("Saved H matrix cache: %s", _H_cache_path)
+                except Exception as _e:
+                    log.warning("Failed to save H matrix cache: %s", _e)
 
         set_seed()
 
