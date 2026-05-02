@@ -2478,7 +2478,8 @@ class Trainer:
             training_seconds += time.perf_counter() - epoch_start
 
             eval_interval = max(1, int(getattr(self.cfg, "eval_interval", 1)))
-            do_eval = (epoch % eval_interval == 0) or (epoch == self.cfg.epochs - 1)
+            training_done = (epoch > 0 and training_seconds >= TIME_BUDGET)
+            do_eval = (epoch % eval_interval == 0) or (epoch == self.cfg.epochs - 1) or training_done
 
             if do_eval:
                 train_eval_start = time.perf_counter()
