@@ -10,16 +10,16 @@ from config import Config
 import logging as log
 
 OBSERVATION_FEATURES = [
-    # Observed features (already in dataset) 
+    # Observed features (already in dataset)
     "total_reads_per_sample",
     "repl_w_reads_fractn",
-    "latitude", 
+    "latitude",
     "longitude",
     #"Excess",
     #"Bulk_Sample_wet_weight",
     #"SumExcessSpecimens",
     #"ExcessNumberTaxa",
-    #"length_min_mm", 
+    #"length_min_mm",
     #"length_max_mm",
     # Computed bin-level features
     "collection_day",   # derived from collection_start_date
@@ -325,8 +325,24 @@ def load(
             if config.use_embedding and cached[2] is None:
                 log.info(f"load(): cache at {config.preprocessed_dir} has no embeddings but use_embedding=True — recomputing.")
             else:
-                log.info(f"load(): cache hit at {config.preprocessed_dir} — loading from disk, skipping preprocessing.")
-                return cached
+                # Check that the cached location embedder matches the current config.
+                cached_state_path = os.path.join(config.preprocessed_dir, PREPROCESSING_STATE_FILENAME)
+                cached_loc_embedder = None
+                if os.path.exists(cached_state_path):
+                    try:
+                        cached_state = load_preprocessing_state(cached_state_path)
+                        cached_loc_embedder = cached_state.get("location_embedder", None)
+                    except Exception:
+                        pass
+                current_loc_embedder = getattr(config, "location_embedder", None)
+                if cached_loc_embedder != current_loc_embedder:
+                    log.info(
+                        f"load(): cache at {config.preprocessed_dir} was built with location_embedder={cached_loc_embedder!r} "
+                        f"but current config has location_embedder={current_loc_embedder!r} — recomputing."
+                    )
+                else:
+                    log.info(f"load(): cache hit at {config.preprocessed_dir} — loading from disk, skipping preprocessing.")
+                    return cached
 
     replay_state: Optional[Dict[str, Any]] = None
     if preprocessing_state_path is not None and os.path.exists(preprocessing_state_path):
@@ -412,7 +428,7 @@ def load(
     unique_samples = df["sample_id"].unique()
     n_samples = len(unique_samples)
     sample_index = {s: i for i, s in enumerate(unique_samples)}
-    
+
     ################################################################################################
     # Train/val/test split
     ################################################################################################
@@ -434,20 +450,20 @@ def load(
         # If removing excess samples from train/val, build test set only from excess samples and split the rest randomly.
         excess_samples = df[df["Excess"] > 0]["sample_id"].unique()
         non_excess_samples = df[df["Excess"] <= 0]["sample_id"].unique()
-        
+
         n_non_excess = len(non_excess_samples)
         n_val = int(n_non_excess * config.val_frac)
         n_train = n_non_excess - n_val
-        
+
         np.random.shuffle(non_excess_samples)
         train_sample_idx = np.array([sample_index[s] for s in non_excess_samples[:n_train]])
         val_sample_idx = np.array([sample_index[s] for s in non_excess_samples[n_train:n_train + n_val]])
         test_sample_idx = np.array([sample_index[s] for s in excess_samples])
-        
+
     else:
         # WARNING: to be updated once we corrected the excess
         df = df[df["Excess"] <= 0]
-        
+
         # Randomly split samples into train/val/test according to config fractions.
         sample_indices = np.arange(n_samples)
         np.random.shuffle(sample_indices)
@@ -631,7 +647,7 @@ def load(
         std = float(train_feature_stds[col])
         mean = float(train_feature_means[col])
         df_long[col] = (df_long[col] - mean) / (std + 1e-10)
-        
+
 
     if replay_state is None:
         # Store the sample IDs corresponding to each split for reproducibility and downstream use.
@@ -662,6 +678,8 @@ def load(
                 "threshold": float(reads_threshold) if len(sample_reads) > 0 else None,
             },
         }
+        # Always record which location embedder was used so cache invalidation works correctly.
+        state["location_embedder"] = getattr(config, "location_embedder", None)
         # Add embeddings to state if computed
         if config.use_embedding and embeddings_array is not None:
             # Store embeddings dict for reproducibility on resume
