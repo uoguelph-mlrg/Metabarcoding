@@ -320,8 +320,13 @@ def load(
     if config.preprocessed_dir is not None:
         sentinel = os.path.join(config.preprocessed_dir, "_complete")
         if os.path.exists(sentinel):
-            log.info(f"load(): cache hit at {config.preprocessed_dir} — loading from disk, skipping preprocessing.")
-            return _load_from_preprocessed_dir(config.preprocessed_dir)
+            cached = _load_from_preprocessed_dir(config.preprocessed_dir)
+            # cached[2] is embeddings_array; skip cache if config needs embeddings but cache has none
+            if config.use_embedding and cached[2] is None:
+                log.info(f"load(): cache at {config.preprocessed_dir} has no embeddings but use_embedding=True — recomputing.")
+            else:
+                log.info(f"load(): cache hit at {config.preprocessed_dir} — loading from disk, skipping preprocessing.")
+                return cached
 
     replay_state: Optional[Dict[str, Any]] = None
     if preprocessing_state_path is not None and os.path.exists(preprocessing_state_path):
@@ -686,7 +691,9 @@ def load(
     log.info(f"  Val: {len(val_sample_idx)} samples ({100 * config.val_frac:.0f}%)")
     log.info(f"  Test: {len(test_sample_idx)} samples ({100 * (1 - config.train_frac - config.val_frac):.0f}%)")
 
-    if config.preprocessed_dir is not None:
+    if config.preprocessed_dir is not None and config.use_embedding:
+        # Only write the cache from a run with use_embedding=True so embeddings are always present.
+        # Runs with use_embedding=False skip the write to avoid poisoning the cache for other runs.
         _save_to_preprocessed_dir(
             config.preprocessed_dir,
             X_train, y_train, X_val, y_val, X_test, y_test,
