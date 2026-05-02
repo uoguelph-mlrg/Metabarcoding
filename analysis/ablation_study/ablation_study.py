@@ -728,15 +728,25 @@ if __name__ == "__main__":
                         help="Output directory base (relative to analysis/)")
     parser.add_argument("--max_epochs", type=int, default=100,
                         help="Maximum epochs for MLP-only training")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Alias for --max_epochs (used by submit_subanalysis.sh)")
+    parser.add_argument("--data_path", type=str, default=None,
+                        help="Override data CSV path (e.g. for small test dataset)")
     parser.add_argument("--variant", type=str, default=None,
                         choices=VALID_VARIANTS,
                         help="Train only this variant (default: all)")
     parser.add_argument("--run_id", type=str, default=None,
                         help="Shared run ID for output directory (default: current timestamp)")
     args = parser.parse_args()
+    # --epochs is an alias for --max_epochs (for consistency with other scripts)
+    if args.epochs is not None:
+        args.max_epochs = args.epochs
 
     set_seed()
     cfg = Config()
+    if args.data_path is not None:
+        cfg.data_path = os.path.abspath(args.data_path)
+        cfg.preprocessed_dir = None
 
     log_level = log.DEBUG if args.verbose else log.INFO
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
