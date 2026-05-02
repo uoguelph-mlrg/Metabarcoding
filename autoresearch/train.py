@@ -115,6 +115,7 @@ class Config:
     location_embedder: Optional[str] = "range"        # None | "satclip" | "geoclip" | "range" | "alphaearth"
     keep_raw_gps_features: bool = False          # Keep raw lat/lon alongside location embeddings
     satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
+    range_db_path: Optional[str] = os.path.join(PROJECT_ROOT, "third_party", "RANGE", "pretrained", "range_db_med.npz")
 
 
 # prepare.py is missing several stdlib imports at module level (Path, importlib, json, sys,
