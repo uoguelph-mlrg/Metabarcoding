@@ -40,7 +40,7 @@ class Config:
     preprocessed_dir: Optional[str] = os.path.join(PROJECT_ROOT, "data", "preprocessed")  # If set, save all preprocessing artifacts here on first run and load from there on subsequent runs, skipping CSV parsing and BarcodeBERT inference
     checkpoint_every: int = 20                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
-    eval_interval: int = 5                       # Run validation and checkpoint every N epochs (1 = every epoch)
+    eval_interval: int = 1                       # Run validation and checkpoint every N epochs (1 = every epoch)
 
     # Train / val / test split
     train_frac: float = 0.8
