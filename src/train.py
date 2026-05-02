@@ -101,6 +101,8 @@ class Trainer:
         )
         latent_solver.build_interpolation_matrix()
 
+        set_seed()
+
         self.device = torch.device(self.cfg.device)
         input_dim = data["train"]["X"].shape[1]
         mlp_model = MLPModel(
