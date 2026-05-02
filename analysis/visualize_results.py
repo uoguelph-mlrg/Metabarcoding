@@ -484,6 +484,9 @@ def plot_scatter_actual_vs_predicted(
     labels: Optional[Dict[str, str]] = None,
 ) -> None:
     """Scatter plots (actual vs predicted) with density colouring, one panel per model."""
+    if not results or all(len(v.get("targets", [])) == 0 for v in results.values()):
+        log.warning("plot_scatter_actual_vs_predicted: no data to plot, skipping.")
+        return
     set_style()
     models = _sorted_models(results, labels)
     n = len(models)
@@ -501,8 +504,10 @@ def plot_scatter_actual_vs_predicted(
         targets = results[model]["targets"].flatten()
         vm = np.isfinite(preds) & np.isfinite(targets)
         preds, targets = preds[vm], targets[vm]
-        global_max_target = max(global_max_target, float(targets.max()))
-        global_max_pred = max(global_max_pred, float(preds.max()))
+        if targets.size > 0:
+            global_max_target = max(global_max_target, float(targets.max()))
+        if preds.size > 0:
+            global_max_pred = max(global_max_pred, float(preds.max()))
         try:
             xy = np.vstack([preds, targets]) + np.random.normal(0, 1e-8, (2, len(preds)))
             density = gaussian_kde(xy)(xy)
@@ -512,6 +517,10 @@ def plot_scatter_actual_vs_predicted(
         all_densities.extend(density)
         scatter_data.append((model, preds, targets, density))
 
+    if not all_densities:
+        log.warning("plot_scatter_actual_vs_predicted: all models have empty data, skipping.")
+        plt.close()
+        return
     norm = Normalize(vmin=min(all_densities), vmax=max(all_densities))
     sc = None
     axis_max = max(global_max_target, global_max_pred)
@@ -557,6 +566,9 @@ def plot_scatter_zoomed(
     max_actual: float = 0.01,
 ) -> None:
     """Scatter plots zoomed on ground-truth values below *max_actual*."""
+    if not results or all(len(v.get("targets", [])) == 0 for v in results.values()):
+        log.warning("plot_scatter_zoomed: no data to plot, skipping.")
+        return
     set_style()
     models = _sorted_models(results, labels)
     n = len(models)
@@ -640,6 +652,9 @@ def plot_loglog_scatter_actual_vs_predicted(
     labels: Optional[Dict[str, str]] = None,
 ) -> None:
     """Log-log scatter plots of actual vs predicted."""
+    if not results or all(len(v.get("targets", [])) == 0 for v in results.values()):
+        log.warning("plot_loglog_scatter_actual_vs_predicted: no data to plot, skipping.")
+        return
     set_style()
     keys = _sorted_models(results, labels)
     n = len(keys)
@@ -668,8 +683,14 @@ def plot_loglog_scatter_actual_vs_predicted(
             density = np.ones(len(preds_log))
         all_densities.extend(density)
         scatter_data.append((model, preds_log, targets_log, density))
-        global_min = min(global_min, float(targets_log.min()), float(preds_log.min()))
-        global_max_val = max(global_max_val, float(targets_log.max()), float(preds_log.max()))
+        if targets_log.size > 0:
+            global_min = min(global_min, float(targets_log.min()), float(preds_log.min()))
+            global_max_val = max(global_max_val, float(targets_log.max()), float(preds_log.max()))
+
+    if not all_densities:
+        log.warning("plot_loglog_scatter_actual_vs_predicted: all models have empty data, skipping.")
+        plt.close()
+        return
 
     norm = Normalize(vmin=min(all_densities), vmax=max(all_densities))
     sc = None
@@ -1418,8 +1439,12 @@ def plot_latent_comparison(
     scatter_handles: List[Any] = []
 
     def _render_row(ax_row, m1: str, m2: str) -> None:
-        lv1 = np.asarray(results[m1]["latent_vector"]).flatten()
-        lv2 = np.asarray(results[m2]["latent_vector"]).flatten()
+        raw1 = np.asarray(results[m1]["latent_vector"])
+        raw2 = np.asarray(results[m2]["latent_vector"])
+        is_vec1 = raw1.ndim > 1 and raw1.shape[-1] > 1
+        is_vec2 = raw2.ndim > 1 and raw2.shape[-1] > 1
+        lv1 = raw1.flatten()
+        lv2 = raw2.flatten()
         if lv1.shape[0] != lv2.shape[0]:
             log.warning(
                 f"Latent vectors have different shapes after norm reduction "
@@ -1478,22 +1503,27 @@ def plot_latent_comparison(
 
         # Panel 3: per-bin scatter coloured by density.
         ax = ax_row[2]
-        # Always compute density on the full dataset (subsample only for KDE fitting)
+        scatter_sample_size = min(5_000, n_points)
+        if n_points > scatter_sample_size:
+            scatter_idx = np.random.choice(n_points, size=scatter_sample_size, replace=False)
+            lv1_sc, lv2_sc = lv1[scatter_idx], lv2[scatter_idx]
+        else:
+            lv1_sc, lv2_sc = lv1, lv2
+
         if len(lv1_kde) > 1:
             try:
                 xy_kde = np.vstack([lv1_kde, lv2_kde]) + np.random.normal(0, 1e-8, (2, len(lv1_kde)))
                 kde_fn = gaussian_kde(xy_kde)
-                # Evaluate density on ALL points for accurate coloring
-                xy_all = np.vstack([lv1, lv2])
-                density = kde_fn(xy_all)
+                xy_sc = np.vstack([lv1_sc, lv2_sc])
+                density = kde_fn(xy_sc)
                 order = np.argsort(density)
             except Exception as e:
                 log.debug(f"KDE computation failed: {e}; using uniform density")
-                density = np.ones(len(lv1))
-                order = np.arange(len(lv1))
+                density = np.ones(len(lv1_sc))
+                order = np.arange(len(lv1_sc))
         else:
-            density = np.ones(len(lv1))
-            order = np.arange(len(lv1))
+            density = np.ones(len(lv1_sc))
+            order = np.arange(len(lv1_sc))
 
         # Use PowerNorm(gamma<1) to stretch low-density region and show full colormap
         d_min, d_max = density.min(), density.max()
@@ -1502,7 +1532,7 @@ def plot_latent_comparison(
         else:
             norm = Normalize(vmin=d_min, vmax=d_max + 1e-10)
 
-        sc = ax.scatter(lv1[order], lv2[order], c=density[order], cmap="viridis",
+        sc = ax.scatter(lv1_sc[order], lv2_sc[order], c=density[order], cmap="viridis",
                         norm=norm, s=10, alpha=0.75, edgecolors="none")
         scatter_handles.append(sc)
         lo = min(lv1.min(), lv2.min())
