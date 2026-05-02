@@ -131,6 +131,7 @@ _builtins.importlib = _importlib
 _builtins.json = _json
 _builtins.Iterable = _Iterable
 _builtins.dataclass = _dataclass
+_builtins.sys = sys
 
 # When train.py is the __main__ script, sys.modules['train'] is absent.
 # prepare.py imports Config from 'train', which would re-import train.py fresh and
