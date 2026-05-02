@@ -812,6 +812,8 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--results_dir", type=str, default=None, help="Override results directory (default: cfg.results_dir)")
+    parser.add_argument("--epochs", type=int, default=None, help="Override epoch count (default: cfg.epochs)")
+    parser.add_argument("--data_path", type=str, default=None, help="Override data CSV path (default: cfg.data_path)")
     args = parser.parse_args()
 
     set_seed()
@@ -819,6 +821,11 @@ if __name__ == "__main__":
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
     cfg = Config()
+    if args.epochs is not None:
+        cfg.epochs = args.epochs
+    if args.data_path is not None:
+        cfg.data_path = os.path.abspath(args.data_path)
+        cfg.preprocessed_dir = None  # don't reuse cached preprocessed data for a different dataset
 
     run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
     results_base = args.results_dir if args.results_dir else cfg.results_dir

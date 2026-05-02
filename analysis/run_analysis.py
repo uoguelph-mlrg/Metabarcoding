@@ -51,6 +51,8 @@ def _build_base_parser(add_help: bool = True) -> argparse.ArgumentParser:
                         help="Base output directory name (default: results)")
     parser.add_argument("--epochs", type=int, default=None,
                         help="Override epoch count for quick dry-runs")
+    parser.add_argument("--data_path", type=str, default=None,
+                        help="Override data CSV path (e.g. for small test dataset)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     return parser
 

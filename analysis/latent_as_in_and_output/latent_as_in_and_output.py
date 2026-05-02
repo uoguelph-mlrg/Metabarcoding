@@ -89,6 +89,8 @@ def run_comparison(
 	run_group: str | None = None,
 	output_dir: str | None = None,
 	variants_filter: set | None = None,
+	epochs_override: int | None = None,
+	data_path_override: str | None = None,
 ) -> Dict[str, Any]:
 	"""Train requested latent variants and return result dict keyed by variant name."""
 	results: Dict[str, Any] = {}
@@ -120,6 +122,11 @@ def run_comparison(
 		local_cfg = LocalConfig()
 		local_cfg.latent_input_dim = int(latent_input_dim)
 		local_cfg.embed_dim = int(embed_dim)
+		if epochs_override is not None:
+			local_cfg.epochs = epochs_override
+		if data_path_override is not None:
+			local_cfg.data_path = os.path.abspath(data_path_override)
+			local_cfg.preprocessed_dir = None
 
 		with variant_wandb_run(
 			use_wandb=use_wandb,
@@ -162,6 +169,10 @@ if __name__ == "__main__":
 	                    help="Train only this variant (default: all)")
 	parser.add_argument("--run_id", type=str, default=None,
 	                    help="Shared run ID for output directory (default: current timestamp)")
+	parser.add_argument("--epochs", type=int, default=None,
+	                    help="Override epoch count for quick test runs")
+	parser.add_argument("--data_path", type=str, default=None,
+	                    help="Override data CSV path (e.g. for small test dataset)")
 	args = parser.parse_args()
 
 	# Setup logging
@@ -182,6 +193,8 @@ if __name__ == "__main__":
 		run_group=run_group,
 		output_dir=output_dir,
 		variants_filter=variants_filter,
+		epochs_override=args.epochs,
+		data_path_override=args.data_path,
 	)
 
 	analysis_name = "latent_as_in_and_output"

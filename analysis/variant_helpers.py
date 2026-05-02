@@ -118,11 +118,14 @@ def run_one_variant(
     base_cfg = Config()
     if getattr(args, "epochs", None) is not None:
         base_cfg.epochs = args.epochs
+    if getattr(args, "data_path", None) is not None:
+        base_cfg.data_path = os.path.abspath(args.data_path)
+        base_cfg.preprocessed_dir = None
 
     cfg = copy.deepcopy(base_cfg)
     for key, val in variant["config"].items():
         setattr(cfg, key, val)
-    if hasattr(analysis_def, "apply_args_to_cfg"):
+    if analysis_def.apply_args_to_cfg is not None:
         analysis_def.apply_args_to_cfg(cfg, args)
     set_seed()
 

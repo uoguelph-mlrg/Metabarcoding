@@ -228,6 +228,10 @@ def main():
         help="Output directory base (relative to analysis/)",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress per-model output")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Ignored (sklearn models have no epoch count; accepted for CLI consistency)")
+    parser.add_argument("--no_wandb", action="store_true",
+                        help="Ignored (baselines don't use wandb; accepted for CLI consistency)")
     parser.add_argument("--variant", type=str, default=None,
                         help="Train only this single model key (used by SLURM per-variant dispatch)")
     parser.add_argument("--run_id", type=str, default=None,

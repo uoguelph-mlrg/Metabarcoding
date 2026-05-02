@@ -19,6 +19,8 @@ NO_WANDB="0"
 DRY_RUN="0"
 ALL_TARGETS="0"
 BASELINE_TRAIN="0"
+EPOCHS_OVERRIDE=""
+DATA_PATH_OVERRIDE=""
 
 declare -a TARGETS=()
 LIST_TARGETS="0"
@@ -54,6 +56,8 @@ Options:
   --venv-activate PATH     Venv activate script (default: ~/barcode/bin/activate)
   --module-load "A B C"    Modules for module load (default: python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0)
   --dry-run                Print generated sbatch scripts, do not submit
+  --epochs N               Override epoch count for all training jobs (for quick test runs)
+  --data-path PATH         Override data path for all training jobs (e.g. test_data_small.csv)
   -h, --help               Show this help
 
 Registered analyses (targets):
@@ -76,6 +80,8 @@ while [[ $# -gt 0 ]]; do
     --venv-activate)  VENV_ACTIVATE="$2"; shift 2 ;;
     --module-load)    MODULE_LOAD="$2"; shift 2 ;;
     --dry-run)        DRY_RUN="1"; shift ;;
+    --epochs)         EPOCHS_OVERRIDE="$2"; shift 2 ;;
+    --data-path)      DATA_PATH_OVERRIDE="$2"; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -157,7 +163,10 @@ submit_baseline() {
     echo ""
     echo "cd \"$PROJECT_ROOT\""
     echo "echo \"[\$(date)] Training baseline model\""
-    echo "python src/train.py --model baseline --results_dir \"$baseline_results_dir\""
+    local baseline_extra=""
+    [[ -n "$EPOCHS_OVERRIDE" ]] && baseline_extra+=" --epochs $EPOCHS_OVERRIDE"
+    [[ -n "$DATA_PATH_OVERRIDE" ]] && baseline_extra+=" --data_path $DATA_PATH_OVERRIDE"
+    echo "python src/train.py --model baseline --results_dir \"$baseline_results_dir\"$baseline_extra"
     echo "echo \"[\$(date)] Baseline training completed\""
   } > "$job_file"
 
@@ -228,12 +237,15 @@ PY
       echo ""
       echo "cd \"$SCRIPT_DIR\""
       echo "echo \"[\$(date)] ${analysis_key} / ${vname}\""
+      local extra_args=""
+      [[ -n "$EPOCHS_OVERRIDE" ]] && extra_args+=" --epochs $EPOCHS_OVERRIDE"
+      [[ -n "$DATA_PATH_OVERRIDE" ]] && extra_args+=" --data_path $DATA_PATH_OVERRIDE"
       if [[ -z "$run_script" ]]; then
         # Generic runner
-        echo "python run_analysis.py --analysis ${analysis_key} --variant ${vname} --run_id ${run_id} ${wandb_arg}"
+        echo "python run_analysis.py --analysis ${analysis_key} --variant ${vname} --run_id ${run_id} ${wandb_arg} ${extra_args}"
       else
         # Legacy script — must support --variant and --run_id
-        echo "python ${run_script} --variant ${vname} --run_id ${run_id} ${wandb_arg}"
+        echo "python ${run_script} --variant ${vname} --run_id ${run_id} ${wandb_arg} ${extra_args}"
       fi
       echo "echo \"[\$(date)] Done: ${vname}\""
     } > "$job_file"
@@ -255,7 +267,7 @@ for v in d["variants"]:
 ')
 
   # Submit visualization job (depends on all training jobs)
-  local viz_walltime="0:05:00"
+  local viz_walltime="0:15:00"
   local viz_job_file="$JOB_DIR/${analysis_key}_viz_$(date +%Y%m%d_%H%M%S).sbatch"
 
   {
