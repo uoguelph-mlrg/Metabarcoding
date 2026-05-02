@@ -115,7 +115,7 @@ _reg(Analysis(
             config={"loss_type": "logistic", "latent_present_only": True},
             label="Logistic (BCE)",
             color="#9b59b6",
-            time="2:30:00",
+            time="0:45:00",
         ),
     ],
     baseline_label="Cross-Entropy (CE)",
@@ -241,7 +241,7 @@ def _optimal_K_add_cli_args(parser) -> None:
 def _optimal_K_make_variants(args) -> List[Dict[str, Any]]:
     if not args.k_values:
         return [{"name": v.name, "config": v.config} for v in _optimal_K_default_variants]
-    return [{"name": f"K_{k}", "config": {"K": k}} for k in args.k_values]
+    return [{"name": f"K_{k}", "config": {"K": k}} for k in sorted(args.k_values)]
 
 
 _reg(Analysis(
@@ -286,7 +286,7 @@ def _dim_vector_add_cli_args(parser) -> None:
 def _dim_vector_make_variants(args) -> List[Dict[str, Any]]:
     if not args.dimensions:
         return [{"name": v.name, "config": v.config} for v in _dim_vector_default_variants]
-    return [{"name": f"dim_{d}", "config": {"embed_dim": d}} for d in args.dimensions]
+    return [{"name": f"dim_{d}", "config": {"embed_dim": d}} for d in sorted(args.dimensions)]
 
 
 _reg(Analysis(
@@ -350,10 +350,10 @@ _reg(Analysis(
 _EMBEDDER_NAMES = ["satclip", "range", "geoclip", "alphaearth"]
 
 _loc_emb_default_variants = [
-    Variant(name="satclip",    config={"location_embedder": "satclip",    "use_taxonomy": True, "use_embedding": False}, label="SatCLIP (256D)",   color="#e74c3c", time="0:45:00"),
-    Variant(name="range",      config={"location_embedder": "range",      "use_taxonomy": True, "use_embedding": False}, label="RANGE (1280D)",    color="#3498db", time="0:45:00"),
-    Variant(name="geoclip",    config={"location_embedder": "geoclip",    "use_taxonomy": True, "use_embedding": False}, label="GeoCLIP (512D)",   color="#2ecc71", time="0:45:00"),
-    Variant(name="alphaearth", config={"location_embedder": "alphaearth", "use_taxonomy": True, "use_embedding": False}, label="AlphaEarth (64D)", color="#f39c12", time="0:45:00"),
+    Variant(name="satclip",    config={"location_embedder": "satclip"}, label="SatCLIP (256D)",   color="#e74c3c", time="0:45:00"),
+    Variant(name="range",      config={"location_embedder": "range"}, label="RANGE (1280D)",    color="#3498db", time="0:45:00"),
+    Variant(name="geoclip",    config={"location_embedder": "geoclip"}, label="GeoCLIP (512D)",   color="#2ecc71", time="0:45:00"),
+    Variant(name="alphaearth", config={"location_embedder": "alphaearth"}, label="AlphaEarth (64D)", color="#f39c12", time="0:45:00"),
 ]
 
 
@@ -409,17 +409,10 @@ _reg(Analysis(
             label="Present BINs only",
             color="#e74c3c",
             time="0:45:00",
-        ),
-        Variant(
-            name="all_bins",
-            config={"latent_present_only": False},
-            label="All BINs",
-            color="#3498db",
-            time="0:45:00",
-        ),
+        )
     ],
-    baseline_label="MLP + Latent (Baseline)",
-    baseline_color="#95a5a6",
+    baseline_label="All BINs",
+    baseline_color="#3498db",
 ))
 
 

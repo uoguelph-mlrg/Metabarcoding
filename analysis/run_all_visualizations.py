@@ -152,13 +152,17 @@ def run_one(analysis_key: str, baseline_pkl: Optional[str] = None) -> bool:
         return False
 
     analysis = REGISTRY[analysis_key]
-    labels, colors = _labels_and_colors(analysis)
+    variant_labels, variant_colors = _labels_and_colors(analysis)
     file_specs = _file_specs_for(analysis)
 
     if baseline_pkl and analysis.include_baseline:
-        labels["baseline"] = analysis.baseline_label
-        colors["baseline"] = analysis.baseline_color
+        # Baseline first so it appears first in all plots and legends
+        labels = {"baseline": analysis.baseline_label, **variant_labels}
+        colors = {"baseline": analysis.baseline_color, **variant_colors}
         file_specs = [(baseline_pkl, "baseline")] + file_specs
+    else:
+        labels = variant_labels
+        colors = variant_colors
 
     output_dir = _output_dir_for(analysis)
     name = analysis.name.replace("_", " ").title()
