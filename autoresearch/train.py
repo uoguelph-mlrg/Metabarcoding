@@ -13,6 +13,7 @@ import pandas as pd
 import pickle
 import time
 import torch
+import warnings
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
@@ -29,7 +30,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from prepare import MBDataset, collate_samples, load, load_or_preprocess, Loss, TIME_BUDGET, TAXONOMY_FEATURES
+from prepare import MBDataset, collate_samples, load, Loss, TIME_BUDGET, TAXONOMY_FEATURES, PREPROCESSING_STATE_FILENAME, compute_metrics, metric_key
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -38,24 +39,25 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 class Config:
     # Run configuration
     data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
-    results_dir: str = "../results"             # Directory where run artifacts are saved
-    checkpoint_every: int = 5                   # Save periodic checkpoint every N epochs
+    results_dir: str = "./results"  # Directory where run artifacts are saved
+    preprocessed_dir: Optional[str] = os.path.join(PROJECT_ROOT, "data", "preprocessed")  # If set, save all preprocessing artifacts here on first run and load from there on subsequent runs, skipping CSV parsing and BarcodeBERT inference
+    checkpoint_every: int = 20                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
 
     # Train / val / test split
     train_frac: float = 0.8
     val_frac: float = 0.1
-    remove_excess: bool = False
+    remove_excess: bool = False                 # If True, remove all samples with excess from train/val set and build test set only from excess samples (instead of random splitting)
     
     # Basic training settings
     loss_type: Literal["cross_entropy", "logistic"] = "cross_entropy"
     device: str = (
-        "mps" if torch.backends.mps.is_available() else 
-        "cuda" if torch.cuda.is_available() else 
+        "mps" if torch.backends.mps.is_available() else
+        "cuda" if torch.cuda.is_available() else
         "cpu"
     )
     batch_size_bin: int = 1024                  # Batch size (in number of observations not samples)
-    batch_size_sample: int = 8                  # Batch size in number of samples
+    batch_size_sample: int = 16                 # Batch size in number of samples
     epochs: int = 200                           # Epochs per training phase
     grad_clip: Optional[float] = 1.0            # Gradient clipping value (None to disable)
 
@@ -70,14 +72,12 @@ class Config:
     interpolation_method: Literal["nw", "llr"] = "nw"  # interpolation method for latent solver: "nw" for Nadaraya-Watson, "llr" for locally linear regression
 
     # DNA embedding settings (used when use_embedding=True)
-    embedding_path: Optional[str] = os.path.join(PROJECT_ROOT, "data", "embeddings.npy")  # path to precomputed embeddings (.npy dict: bin_uri->vector)
-    barcode_data_path: Optional[str] = None     # path to TSV with 'bin_uri' and 'seq' columns
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
 
     # MLP - architecture & optimization settings
-    mlp_hidden_dims : List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
+    mlp_hidden_dims: List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
     mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
-    weight_decay: float = 1e-5                  # Weight decay for MLP parameters
+    weight_decay: float = 1e-4                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
     mlp_warmup_frac: float = 0.1                # Fraction of total training steps used for MLP LR warmup
     mlp_lr_eta_min: float = 1e-6                # Minimum MLP LR reached by cosine decay
@@ -86,25 +86,25 @@ class Config:
     # Latent solver - regularization settings
     latent_smooth_reg: float = 1e-3             # Smoothness regularization (parameter λ_smooth)
     latent_present_only: bool = False           # If True, only fit latent on observations where y > 0 (useful with loss='logistic' to avoid distribution shift)
-    latent_l2_reg: float = 1e-3                 # L2 norm regularization on D (parameter r)
-    latent_init_prox_reg: float = 0.0           # Initial proximal regularization weight; annealed to 0 across epochs to stabilize early active-set latent updates.
+    latent_l2_reg: float = 1e-2                 # L2 norm regularization on D (parameter r)
+    latent_init_prox_reg: float = 0.01          # Initial proximal regularization weight; annealed to 0 across epochs to stabilize early active-set latent updates.
 
     # Latent solver - optimization settings
-    latent_optim_steps: int = 15                # Number of latent optimization steps per batch / solver call
-    latent_lr: float = 1e-2                     # Learning rate for the latent AdamW optimizer
+    latent_optim_steps: int = 1                 # Number of latent optimization steps per batch / solver call
+    latent_lr: float = 5e-4                     # Learning rate for the latent AdamW optimizer
     latent_init_std: float = 0.0                # Standard deviation for initializing latent embeddings (0 for zeros, >0 for Gaussian noise)
     latent_warmup_start_factor: float = 1e-3    # Initial multiplier for latent LR warmup
     latent_warmup_frac: float = 0.2             # Fraction of total latent solves used for warmup
     latent_lr_eta_min: float = 1e-6             # Minimum latent LR reached by cosine decay
-    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"  # Method for selecting subset of neighbors for latent optimization 
+    latent_k_hop_mode: Literal["threshold", "knn"] = "threshold"  # Method for selecting subset of neighbors for latent optimization
     latent_k_hop_threshold: int = 2             # Number of neighbor graph hops to select BINs from (used when latent_k_hop_mode="threshold")
     latent_hop_knn_cap: int = 64                # Max number of neighbors to include in latent optimization (used when latent_k_hop_mode="knn")
 
     # Training with interpolated latents settings
-    interpolated_sample_fraction: float = 0.0   # Fraction of training samples using interpolated latent (set to 0 to disable interpolation during training)
-    train_MLP_with_interpolation: bool = False  # Whether to train the MLP on interpolated latents too (instead of only using them in the latent solver)
-    inference_with_interpolation: bool = False  # Whether to use interpolated latents during inference (if False, uses BINs own latent)
-    include_self_in_interpolation: bool = False # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
+    interpolated_sample_fraction: float = 0.2   # Fraction of training samples using interpolated latent (set to 0 to disable interpolation during training)
+    train_MLP_with_interpolation: bool = True  # Whether to train the MLP on interpolated latents too (instead of only using them in the latent solver)
+    inference_with_interpolation: bool = True  # Whether to use interpolated latents during inference (if False, uses BINs own latent)
+    include_self_in_interpolation: bool = True # Whether to include the BIN's own latent in the interpolation (instead of only using neighbors)
 
     # Sizes and combination modalities for latent and intrinsic vectors
     embed_dim: int = 10                         # Embedding dimension d for both latent and intrinsic vectors (set to 1 for scalars)
@@ -114,14 +114,10 @@ class Config:
     gating_epsilon: float = 0.693               # Offset for softplus gating (log(2), so g(0)=1)
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
 
-def cpu_if_mps(device: torch.device) -> torch.device:
-    """Return CPU when device is MPS.
-
-    Sparse CSR operations (used by the latent solver and interpolation operators)
-    are numerically unstable on MPS. All callers that need a sparse-safe device
-    should use this helper instead of duplicating the check.
-    """
-    return torch.device("cpu") if device.type == "mps" else device
+    # Location embedding (optional; None disables it and keeps raw lat/lon features)
+    location_embedder: Optional[str] = "satclip"      # None | "satclip" | "geoclip" | "range" | "alphaearth"
+    keep_raw_gps_features: bool = False          # Keep raw lat/lon alongside location embeddings
+    satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
 
 
 def set_seed(seed: int = 14) -> None:
@@ -345,14 +341,16 @@ class LatentSolver:
                 epsilon=cfg.gating_epsilon,
             )
 
-        self.device = cpu_if_mps(torch.device(self.cfg.device))  # sparse CSR ops are unstable on MPS
+        self.device = torch.device(self.cfg.device)
 
         self.H_smooth: Optional[sparse.csr_matrix] = None               # Smoothness operator matrix built from neighbor graph; H_smooth @ h gives neighbor-interpolated latent
         self.I_minus_H_smooth: Optional[sparse.csr_matrix] = None       # Precompute I - H_smooth for efficient regularization; (I - H_smooth) @ h gives difference between latent and neighbor interpolation used for smoothness regularization
         self._I_minus_H_smooth_csc: Optional[sparse.csc_matrix] = None  # CSC format of I - H_smooth for efficient column slicing when building row closure
+        self._I_minus_H_smooth_dense: Optional[torch.Tensor] = None     # Dense version for MPS devices (faster than sparse + device transfers)
         self._graph_neighbors: Optional[List[np.ndarray]] = None        # List of neighbor arrays for each node, used to build active set on each solve call
         self.H_interp: Dict[bool, Optional[torch.Tensor]] = {False: None, True: None}
         self._H_interp_csr: Dict[bool, Optional[sparse.csr_matrix]] = {False: None, True: None}
+        self._H_interp_dense: Dict[bool, Optional[torch.Tensor]] = {False: None, True: None}  # Dense versions for MPS
 
     def _row_normalize_csr(self, mat: sparse.csr_matrix) -> sparse.csr_matrix:
         row_sums = np.asarray(mat.sum(axis=1)).reshape(-1).astype(np.float64, copy=False)
@@ -369,15 +367,12 @@ class LatentSolver:
             base = base + sparse.identity(self.n_bins, format="csr")
         return self._row_normalize_csr(base.tocsr())
 
-    def get_interpolation_operator(self, include_self_in_interpolation: bool, device: Optional[torch.device] = None) -> torch.Tensor:
+    def get_interpolation_operator(self, include_self_in_interpolation: bool) -> torch.Tensor:
         op = self.H_interp.get(include_self_in_interpolation)
         if op is None:
             raise RuntimeError("Interpolation operators are not built; call build_interpolation_matrix first")
 
-        target_device = cpu_if_mps(self.device if device is None else device)
-        if op.device == target_device:
-            return op
-        return op.to(target_device)
+        return op
 
     def _compute_logits_from_latent_values(
         self,
@@ -458,17 +453,62 @@ class LatentSolver:
     def _csr_to_torch(self, mat: Optional[sparse.csr_matrix]) -> torch.Tensor:
         if mat is None:
             raise ValueError("mat cannot be None")
-        crow = torch.as_tensor(mat.indptr.astype(np.int64), device=self.device)
-        col = torch.as_tensor(mat.indices.astype(np.int64), device=self.device)
-        vals = torch.as_tensor(mat.data.astype(np.float32), device=self.device)
-        return torch.sparse_csr_tensor(
-            crow,
-            col,
-            vals,
-            size=mat.shape,
-            dtype=torch.float32,
-            device=self.device,
-        )
+        # For MPS, convert to dense for better performance (no device transfer overhead)
+        # For CUDA/CPU, keep sparse
+        if self.device.type == "mps":
+            dense_mat = torch.tensor(mat.toarray(), dtype=torch.float32, device=self.device)
+            return dense_mat
+        else:
+            sparse_device = self.device
+            crow = torch.as_tensor(mat.indptr.astype(np.int64), device=sparse_device)
+            col = torch.as_tensor(mat.indices.astype(np.int64), device=sparse_device)
+            vals = torch.as_tensor(mat.data.astype(np.float32), device=sparse_device)
+            return torch.sparse_csr_tensor(
+                crow,
+                col,
+                vals,
+                size=mat.shape,
+                dtype=torch.float32,
+                device=sparse_device,
+            )
+
+    def _dense_mm(self, dense_mat1: torch.Tensor, dense_mat2: torch.Tensor) -> torch.Tensor:
+        """Dense matrix multiplication (used when operators are dense for MPS)."""
+        return torch.mm(dense_mat1, dense_mat2)
+
+    def _operator_mm(self, operator: torch.Tensor, dense_mat: torch.Tensor) -> torch.Tensor:
+        """
+        Matrix multiplication that handles both sparse and dense operators.
+        - If operator is sparse, does sparse @ dense with device transfers
+        - If operator is dense, does dense @ dense on the same device
+        """
+        if operator.is_sparse:
+            return self._sparse_mm_with_device_transfer(operator, dense_mat)
+        else:
+            # Dense operator - ensure both on same device
+            if operator.device != dense_mat.device:
+                dense_mat = dense_mat.to(device=operator.device)
+            result = self._dense_mm(operator, dense_mat)
+            # Move back to original device if needed
+            if operator.device.type == "mps" and dense_mat.device.type == "mps":
+                return result  # Already on MPS
+            return result
+
+    def _sparse_mm_with_device_transfer(
+        self, sparse_mat: torch.Tensor, dense_mat: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Perform sparse @ dense matrix multiplication, handling device mismatches.
+        When sparse_mat is on CPU (due to MPS limitations) but dense_mat is on a different device,
+        moves dense_mat to CPU, performs the operation, and moves result back to original device.
+        """
+        original_device = dense_mat.device
+        if sparse_mat.device != dense_mat.device:
+            dense_mat = dense_mat.to(device=sparse_mat.device)
+        result = torch.sparse.mm(sparse_mat, dense_mat)
+        if result.device != original_device:
+            result = result.to(device=original_device)
+        return result
 
     def solve(
         self,
@@ -564,7 +604,7 @@ class LatentSolver:
         if float(self.cfg.latent_smooth_reg) > 0:
             # Cache baseline smoothness term once; per-step updates only need the
             # active-set correction through L_RA @ (h_active - h_anchor_active).
-            frozen_smooth_contribution = torch.sparse.mm(L_rows, anchor_latent)
+            frozen_smooth_contribution = self._operator_mm(L_rows, anchor_latent)
 
         setup_done = time.perf_counter() - solve_start
         timings = {
@@ -622,7 +662,7 @@ class LatentSolver:
                 if frozen_smooth_contribution is None:
                     raise RuntimeError("frozen_smooth_contribution was not initialized")
                 # L_RA @ active_latent = smoothness diff of new latents with active BINs + neighbors
-                active_correction = torch.sparse.mm(L_RA, active_latent_update)
+                active_correction = self._operator_mm(L_RA, active_latent_update)
                 diff = frozen_smooth_contribution + active_correction
                 smooth_term = 0.5 * smooth_coef * torch.sum(diff * diff)
 
@@ -823,8 +863,8 @@ class LatentSolver:
             return own_logits
 
         latent_2d = latent_source.unsqueeze(-1) if latent_source.ndim == 1 else latent_source
-        interp_operator = self.get_interpolation_operator(self.cfg.include_self_in_interpolation, device=latent_2d.device)
-        interpolated_full = torch.sparse.mm(interp_operator, latent_2d)
+        interp_operator = self.get_interpolation_operator(self.cfg.include_self_in_interpolation)
+        interpolated_full = self._operator_mm(interp_operator, latent_2d)
         interpolated_obs = interpolated_full[bin_ids]
         interp_logits = self._compute_logits_from_latent_values(interpolated_obs, intrinsic, final_weights)
 
@@ -928,7 +968,7 @@ class Model(nn.Module):
         device: torch.device,
         embed_dim: int = 1,
         gating_fn: Literal["exp", "scaled_exp", "additive", "softplus", "tanh", "sigmoid", "dot_product"] = "sigmoid",
-        gating_alpha: float = 0.5,  # Only used by scaled_exp; other gating functions ignore it.
+        gating_alpha: float = 0.5,
         gating_kappa: float = 0.5,
         gating_epsilon: float = 0.693,
         latent_init_std: float = 0.0,
@@ -959,8 +999,7 @@ class Model(nn.Module):
         self.H_interp: Optional[torch.Tensor] = None
 
         if interpolation_enabled:
-            interp_device = cpu_if_mps(self.device)
-            self.H_interp = latent_solver.get_interpolation_operator(include_self_in_interpolation, device=interp_device)
+            self.H_interp = latent_solver.get_interpolation_operator(include_self_in_interpolation)
 
         if embed_dim > 1:
             self.gating_fn = gating_fn
@@ -1517,8 +1556,7 @@ class NeighbourGraph:
 
         if len(emb_indices) == 0:
             raise ValueError(
-                "No bins have embeddings. Check that bin_uri values in cfg.embedding_path "
-                "match those in the training data."
+                "No bins have embeddings. Ensure BarcodeBERT inference ran correctly and embeddings were loaded."
             )
 
         # Optionally L2-normalise for cosine distance
@@ -1574,8 +1612,7 @@ class NeighbourGraph:
 
         if len(emb_indices) == 0:
             raise ValueError(
-                "No bins have embeddings. Check that bin_uri values in cfg.embedding_path "
-                "match those in the training data."
+                "No bins have embeddings. Ensure BarcodeBERT inference ran correctly and embeddings were loaded."
             )
 
         # Optionally L2-normalise for cosine distance
@@ -1720,17 +1757,13 @@ class Trainer:
         run_id: Optional[str] = None,
         resume: bool = False,
         fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
+        results_dir: Optional[str] = None,
     ) -> None:
         self.cfg = cfg
         self.model_name = model_name
         self.run_id = run_id or time.strftime("%Y-%m-%d_%H-%M-%S")
         self.resume = resume
         self._validate_interpolation_config()
-
-        if self.cfg.use_embedding and self.cfg.barcode_data_path is None and (
-            self.cfg.embedding_path is None or not os.path.exists(self.cfg.embedding_path)
-        ):
-            self.cfg.barcode_data_path = self.cfg.data_path
 
         self.start_epoch = 0
         self.current_epoch = -1
@@ -1741,21 +1774,36 @@ class Trainer:
         self.train_losses: List[Tuple[int, float]] = []
         self.val_losses: List[Tuple[int, float]] = []
 
-        self.base_artifact_dir = os.path.abspath(os.path.join(self.cfg.results_dir, self.model_name))
+        effective_results_dir = os.path.abspath(results_dir) if results_dir is not None else self.cfg.results_dir
+        self.base_artifact_dir = os.path.abspath(os.path.join(effective_results_dir, self.model_name))
         self.checkpoint_dir = os.path.join(self.base_artifact_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.preprocessing_state_path = self._checkpoint_path(PREPROCESSING_STATE_FILENAME)
 
-        data, taxonomy_df, bin_index, sample_index, split_indices = load_or_preprocess(
+        if self.resume and not os.path.exists(self.preprocessing_state_path):
+            raise ValueError(
+                "Resume requested but preprocessing artifact is missing: "
+                f"{self.preprocessing_state_path}."
+            )
+
+        data, taxonomy_df, embeddings_array, bins_with_embedding_arr, bin_index, sample_index, split_indices, preprocessing_state_path = load(
             self.cfg,
             fixed_split_indices=fixed_split_indices,
+            preprocessing_state_path=self.preprocessing_state_path,
         )
 
         self.data = data
         self.bin_index = bin_index
         self.sample_index = sample_index
         self.split_indices = split_indices
+        self.preprocessing_state_path = preprocessing_state_path
 
-        self.neighbour_graph = NeighbourGraph(self.cfg, taxonomy_df)
+        self.neighbour_graph = NeighbourGraph(
+            self.cfg,
+            taxonomy_df,
+            embeddings=embeddings_array,
+            bins_with_embedding=bins_with_embedding_arr,
+        )
         self.neighbour_graph.build()
 
         latent_solver = LatentSolver(
@@ -1904,6 +1952,7 @@ class Trainer:
             "train_losses": self.train_losses,
             "val_losses": self.val_losses,
             "latent_diagnostics": self.latent_diagnostics,
+            "preprocessing_state_path": self.preprocessing_state_path,
             "rng_numpy": np.random.get_state(),
             "rng_torch": torch.get_rng_state(),
             "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -2008,6 +2057,7 @@ class Trainer:
             interpolation_mask = None
             if self.cfg.train_MLP_with_interpolation and self._has_interpolation_samples(sample_selection):
                 # Expand sample-level selection to observation-level and drop padded bins.
+                assert sample_selection is not None
                 interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                 if mask is not None:
                     interpolation_mask = interpolation_mask & mask.bool()
@@ -2122,18 +2172,20 @@ class Trainer:
                 valid = mask.bool() if mask is not None else torch.ones_like(bin_ids, dtype=torch.bool)
                 interpolation_mask = None
                 if self._has_interpolation_samples(sample_selection):
+                    assert sample_selection is not None
                     interpolation_mask = sample_selection.unsqueeze(1).expand(-1, max_bins)
                     interpolation_mask = interpolation_mask & valid
                     interpolation_mask = interpolation_mask[valid]
 
                 intrinsic = intrinsic[valid]
-                y = targets[valid]
+                targets = targets[valid]
                 bin_ids = bin_ids[valid]
                 sample_ids = sample_grid[valid]
             else:
                 intrinsic = self.model.mlp(inputs)
                 interpolation_mask = None
                 if self._has_interpolation_samples(sample_selection):
+                    assert sample_selection is not None
                     interpolation_mask = sample_selection.to(dtype=torch.bool)
 
         previous_requires_grad = self.model.latent_vec.requires_grad
@@ -2142,7 +2194,7 @@ class Trainer:
 
         try:
             latent_vec, timings = self.model.latent_solver.solve(
-                y=y,
+                y=targets,
                 intrinsic=intrinsic,
                 final_weights=self.model.final_linear.weight if self.cfg.embed_dim > 1 else None,
                 bin_ids=bin_ids,
@@ -2153,7 +2205,9 @@ class Trainer:
                 latent=self.model.latent_vec,
                 optimizer=self.latent_optimizer,
             )
-            self.latent_scheduler.step()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.latent_scheduler.step()
         finally:
             self.model.latent_vec.requires_grad_(previous_requires_grad)
 
@@ -2188,7 +2242,7 @@ class Trainer:
                         valid_mask = torch.ones(inputs.shape[1], dtype=torch.bool, device=inputs.device)
                     inputs_flat = inputs[b][valid_mask]
                     bin_idx_flat = bin_idx[b][valid_mask]
-                    interpolation_mask = valid_mask if use_interpolation else None
+                    interpolation_mask = torch.ones(len(bin_idx_flat), dtype=torch.bool, device=inputs_flat.device) if use_interpolation else None
                     outputs = self.model(
                         inputs_flat,
                         bin_idx_flat,
@@ -2211,20 +2265,17 @@ class Trainer:
                     bin_idx = bin_idx.unsqueeze(0)
                     sample_idx = sample_idx.unsqueeze(0)
 
-                for i in range(inputs.shape[0]):
-                    s_idx = int(sample_idx[i].item())
-                    b_idx = int(bin_idx[i].item())
-                    interpolation_mask = torch.ones(1, dtype=torch.bool, device=self.device) if use_interpolation else None
-                    output = self.model(
-                        inputs[i].unsqueeze(0),
-                        bin_idx[i].unsqueeze(0),
-                        interpolation_mask=interpolation_mask,
-                    )
-                    prob = float(torch.sigmoid(output).cpu().numpy().item())
-                    y_true = float(targets[i].cpu().numpy().item())
-                    sample_pred.setdefault(s_idx, []).append(prob)
-                    sample_true.setdefault(s_idx, []).append(y_true)
-                    sample_bins.setdefault(s_idx, []).append(b_idx)
+                interpolation_mask = torch.ones(inputs.shape[0], dtype=torch.bool, device=self.device) if use_interpolation else None
+                outputs = self.model(inputs, bin_idx, interpolation_mask=interpolation_mask)
+                probs = torch.sigmoid(outputs).cpu().numpy()
+                y_trues = targets.cpu().numpy()
+                s_idxs = sample_idx.cpu().numpy()
+                b_idxs = bin_idx.cpu().numpy()
+                for i in range(len(probs)):
+                    s_idx = int(s_idxs[i])
+                    sample_pred.setdefault(s_idx, []).append(float(probs[i]))
+                    sample_true.setdefault(s_idx, []).append(float(y_trues[i]))
+                    sample_bins.setdefault(s_idx, []).append(int(b_idxs[i]))
 
         if self.loss_type == "logistic":
             for s_idx, preds in sample_pred.items():
@@ -2259,187 +2310,13 @@ class Trainer:
     ) -> Dict[str, float]:
         """Compute per-observation and per-sample evaluation metrics.
 
-        Micro metrics are computed on all observations pooled together. Macro metrics
-        are computed per sample first and then averaged to avoid domination by samples
-        with many observed BINs.
-
         Args:
             split: Dataset split to evaluate.
             predictions: Optional pre-computed output of get_predictions(). When
-                provided the forward pass is skipped, avoiding a redundant computation
-                that would otherwise double the inference cost at each epoch.
+                provided the forward pass is skipped.
         """
         y_pred, y_true, sample_labels, _ = predictions if predictions is not None else self.get_predictions(split=split)
-
-        y_true = np.asarray(y_true, dtype=float)
-        y_pred = np.asarray(y_pred, dtype=float)
-        valid = np.isfinite(y_true) & np.isfinite(y_pred)
-        y_true = y_true[valid]
-        y_pred = np.clip(y_pred[valid], 0, 1)
-        eps = 1e-10
-        
-        def _shannon_diversity(values: np.ndarray, eps: float = 1e-10) -> float:
-            """Compute Shannon diversity from non-negative abundance values."""
-            arr = np.asarray(values, dtype=float).reshape(-1)
-            if arr.size == 0:
-                return np.nan
-            # eps is added before normalization so zero-only vectors still produce a
-            # finite distribution and log argument.
-            probs = (arr + eps) / np.sum(arr + eps)
-            return float(-np.sum(probs * np.log(probs + eps)))
-        
-        def _spearman_rho(x: np.ndarray, y: np.ndarray) -> Optional[float]:
-            """Compute Spearman rho and return None if undefined."""
-            rank_x = pd.Series(x).rank(method="average").to_numpy(dtype=float)
-            rank_y = pd.Series(y).rank(method="average").to_numpy(dtype=float)
-            if np.std(rank_x) == 0 or np.std(rank_y) == 0:
-                return None
-            rho = float(np.corrcoef(rank_x, rank_y)[0, 1])
-            return rho if np.isfinite(rho) else None
-        
-        def _r2_and_intercept(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float]:
-            """Compute R² plus fitted intercept for Shannon diversity."""
-            if len(y_true) == 0:
-                return np.nan, np.nan
-            ss_res = np.sum((y_true - y_pred) ** 2)
-            ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-            r2 = float(1 - ss_res / (ss_tot + eps))
-            
-            slope, intercept = np.polyfit(y_true, y_pred, 1)
-            intercept = float(intercept) if np.isfinite(intercept) else np.nan
-            return r2, intercept
-
-        rmse_macro = np.nan
-        mae_macro = np.nan
-        kl_divergence = np.nan
-        shannon_r2 = np.nan
-        shannon_intercept = np.nan
-        spearman_macro = np.nan
-
-        if sample_labels is not None:
-            sample_labels_v = np.asarray(sample_labels)[valid]
-            rmse_per, mae_per, kl_per = [], [], []
-            shannon_true_per, shannon_pred_per = [], []
-            spearman_per = []
-            for sample in np.unique(sample_labels_v):
-                mask = sample_labels_v == sample
-                true_s = y_true[mask]
-                pred_s = y_pred[mask]
-                if len(true_s) == 0:
-                    continue
-                # Macro metrics weight each sample equally regardless of sample size.
-                rmse_per.append(float(np.sqrt(np.mean((true_s - pred_s) ** 2))))
-                mae_per.append(float(np.mean(np.abs(true_s - pred_s))))
-                true_s_norm = (true_s + eps) / (true_s + eps).sum()
-                pred_s_norm = (pred_s + eps) / (pred_s + eps).sum()
-                kl_per.append(float(np.sum(true_s_norm * np.log(true_s_norm / pred_s_norm))))
-
-                shannon_true = _shannon_diversity(true_s, eps)
-                shannon_pred = _shannon_diversity(pred_s, eps)
-                if np.isfinite(shannon_true) and np.isfinite(shannon_pred):
-                    shannon_true_per.append(shannon_true)
-                    shannon_pred_per.append(shannon_pred)
-
-                if len(true_s) > 1:
-                    rho = _spearman_rho(true_s, pred_s)
-                    if rho is not None:
-                        spearman_per.append(rho)
-
-            if rmse_per:
-                rmse_macro = float(np.mean(rmse_per))
-                mae_macro = float(np.mean(mae_per))
-                kl_divergence = float(np.mean(kl_per))
-
-            if len(shannon_true_per) > 1:
-                shannon_r2, shannon_intercept = _r2_and_intercept(np.array(shannon_true_per), np.array(shannon_pred_per))
-
-            if spearman_per:
-                spearman_macro = float(np.mean(spearman_per))
-
-        rmse_micro = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-        mae_micro = float(np.mean(np.abs(y_true - y_pred)))
-        ss_res = np.sum((y_true - y_pred) ** 2)
-        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-        r2 = float(1 - ss_res / (ss_tot + eps))
-
-        y_true_log = np.log(y_true + 1)
-        y_pred_log = np.log(y_pred + 1)
-        ss_res_log = np.sum((y_true_log - y_pred_log) ** 2)
-        ss_tot_log = np.sum((y_true_log - np.mean(y_true_log)) ** 2)
-        r2_log = float(1 - ss_res_log / (ss_tot_log + eps))
-
-        zero_mask = y_true == 0
-        nonzero_mask = y_true > 0
-        # Report sparsity-sensitive errors separately because abundance vectors can be
-        # strongly zero-inflated.
-        rmse_zeros = float(np.sqrt(np.mean((y_true[zero_mask] - y_pred[zero_mask]) ** 2))) if zero_mask.sum() > 0 else np.nan
-        mae_zeros = float(np.mean(np.abs(y_true[zero_mask] - y_pred[zero_mask]))) if zero_mask.sum() > 0 else np.nan
-        rmse_nonzeros = float(np.sqrt(np.mean((y_true[nonzero_mask] - y_pred[nonzero_mask]) ** 2))) if nonzero_mask.sum() > 0 else np.nan
-        mae_nonzeros = float(np.mean(np.abs(y_true[nonzero_mask] - y_pred[nonzero_mask]))) if nonzero_mask.sum() > 0 else np.nan
-
-        corr = np.corrcoef(y_true, y_pred)[0, 1] if len(y_true) > 1 else 0.0
-        correlation = 0.0 if np.isnan(corr) else float(corr)
-
-        nz = y_true != 0
-        rel_error = np.zeros_like(y_true, dtype=float)
-        rel_error[nz] = np.abs(y_pred[nz] - y_true[nz]) / np.abs(y_true[nz])
-        absolute_relative_error = float(np.mean(rel_error[nz])) if nz.sum() > 0 else np.nan
-
-        return {
-            "RMSE (micro)": rmse_micro,
-            "RMSE (macro)": rmse_macro,
-            "MAE (micro)": mae_micro,
-            "MAE (macro)": mae_macro,
-            "Absolute Relative Error": absolute_relative_error,
-            "R² (Shannon diversity)": shannon_r2,
-            "Shannon intercept": shannon_intercept,
-            "Spearman Rho (macro)": spearman_macro,
-            "R²": r2,
-            "R² (log + 1)": r2_log,
-            "RMSE (zeros)": rmse_zeros,
-            "MAE (zeros)": mae_zeros,
-            "RMSE (non-zeros)": rmse_nonzeros,
-            "MAE (non-zeros)": mae_nonzeros,
-            "KL Divergence": kl_divergence,
-            "Correlation": correlation,
-            "n_zeros": float(zero_mask.sum()),
-            "n_nonzeros": float(nonzero_mask.sum()),
-        }
-
-
-    def _metric_key(self, metric_name: str) -> str:
-        return (
-            metric_name.lower()
-            .replace(" ", "_")
-            .replace("(", "")
-            .replace(")", "")
-            .replace("²", "2")
-            .replace("+", "plus")
-            .replace("-", "_")
-            .replace("/", "_")
-        )
-
-    def _plot_training_progress(self) -> None:
-        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-
-        epoch_nums = [e for e, _ in self.train_losses]
-        train_vals = [l for _, l in self.train_losses]
-        val_vals = [l for _, l in self.val_losses]
-
-        ax.plot(epoch_nums, train_vals, "b-", linewidth=2, alpha=0.8, label="Train Loss")
-        ax.plot(epoch_nums, val_vals, "r-", linewidth=2, alpha=0.8, label="Validation Loss")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.set_title("Training Progress")
-        ax.grid(True, alpha=0.3)
-        ax.legend(frameon=False)
-
-        fig_dir = os.path.join(self.base_artifact_dir, "figures")
-        os.makedirs(fig_dir, exist_ok=True)
-        save_path = os.path.join(fig_dir, f"training_progress_{self.model_name}_{self.run_id}.png")
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
+        return compute_metrics(y_pred, y_true, sample_labels=sample_labels)
 
     def run(self, use_wandb: bool = True) -> Dict[str, Any]:
         log.info(
@@ -2476,7 +2353,9 @@ class Trainer:
                 latent_s = time.perf_counter() - latent_start
 
                 loss_value, mlp_timings = self._train_batch(batch)
-                self.mlp_scheduler.step()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.mlp_scheduler.step()
 
                 total_s = time.perf_counter() - batch_start
 
@@ -2556,9 +2435,9 @@ class Trainer:
                 "timing/epoch/val_metrics_s": float(val_metric_s),
             }
             for metric_name, metric_value in train_metrics.items():
-                epoch_log_payload[f"train/metrics/{self._metric_key(metric_name)}"] = metric_value
+                epoch_log_payload[f"train/metrics/{metric_key(metric_name)}"] = metric_value
             for metric_name, metric_value in val_metrics.items():
-                epoch_log_payload[f"val/metrics/{self._metric_key(metric_name)}"] = metric_value
+                epoch_log_payload[f"val/metrics/{metric_key(metric_name)}"] = metric_value
             for diag_name, diag_value in diag.items():
                 epoch_log_payload[f"diag/{diag_name}"] = diag_value
 
@@ -2576,7 +2455,13 @@ class Trainer:
             checkpoint = torch.load(best_ckpt, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint["model_state_dict"])
 
-        self._plot_training_progress()
+        _keep = {"best.pt", "latest.pt", PREPROCESSING_STATE_FILENAME}
+        for _ckpt_file in os.listdir(self.checkpoint_dir):
+            if _ckpt_file not in _keep:
+                try:
+                    os.remove(os.path.join(self.checkpoint_dir, _ckpt_file))
+                except OSError:
+                    pass
 
         test_loss = self.validate(split="test")
         test_preds = self.get_predictions(split="test")
@@ -2593,14 +2478,14 @@ class Trainer:
         print(f"total_seconds:      {total_seconds:.1f}")
         print(f"num_epochs:         {self.current_epoch + 1}")
         for k, v in test_metrics.items():
-            print(f"test/{self._metric_key(k)}:  {v:.6f}")
+            print(f"test/{metric_key(k)}:  {v:.6f}")
 
         if use_wandb and WANDB_AVAILABLE:
             payload = {
                 "test/loss": test_loss,
             }
             for metric_name, metric_value in test_metrics.items():
-                payload[f"test/metrics/{self._metric_key(metric_name)}"] = metric_value
+                payload[f"test/metrics/{metric_key(metric_name)}"] = metric_value
             wandb.log(payload)
 
         predictions, targets, sample_labels, bin_labels = test_preds
@@ -2625,13 +2510,12 @@ class Trainer:
         }
 
     @torch.no_grad()
-    def _compute_ablation_delta(self) -> float:
+    def _compute_ablation_loss(self) -> float:
         saved = self.model.latent_vec.data.clone()
         self.model.latent_vec.data.zero_()
         loss_no_latent = self.validate(split="val")
         self.model.latent_vec.data.copy_(saved)
-        loss_with_latent = self.validate(split="val")
-        return float(loss_no_latent - loss_with_latent)
+        return float(loss_no_latent)
 
     def _collect_diagnostics(self, epoch: int, run_abl: bool = False) -> Dict[str, Any]:
         diag: Dict[str, Any] = {
@@ -2641,7 +2525,7 @@ class Trainer:
             "latent_std": float(self.model.latent_vec.data.std(dim=0).mean().item()),
             "latent_min": float(self.model.latent_vec.data.min().item()),
             "latent_max": float(self.model.latent_vec.data.max().item()),
-            "ablation_delta": self._compute_ablation_delta() if run_abl else None,
+            "ablation_loss": self._compute_ablation_loss() if run_abl else None,
             "final_weight_mean": float(self.model.final_linear.weight.data.mean().item()) if self.cfg.embed_dim > 1 else None,
             "final_weight_std": float(self.model.final_linear.weight.data.std().item()) if self.cfg.embed_dim > 1 else None,
             "final_weight_norm": float(self.model.final_linear.weight.data.norm().item()) if self.cfg.embed_dim > 1 else None,
@@ -2667,6 +2551,9 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="default", help="Name of the model variant being trained")
     parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint for this model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--results_dir", type=str, default=None, help="Override results directory (default: cfg.results_dir)")
+    parser.add_argument("--epochs", type=int, default=None, help="Override epoch count (default: cfg.epochs)")
+    parser.add_argument("--data_path", type=str, default=None, help="Override data CSV path (default: cfg.data_path)")
     args = parser.parse_args()
 
     set_seed()
@@ -2674,9 +2561,15 @@ if __name__ == "__main__":
     log.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
     cfg = Config()
+    if args.epochs is not None:
+        cfg.epochs = args.epochs
+    if args.data_path is not None:
+        cfg.data_path = os.path.abspath(args.data_path)
+        cfg.preprocessed_dir = None  # don't reuse cached preprocessed data for a different dataset
 
     run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.abspath(os.path.join(cfg.results_dir, args.model))
+    results_base = args.results_dir if args.results_dir else cfg.results_dir
+    run_dir = os.path.abspath(os.path.join(results_base, args.model, run_id))
     os.makedirs(run_dir, exist_ok=True)
 
     use_wandb = WANDB_AVAILABLE

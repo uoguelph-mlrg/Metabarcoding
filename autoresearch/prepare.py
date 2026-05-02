@@ -1,6 +1,7 @@
 import logging as log
 import os
 import pickle
+import shutil
 import tempfile
 from typing import Any, Dict, List, Literal, Tuple, Optional, Union
 import numpy as np
@@ -16,17 +17,17 @@ TIME_BUDGET = 300  # wall-clock training seconds (excluding eval/preprocessing o
 
 # Features to use in MLP (observation-level + computed bin-level)
 OBSERVATION_FEATURES = [
-    # Observed features (already in dataset) 
+    # Observed features (already in dataset)
     "total_reads_per_sample",
     "repl_w_reads_fractn",
-    "latitude", 
+    "latitude",
     "longitude",
-    "Excess",
-    "Bulk_Sample_wet_weight",
-    "SumExcessSpecimens",
-    "ExcessNumberTaxa",
-    "length_min_mm", 
-    "length_max_mm",
+    #"Excess",
+    #"Bulk_Sample_wet_weight",
+    #"SumExcessSpecimens",
+    #"ExcessNumberTaxa",
+    #"length_min_mm",
+    #"length_max_mm",
     # Computed bin-level features
     "collection_day",   # derived from collection_start_date
     "total_reads_norm", # total_reads normalized by sample total
@@ -70,19 +71,17 @@ def load_preprocessing_state(path: str) -> Dict[str, Any]:
 
 def _compute_barcodebert_embeddings(
     config: Config,
-    barcode_data_path: str,
     batch_size: int = 64,
 ) -> Dict[str, np.ndarray]:
     """
-    Run BarcodeBERT inference on sequences in barcode_data_path and return a
+    Run BarcodeBERT inference on sequences in config.data_path and return a
     dict mapping bin_uri -> mean-pooled embedding vector (numpy float32).
 
     The function uses mean-pooling of the last hidden state across all token
     positions (recommended by the BarcodeBERT authors).
 
     Args:
-        config: Configuration object with device settings.
-        barcode_data_path: Path to TSV/CSV with 'bin_uri' and 'seq' columns.
+        config: Configuration object with data_path and device settings.
         batch_size: Number of sequences per inference batch.
 
     Returns:
@@ -99,11 +98,12 @@ def _compute_barcodebert_embeddings(
     model = model.to(device).eval()
 
     # Read data: one consensus sequence per BIN
-    sep = "\t" if barcode_data_path.endswith(".tsv") else ","
-    df = pd.read_csv(barcode_data_path, sep=sep)
+    data_path = config.data_path
+    sep = "\t" if data_path.endswith(".tsv") else ","
+    df = pd.read_csv(data_path, sep=sep)
     if "bin_uri" not in df.columns or "seq" not in df.columns:
         raise ValueError(
-            f"{barcode_data_path} must contain 'bin_uri' and 'seq' columns. "
+            f"{data_path} must contain 'bin_uri' and 'seq' columns. "
             f"Found: {list(df.columns)}"
         )
 
@@ -156,16 +156,12 @@ def _load_or_compute_embeddings(
     bin_uris_ordered: List[str],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Load or compute DNA sequence embeddings for BINs.
+    Compute DNA sequence embeddings for BINs via BarcodeBERT.
 
-    Priority:
-        1. Load from config.embedding_path if the file exists.
-        2. Otherwise compute via BarcodeBERT using config.barcode_data_path and save to 
-            config.embedding_path (if provided) so future runs skip inference.
-        3. If neither path is usable, raise a descriptive error.
+    Caching to disk is handled by the preprocessed_dir mechanism in load().
 
     Args:
-        config: Configuration object with embedding_path, barcode_data_path, and device settings.
+        config: Configuration object with data_path and device settings.
         bin_uris_ordered: List of bin URIs in the order they appear in taxonomy_df.
 
     Returns:
@@ -173,34 +169,10 @@ def _load_or_compute_embeddings(
         - embeddings: np.ndarray of shape [n_bins, emb_dim]
         - bins_with_embedding: np.ndarray of shape [n_bins] (bool) indicating which bins have valid embeddings
     """
-    embedding_path = config.embedding_path
-    barcode_data_path = config.barcode_data_path
     n_bins = len(bin_uris_ordered)
+    log.info(f"Running BarcodeBERT inference on {config.data_path}")
+    emb_dict = _compute_barcodebert_embeddings(config)
 
-    emb_dict: Dict[str, np.ndarray] = {}  # bin_uri -> np.ndarray
-
-    if embedding_path is not None and os.path.exists(embedding_path):
-        log.info(f"Loading precomputed embeddings from {embedding_path}")
-        emb_dict = np.load(embedding_path, allow_pickle=True).item()
-    elif barcode_data_path is not None:
-        log.info(
-            f"Precomputed embeddings not found; running BarcodeBERT inference "
-            f"on {barcode_data_path}"
-        )
-        emb_dict = _compute_barcodebert_embeddings(config, barcode_data_path)
-        # Cache to disk for future runs
-        if embedding_path is not None:
-            os.makedirs(os.path.dirname(os.path.abspath(embedding_path)), exist_ok=True)
-            np.save(embedding_path, np.array(emb_dict, dtype=object), allow_pickle=True)
-            log.info(f"Saved computed embeddings to {embedding_path}")
-    else:
-        raise ValueError(
-            "use_embedding=True requires at least one of:\n"
-            "  config.embedding_path  — path to a precomputed .npy embedding file\n"
-            "  config.barcode_data_path — path to a TSV with 'bin_uri' and 'seq' columns"
-        )
-
-    # Determine embedding dimension from first available vector
     emb_dim = next(iter(emb_dict.values())).shape[0]
     embeddings = np.zeros((n_bins, emb_dim), dtype=np.float32)
     bins_with_embedding = np.zeros(n_bins, dtype=bool)
@@ -220,14 +192,112 @@ def _load_or_compute_embeddings(
     return embeddings, bins_with_embedding
 
 
+def _save_to_preprocessed_dir(
+    out_dir: str,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    taxonomy_df: pd.DataFrame,
+    embeddings_array: Optional[np.ndarray],
+    bins_with_embedding_arr: Optional[np.ndarray],
+    bin_index: Dict[Any, int],
+    sample_index: Dict[Any, int],
+    split_indices: Dict[str, np.ndarray],
+    state_path: str,
+) -> None:
+    """Save all preprocessed artifacts to out_dir and write a sentinel file last."""
+    os.makedirs(out_dir, exist_ok=True)
+    sentinel = os.path.join(out_dir, "_complete")
+    if os.path.exists(sentinel):
+        os.remove(sentinel)
+
+    for X, y, split in [(X_train, y_train, "train"), (X_val, y_val, "val"), (X_test, y_test, "test")]:
+        X.to_csv(os.path.join(out_dir, f"X_{split}.csv"))
+        pd.Series(y).to_csv(os.path.join(out_dir, f"y_{split}.csv"), index=False)
+    taxonomy_df.to_csv(os.path.join(out_dir, "bins_data.csv"), index=False)
+
+    emb = embeddings_array if embeddings_array is not None else np.array([], dtype=np.float32)
+    np.save(os.path.join(out_dir, "embeddings_array.npy"), emb)
+    bwe = bins_with_embedding_arr if bins_with_embedding_arr is not None else np.array([], dtype=bool)
+    np.save(os.path.join(out_dir, "bins_with_embedding_arr.npy"), bwe)
+
+    with open(os.path.join(out_dir, "bin_index.pkl"), "wb") as f:
+        pickle.dump(bin_index, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(os.path.join(out_dir, "sample_index.pkl"), "wb") as f:
+        pickle.dump(sample_index, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(os.path.join(out_dir, "split_indices.pkl"), "wb") as f:
+        pickle.dump(split_indices, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    shutil.copy2(state_path, os.path.join(out_dir, PREPROCESSING_STATE_FILENAME))
+    open(sentinel, "w").close()
+    log.info(f"Saved complete preprocessed cache to {out_dir}")
+
+
+def _load_from_preprocessed_dir(
+    cache_dir: str,
+) -> Tuple[
+    Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray],
+    Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str
+]:
+    """Load all preprocessing artifacts from a directory written by _save_to_preprocessed_dir."""
+    def _read_X(split: str) -> pd.DataFrame:
+        X = pd.read_csv(os.path.join(cache_dir, f"X_{split}.csv"))
+        return X.set_index(["sample_id", "bin_uri"])
+
+    def _read_y(split: str) -> pd.Series:
+        y_df = pd.read_csv(os.path.join(cache_dir, f"y_{split}.csv"))
+        return y_df.iloc[:, 0].astype(np.float32)
+
+    X_train = _read_X("train")
+    X_val   = _read_X("val")
+    X_test  = _read_X("test")
+    y_train = _read_y("train")
+    y_val   = _read_y("val")
+    y_test  = _read_y("test")
+
+    taxonomy_df = pd.read_csv(os.path.join(cache_dir, "bins_data.csv"))
+
+    emb_arr = np.load(os.path.join(cache_dir, "embeddings_array.npy"))
+    embeddings_array = emb_arr if emb_arr.size > 0 else None
+
+    bwe_arr = np.load(os.path.join(cache_dir, "bins_with_embedding_arr.npy"))
+    bins_with_embedding_arr = bwe_arr if bwe_arr.size > 0 else None
+
+    with open(os.path.join(cache_dir, "bin_index.pkl"), "rb") as f:
+        bin_index = pickle.load(f)
+    with open(os.path.join(cache_dir, "sample_index.pkl"), "rb") as f:
+        sample_index = pickle.load(f)
+    with open(os.path.join(cache_dir, "split_indices.pkl"), "rb") as f:
+        split_indices = pickle.load(f)
+
+    state_path = os.path.join(cache_dir, PREPROCESSING_STATE_FILENAME)
+
+    return (
+        {
+            "train": {"X": X_train, "y": y_train, "y_prob": y_train},
+            "val":   {"X": X_val,   "y": y_val,   "y_prob": y_val},
+            "test":  {"X": X_test,  "y": y_test,  "y_prob": y_test},
+        },
+        taxonomy_df,
+        embeddings_array,
+        bins_with_embedding_arr,
+        bin_index,
+        sample_index,
+        split_indices,
+        state_path,
+    )
+
+
 def load(
-    config: Config, 
-    save_data: bool = True,
+    config: Config,
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
     preprocessing_state_path: Optional[str] = None,
     preprocessing_state_filename: str = PREPROCESSING_STATE_FILENAME,
 ) -> Tuple[
-    Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray], 
+    Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray],
     Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str
 ]:
     """
@@ -235,11 +305,10 @@ def load(
 
     Args:
         config: Configuration object with train_frac, val_frac
-        save_data: Whether to save split CSVs to disk
-        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample 
+        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample
             indices for reproducible splits across different calls
-        preprocessing_state_path: Optional path to preprocessing state file; used for replay mode 
-            when the file already exists. If missing, preprocessing is computed and the artifact is 
+        preprocessing_state_path: Optional path to preprocessing state file; used for replay mode
+            when the file already exists. If missing, preprocessing is computed and the artifact is
             written there.
         preprocessing_state_filename: Artifact filename used when writing default state
 
@@ -252,8 +321,36 @@ def load(
         - bin_index: mapping bin_uri -> col index
         - sample_index: mapping sample_id -> row index
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
-        - preprocessing_state_path: path to the saved preprocessing state artifact 
+        - preprocessing_state_path: path to the saved preprocessing state artifact
     """
+    # Fast-path: load everything from a previously written cache directory.
+    if config.preprocessed_dir is not None:
+        sentinel = os.path.join(config.preprocessed_dir, "_complete")
+        if os.path.exists(sentinel):
+            cached = _load_from_preprocessed_dir(config.preprocessed_dir)
+            # cached[2] is embeddings_array; skip cache if config needs embeddings but cache has none
+            if config.use_embedding and cached[2] is None:
+                log.info(f"load(): cache at {config.preprocessed_dir} has no embeddings but use_embedding=True — recomputing.")
+            else:
+                # Check that the cached location embedder matches the current config.
+                cached_state_path = os.path.join(config.preprocessed_dir, PREPROCESSING_STATE_FILENAME)
+                cached_loc_embedder = None
+                if os.path.exists(cached_state_path):
+                    try:
+                        cached_state = load_preprocessing_state(cached_state_path)
+                        cached_loc_embedder = cached_state.get("location_embedder", None)
+                    except Exception:
+                        pass
+                current_loc_embedder = getattr(config, "location_embedder", None)
+                if cached_loc_embedder != current_loc_embedder:
+                    log.info(
+                        f"load(): cache at {config.preprocessed_dir} was built with location_embedder={cached_loc_embedder!r} "
+                        f"but current config has location_embedder={current_loc_embedder!r} — recomputing."
+                    )
+                else:
+                    log.info(f"load(): cache hit at {config.preprocessed_dir} — loading from disk, skipping preprocessing.")
+                    return cached
+
     replay_state: Optional[Dict[str, Any]] = None
     if preprocessing_state_path is not None and os.path.exists(preprocessing_state_path):
         replay_state = load_preprocessing_state(preprocessing_state_path)
@@ -322,25 +419,23 @@ def load(
     else:
         df["collection_day"] = 0
 
-    # Build index mappings
-    unique_samples = df["sample_id"].unique()
-    n_samples = len(unique_samples)
-    sample_index = {s: i for i, s in enumerate(unique_samples)}
-    unique_bins = df["bin_uri"].unique()
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
-
     # Normalize + log-transform occurences to get target y
     sample_totals = df.groupby("sample_id")["occurrences"].transform("sum")
     # Also store actual proportions for cross-entropy loss
     df["rel_abundance"] = df["occurrences"] / (sample_totals + 1e-10)
 
-    # Apply logarithmic preprocessing (only log transform, no sample normalization)
+    # Apply log transform (no sample normalization)
     df["total_reads_per_sample"] = np.log1p(df["total_reads_per_sample"])
     df["total_reads_norm"] = np.log1p(df["total_reads"])
     df["avg_reads_norm"] = np.log1p(df["avg_reads"])
     df["max_reads_norm"] = np.log1p(df["max_reads"])
     df["min_reads_norm"] = np.log1p(df["min_reads"])
-    
+
+    # Build sample index mappings before splitting so split sizes are computed correctly.
+    unique_samples = df["sample_id"].unique()
+    n_samples = len(unique_samples)
+    sample_index = {s: i for i, s in enumerate(unique_samples)}
+
     ################################################################################################
     # Train/val/test split
     ################################################################################################
@@ -362,20 +457,20 @@ def load(
         # If removing excess samples from train/val, build test set only from excess samples and split the rest randomly.
         excess_samples = df[df["Excess"] > 0]["sample_id"].unique()
         non_excess_samples = df[df["Excess"] <= 0]["sample_id"].unique()
-        
+
         n_non_excess = len(non_excess_samples)
         n_val = int(n_non_excess * config.val_frac)
         n_train = n_non_excess - n_val
-        
+
         np.random.shuffle(non_excess_samples)
         train_sample_idx = np.array([sample_index[s] for s in non_excess_samples[:n_train]])
         val_sample_idx = np.array([sample_index[s] for s in non_excess_samples[n_train:n_train + n_val]])
         test_sample_idx = np.array([sample_index[s] for s in excess_samples])
-        
+
     else:
         # WARNING: to be updated once we corrected the excess
         df = df[df["Excess"] <= 0]
-        
+
         # Randomly split samples into train/val/test according to config fractions.
         sample_indices = np.arange(n_samples)
         np.random.shuffle(sample_indices)
@@ -386,7 +481,10 @@ def load(
         train_sample_idx = sample_indices[:n_train]
         val_sample_idx = sample_indices[n_train:n_train + n_val]
         test_sample_idx = sample_indices[n_train + n_val:]
-    
+
+    unique_bins = df["bin_uri"].unique()
+    bin_index = {b: i for i, b in enumerate(unique_bins)}
+
     split_indices = {
         "train": train_sample_idx,
         "val": val_sample_idx,
@@ -399,6 +497,85 @@ def load(
     missing_features = [c for c in TAXONOMY_FEATURES if c not in df.columns]
     if config.use_taxonomy and missing_features:
         log.warning(f"Missing taxonomy features in dataset: {', '.join(missing_features)}.")
+
+    ################################################################################################
+    # Location embedding (optional)
+    ################################################################################################
+    location_embedding_cols: List[str] = []
+    if replay_state is None and getattr(config, "location_embedder", None) is not None:
+        _emb_model = config.location_embedder
+        _cache_path: Optional[str] = None
+        if getattr(config, "preprocessed_dir", None) is not None:
+            _cache_path = os.path.join(
+                os.path.abspath(config.preprocessed_dir),
+                f"loc_emb_{_emb_model}.npy",
+            )
+            _cache_coords_path = _cache_path.replace(".npy", "_coords.npy")
+
+        if _cache_path is not None and os.path.exists(_cache_path) and os.path.exists(_cache_coords_path):
+            cached_embs = np.load(_cache_path)
+            cached_coords = np.load(_cache_coords_path)
+            log.info("Loaded location embeddings from cache: %s", _cache_path)
+            # Re-join cached embeddings to df rows by matching lat/lon
+            n_emb_dims = cached_embs.shape[1]
+            location_embedding_cols = [f"loc_emb_{i:03d}" for i in range(n_emb_dims)]
+            coord_to_idx = {tuple(row): i for i, row in enumerate(cached_coords)}
+            lat = df["latitude"].to_numpy()
+            lon = df["longitude"].to_numpy()
+            row_embs = np.array([
+                cached_embs[coord_to_idx.get((lat[i], lon[i]), -1)]
+                if (lat[i], lon[i]) in coord_to_idx else np.zeros(n_emb_dims, dtype=np.float32)
+                for i in range(len(df))
+            ], dtype=np.float32)
+            for j, col in enumerate(location_embedding_cols):
+                df[col] = row_embs[:, j]
+        else:
+            spec = EmbedderSpec(
+                model_name=_emb_model,
+                device=config.device,
+                satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
+                range_db_path=getattr(config, "range_db_path", None),
+            )
+            embedder = build_location_embedder(spec)
+            df, location_embedding_cols = add_location_embeddings(
+                df, embedder, lat_col="latitude", lon_col="longitude"
+            )
+            log.info("Computed location embeddings via %s (%d dims)", _emb_model, len(location_embedding_cols))
+            if _cache_path is not None:
+                unique_coords = df[["latitude", "longitude"]].drop_duplicates().to_numpy(dtype=np.float64)
+                coord_to_idx = {tuple(row): i for i, row in enumerate(unique_coords)}
+                n_emb_dims = len(location_embedding_cols)
+                uniq_embs = np.zeros((len(unique_coords), n_emb_dims), dtype=np.float32)
+                for j, col in enumerate(location_embedding_cols):
+                    for k, coord in enumerate(unique_coords):
+                        rows_with_coord = (df["latitude"] == coord[0]) & (df["longitude"] == coord[1])
+                        uniq_embs[k, j] = df.loc[rows_with_coord, col].iloc[0]
+                os.makedirs(os.path.dirname(_cache_path), exist_ok=True)
+                np.save(_cache_path, uniq_embs)
+                np.save(_cache_coords_path, unique_coords)
+                log.info("Saved location embedding cache to %s", _cache_path)
+
+    # Build feature list: when using location embedder, replace raw GPS with embedding cols
+    LOCATION_RAW_FEATURES = ["latitude", "longitude"]
+    base_feature_list = list(OBSERVATION_FEATURES)
+    if location_embedding_cols:
+        base_feature_list = [f for f in OBSERVATION_FEATURES if f not in LOCATION_RAW_FEATURES]
+        base_feature_list.extend(location_embedding_cols)
+        if getattr(config, "keep_raw_gps_features", False):
+            base_feature_list.extend(LOCATION_RAW_FEATURES)
+    elif replay_state is not None and getattr(config, "location_embedder", None) is not None:
+        # Replay with location embedder: re-run embedding to recreate columns, then let
+        # feature_cols_present from state take over (which already includes loc_emb_* cols).
+        spec = EmbedderSpec(
+            model_name=config.location_embedder,
+            device=config.device,
+            satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
+            range_db_path=getattr(config, "range_db_path", None),
+        )
+        embedder = build_location_embedder(spec)
+        df, location_embedding_cols = add_location_embeddings(
+            df, embedder, lat_col="latitude", lon_col="longitude"
+        )
 
     # Build df_long with required columns + features
     base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
@@ -413,7 +590,7 @@ def load(
                 + ", ".join(replay_missing)
             )
     else:
-        feature_cols_present = [c for c in OBSERVATION_FEATURES if c in df.columns]
+        feature_cols_present = [c for c in base_feature_list if c in df.columns]
     df_long = df[base_cols + feature_cols_present].copy()
 
     # Ensure feature columns are numeric; non-numeric values become NaN and are imputed later.
@@ -422,11 +599,8 @@ def load(
             log.warning(f"Feature column '{col}' is not numeric; attempting to coerce to numeric with NaN for invalid values.")
             df_long[col] = pd.to_numeric(df_long[col], errors="coerce")
 
-    # Build taxonomy_df with taxonomy columns (if use_taxonomy) and/or embedding (if use_embedding)
-    if config.use_taxonomy:
-        taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
-    else:
-        taxonomy_df = pd.DataFrame({"bin_uri": df["bin_uri"].unique()})
+    # Build taxonomy_df with taxonomy columns
+    taxonomy_df = df.groupby("bin_uri").first()[[c for c in TAXONOMY_FEATURES if c in df.columns]].reset_index()
 
     # Ensure taxonomy_df is ordered by bin_index
     taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
@@ -478,7 +652,7 @@ def load(
         std = float(train_feature_stds[col])
         mean = float(train_feature_means[col])
         df_long[col] = (df_long[col] - mean) / (std + 1e-10)
-        
+
 
     if replay_state is None:
         # Store the sample IDs corresponding to each split for reproducibility and downstream use.
@@ -509,6 +683,8 @@ def load(
                 "threshold": float(reads_threshold) if len(sample_reads) > 0 else None,
             },
         }
+        # Always record which location embedder was used so cache invalidation works correctly.
+        state["location_embedder"] = getattr(config, "location_embedder", None)
         # Add embeddings to state if computed
         if config.use_embedding and embeddings_array is not None:
             # Store embeddings dict for reproducibility on resume
@@ -517,7 +693,6 @@ def load(
                 for idx, uri in enumerate(taxonomy_df["bin_uri"])
             }
             state["embeddings_dict"] = embeddings_dict
-            state["embedding_path"] = config.embedding_path
             state["use_embedding"] = True
         save_preprocessing_state(resolved_state_path, state)
 
@@ -538,142 +713,538 @@ def load(
     log.info(f"  Train: {len(train_sample_idx)} samples ({100 * config.train_frac:.0f}%)")
     log.info(f"  Val: {len(val_sample_idx)} samples ({100 * config.val_frac:.0f}%)")
     log.info(f"  Test: {len(test_sample_idx)} samples ({100 * (1 - config.train_frac - config.val_frac):.0f}%)")
-    
-    # Save the data splits in the `data` folder
-    if save_data:
-        data_path = os.path.dirname(config.data_path)
 
-        for X, y, split in [(X_train,y_train,"train"), (X_val,y_val,"val"), (X_test,y_test,"test")]:
-            X.to_csv(f"{data_path}/X_{split}.csv")
-            pd.Series(y).to_csv(f"{data_path}/y_{split}.csv", index=False)
-        taxonomy_df.to_csv(f"{data_path}/bins_data.csv", index=False)
+    if config.preprocessed_dir is not None and config.use_embedding:
+        # Only write the cache from a run with use_embedding=True so embeddings are always present.
+        # Runs with use_embedding=False skip the write to avoid poisoning the cache for other runs.
+        _save_to_preprocessed_dir(
+            config.preprocessed_dir,
+            X_train, y_train, X_val, y_val, X_test, y_test,
+            taxonomy_df, embeddings_array, bins_with_embedding_arr,
+            bin_index, sample_index, split_indices, resolved_state_path,
+        )
 
-    result = (
+    return (
         {
             "train": {"X": X_train, "y": y_train, "y_prob": y_train},
             "val": {"X": X_val, "y": y_val, "y_prob": y_val},
             "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-        }, 
-        taxonomy_df,                # flat DataFrame: bin_uri + taxonomy only
-        embeddings_array,           # np.ndarray [n_bins, emb_dim] or None
-        bins_with_embedding_arr,    # np.ndarray [n_bins] bool or None
-        bin_index, 
-        sample_index, 
-        split_indices, 
-        resolved_state_path
+        },
+        taxonomy_df,
+        embeddings_array,
+        bins_with_embedding_arr,
+        bin_index,
+        sample_index,
+        split_indices,
+        resolved_state_path,
     )
 
-    return result
+
+MODEL_ALIASES: Dict[str, str] = {
+	"satclip": "satclip",
+	"range": "range",
+	"range+": "range",
+	"geoclip": "geoclip",
+	"alphaearth": "alphaearth",
+	"alpha_earth": "alphaearth",
+}
 
 
-def load_processed(
-    data_dir: str
-) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
-    """
-    Load preprocessed splits saved by `load()` from a directory.
-
-    Expected files in `data_dir`:
-    - X_train.csv, X_val.csv, X_test.csv (MultiIndex: sample_id, bin_uri)
-    - y_train.csv, y_val.csv, y_test.csv (single column, aligned to X_*.csv row order)
-    - bins_data.csv (must include bin_uri and taxonomy or embedding columns)
-
-    Returns the same objects as `load()`, except `split_indices` is empty
-    (since the original sample-index permutation is not recoverable from files alone).
-    """
-    def _read_X(split: str) -> pd.DataFrame:
-        path = os.path.join(data_dir, f"X_{split}.csv")
-        X = pd.read_csv(path)
-        if "sample_id" not in X.columns or "bin_uri" not in X.columns:
-            raise ValueError(f"{path} must contain columns 'sample_id' and 'bin_uri'")
-        X = X.set_index(["sample_id", "bin_uri"])
-        return X
-
-    def _read_y(split: str, n_rows: int) -> pd.Series:
-        path = os.path.join(data_dir, f"y_{split}.csv")
-        y_df = pd.read_csv(path)
-        if y_df.shape[1] == 1:
-            y = y_df.iloc[:, 0]
-        else:
-            # fallback: try a known column name
-            # Contract: if rel_abundance is absent, first column is treated as target.
-            y = y_df["rel_abundance"] if "rel_abundance" in y_df.columns else y_df.iloc[:, 0]
-        if len(y) != n_rows:
-            raise ValueError(f"{path} has {len(y)} rows but X_{split}.csv has {n_rows}")
-        return y.astype(np.float32)
-
-    X_train = _read_X("train")
-    X_val = _read_X("val")
-    X_test = _read_X("test")
-
-    y_train = _read_y("train", len(X_train))
-    y_val = _read_y("val", len(X_val))
-    y_test = _read_y("test", len(X_test))
-
-    bins_path = os.path.join(data_dir, "bins_data.csv")
-    taxonomy_df = pd.read_csv(bins_path)
-    if "bin_uri" not in taxonomy_df.columns:
-        raise ValueError(f"{bins_path} must contain 'bin_uri'")
-
-    # Build index mappings from the processed splits (ensures consistency)
-    unique_samples = pd.Index(
-        pd.concat([
-            X_train.reset_index()["sample_id"],
-            X_val.reset_index()["sample_id"],
-            X_test.reset_index()["sample_id"],
-        ]).unique()
-    )
-    sample_index = {s: i for i, s in enumerate(unique_samples)}
-
-    unique_bins = pd.Index(
-        pd.concat([
-            X_train.reset_index()["bin_uri"],
-            X_val.reset_index()["bin_uri"],
-            X_test.reset_index()["bin_uri"],
-        ]).unique()
-    )
-    bin_index = {b: i for i, b in enumerate(unique_bins)}
-
-    # Reorder taxonomy_df to match bin_index where possible
-    taxonomy_df["_idx"] = taxonomy_df["bin_uri"].map(bin_index)
-    taxonomy_df = taxonomy_df.sort_values("_idx").drop(columns=["_idx"]).reset_index(drop=True)
-
-    # No split_indices available when loading from disk
-    split_indices: Dict[str, np.ndarray] = {"train": np.array([]), "val": np.array([]), "test": np.array([])}
-
-    return {
-        "train": {"X": X_train, "y": y_train, "y_prob": y_train},
-        "val": {"X": X_val, "y": y_val, "y_prob": y_val},
-        "test": {"X": X_test, "y": y_test, "y_prob": y_test},
-    }, taxonomy_df, bin_index, sample_index, split_indices
+_REPO_DIR = Path(__file__).resolve().parent.parent
+_THIRD_PARTY_DIR = _REPO_DIR / "third_party"
 
 
-def load_or_preprocess(
-    config: Config,
-    fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
-) -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame, Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray]]:
-    """
-    Fast path: if preprocessed splits already exist in the data directory, load them
-    via load_processed() — skips all CSV parsing and feature engineering.
-    Slow path: runs load() with save_data=True so subsequent calls take the fast path.
+def _ensure_third_party_on_syspath(*relative_parts: str) -> Path:
+	"""Ensure a local third_party source path exists on sys.path and return it."""
+	path = (_THIRD_PARTY_DIR / Path(*relative_parts)).resolve()
+	if path.exists():
+		path_str = str(path)
+		if path_str not in sys.path:
+			sys.path.insert(0, path_str)
+	return path
 
-    The seven sentinel files checked are: X_train.csv, X_val.csv, X_test.csv,
-    y_train.csv, y_val.csv, y_test.csv, bins_data.csv.
 
-    NOTE: when loading from cache, fixed_split_indices is ignored — the split is
-    already baked into the saved files. This is intentional: autoresearch runs must
-    compare models on a fixed, reproducible split.
-    """
-    data_dir = os.path.dirname(config.data_path)
-    sentinel_files = [
-        os.path.join(data_dir, f"{prefix}.csv")
-        for prefix in ("X_train", "X_val", "X_test", "y_train", "y_val", "y_test", "bins_data")
-    ]
-    if all(os.path.exists(p) for p in sentinel_files):
-        log.info("load_or_preprocess: cached splits found — loading from disk (skipping preprocessing).")
-        return load_processed(data_dir)
-    else:
-        log.info("load_or_preprocess: no cached splits found — running full preprocessing and saving.")
-        return load(config, save_data=True, fixed_split_indices=fixed_split_indices)
+def _normalize_model_name(name: str) -> str:
+	key = name.strip().lower()
+	if key not in MODEL_ALIASES:
+		supported = ", ".join(sorted(set(MODEL_ALIASES.values())))
+		raise ValueError(f"Unknown location embedder '{name}'. Supported: {supported}")
+	return MODEL_ALIASES[key]
+
+
+def _iter_batches(n: int, batch_size: int) -> Iterable[Tuple[int, int]]:
+	for start in range(0, n, batch_size):
+		end = min(start + batch_size, n)
+		yield start, end
+
+
+def _sanitize_latlon(latlon: np.ndarray) -> np.ndarray:
+	# Always materialize a writable copy. Some upstream arrays (views/readonly buffers)
+	# can be non-writeable and fail during in-place sanitization.
+	arr = np.array(latlon, dtype=np.float64, copy=True, order="C")
+	if arr.ndim != 2 or arr.shape[1] != 2:
+		raise ValueError("Coordinates must be an array with shape (N, 2) in [lat, lon] order")
+
+	arr[:, 0] = np.nan_to_num(arr[:, 0], nan=0.0, posinf=90.0, neginf=-90.0)
+	arr[:, 1] = np.nan_to_num(arr[:, 1], nan=0.0, posinf=180.0, neginf=-180.0)
+	arr[:, 0] = np.clip(arr[:, 0], -90.0, 90.0)
+	arr[:, 1] = np.clip(arr[:, 1], -180.0, 180.0)
+	return arr
+
+
+def _latlon_to_unit_xyz(latlon: np.ndarray) -> np.ndarray:
+	arr = _sanitize_latlon(latlon).astype(np.float64)
+	lat_rad = np.deg2rad(arr[:, 0])
+	lon_rad = np.deg2rad(arr[:, 1])
+	x = np.cos(lat_rad) * np.cos(lon_rad)
+	y = np.cos(lat_rad) * np.sin(lon_rad)
+	z = np.sin(lat_rad)
+	return np.column_stack([x, y, z]).astype(np.float32)
+
+
+@dataclass
+class EmbedderSpec:
+	model_name: str
+	device: str = "cpu"
+	batch_size: int = 2048
+	satclip_ckpt_path: Optional[str] = None
+	range_db_path: Optional[str] = None
+
+
+class BaseLocationEmbedder:
+	def __init__(self, device: str = "cpu", batch_size: int = 2048) -> None:
+		self.device = device
+		self.batch_size = max(1, int(batch_size))
+
+	@property
+	def embedding_dim(self) -> int:
+		raise NotImplementedError
+
+	def encode(self, latlon: np.ndarray) -> np.ndarray:
+		raise NotImplementedError
+
+
+class GeoCLIPEmbedder(BaseLocationEmbedder):
+	def __init__(self, device: str = "cpu", batch_size: int = 2048) -> None:
+		super().__init__(device=device, batch_size=batch_size)
+		try:
+			import torch
+			geoclip_mod = importlib.import_module("geoclip")
+		except ImportError as exc:
+			raise ImportError(
+				"GeoCLIP backend requires 'geoclip' and 'torch'. Install with: pip install geoclip"
+			) from exc
+
+		self._torch = torch
+		LocationEncoder = getattr(geoclip_mod, "LocationEncoder")
+		self._model = LocationEncoder().double().to(self.device)
+		self._model.eval()
+
+	@property
+	def embedding_dim(self) -> int:
+		return 512
+
+	def encode(self, latlon: np.ndarray) -> np.ndarray:
+		coords = _sanitize_latlon(latlon)
+		outs: List[np.ndarray] = []
+		with self._torch.no_grad():
+			for start, end in _iter_batches(len(coords), self.batch_size):
+				batch = self._torch.tensor(coords[start:end], dtype=self._torch.float64, device=self.device)
+				emb = self._model(batch).detach().cpu().numpy().astype(np.float32)
+				outs.append(emb)
+		return np.concatenate(outs, axis=0) if outs else np.zeros((0, self.embedding_dim), dtype=np.float32)
+
+
+class _RangeBackedEmbedder(BaseLocationEmbedder):
+	def __init__(
+		self,
+		model_name: str,
+		device: str,
+		batch_size: int,
+		satclip_ckpt_path: Optional[str],
+		range_db_path: Optional[str],
+		range_beta: float,
+	) -> None:
+		super().__init__(device=device, batch_size=batch_size)
+		try:
+			import torch
+		except ImportError as exc:
+			raise ImportError(
+				"RANGE backend requires 'torch'. Install with: pip install torch"
+			) from exc
+
+		self._torch = torch
+		self._model_name = model_name.upper()
+		if self._model_name not in ("RANGE", "RANGE+"):
+			raise ValueError(f"Unsupported RANGE model '{model_name}'. Use RANGE or RANGE+.")
+
+		if range_db_path is None:
+			raise ValueError("RANGE requires a precomputed database file path via 'range_db_path'.")
+		range_db = Path(range_db_path).expanduser()
+		if not range_db.is_absolute():
+			range_db = (_REPO_DIR / range_db).resolve()
+		if not range_db.is_file():
+			raise FileNotFoundError(
+				"RANGE database not found. "
+				f"Expected file at: {range_db}. "
+				"Pass --range_db_path explicitly if needed."
+			)
+
+		db = np.load(range_db, allow_pickle=True)
+		if "satclip_embeddings" not in db or "image_embeddings" not in db:
+			raise ValueError(
+				"Invalid RANGE database: expected keys 'satclip_embeddings' and 'image_embeddings'."
+			)
+
+		db_satclip = db["satclip_embeddings"].astype(np.float32)
+		db_satclip_norm = np.linalg.norm(db_satclip, ord=2, axis=1, keepdims=True)
+		db_satclip = db_satclip / np.clip(db_satclip_norm, 1e-8, None)
+		self._db_satclip = self._torch.tensor(db_satclip, dtype=self._torch.float32, device=self.device)
+		self._db_image = self._torch.tensor(db["image_embeddings"].astype(np.float32), dtype=self._torch.float32, device=self.device)
+
+		self._db_locs_xyz = None
+		if self._model_name == "RANGE+":
+			if "locs" not in db:
+				raise ValueError("Invalid RANGE+ database: expected key 'locs'.")
+			db_locs_latlon = db["locs"].astype(np.float32)
+			self._db_locs_xyz = self._torch.tensor(_latlon_to_unit_xyz(db_locs_latlon), dtype=self._torch.float32, device=self.device)
+
+		self._satclip = SatCLIPEmbedder(
+			device=device,
+			batch_size=batch_size,
+			satclip_ckpt_path=satclip_ckpt_path,
+		)
+		self._temp = 15.0
+		self._geo_temp = 40.0
+		self._beta = float(range_beta)
+		self._embedding_dim = 1280
+
+	@property
+	def embedding_dim(self) -> int:
+		return self._embedding_dim
+
+	def encode(self, latlon: np.ndarray) -> np.ndarray:
+		coords_latlon = _sanitize_latlon(latlon).astype(np.float32)
+		outs: List[np.ndarray] = []
+		with self._torch.no_grad():
+			for start, end in _iter_batches(len(coords_latlon), self.batch_size):
+				batch_latlon_np = coords_latlon[start:end]
+				curr_loc_np = self._satclip.encode(batch_latlon_np).astype(np.float32)
+				curr_loc = self._torch.tensor(curr_loc_np, dtype=self._torch.float32, device=self.device)
+				curr_loc = curr_loc / self._torch.clamp(curr_loc.norm(p=2, dim=-1, keepdim=True), min=1e-8)
+
+				high_res_similarity = self._torch.softmax((curr_loc @ self._db_satclip.T) * self._temp, dim=-1)
+				high_res_embeddings = high_res_similarity @ self._db_image
+
+				if self._model_name == "RANGE+":
+					query_xyz = self._torch.tensor(_latlon_to_unit_xyz(batch_latlon_np), dtype=self._torch.float32, device=self.device)
+					angular_similarity = self._torch.softmax((query_xyz @ self._db_locs_xyz.T) * self._geo_temp, dim=-1)
+					angular_high_res = angular_similarity @ self._db_image
+					combined_high_res = (1.0 - self._beta) * angular_high_res + self._beta * high_res_embeddings
+				else:
+					combined_high_res = high_res_embeddings
+
+				emb = self._torch.cat([combined_high_res, curr_loc], dim=1)
+				outs.append(emb.detach().cpu().numpy().astype(np.float32))
+		return np.concatenate(outs, axis=0) if outs else np.zeros((0, self.embedding_dim), dtype=np.float32)
+
+
+class SatCLIPEmbedder(BaseLocationEmbedder):
+	def __init__(
+		self,
+		device: str = "cpu",
+		batch_size: int = 2048,
+		satclip_ckpt_path: Optional[str] = None,
+	) -> None:
+		super().__init__(device=device, batch_size=batch_size)
+		try:
+			import torch
+			from huggingface_hub import hf_hub_download
+		except ImportError as exc:
+			raise ImportError(
+				"SatCLIP backend requires 'torch' and 'huggingface-hub'. "
+				"Install with: pip install torch huggingface-hub"
+			) from exc
+
+		# Ensure local vendored SatCLIP paths are discoverable first.
+		vendored_satclip_pkg = _ensure_third_party_on_syspath("satclip", "satclip")
+		vendored_satclip_root = _ensure_third_party_on_syspath("satclip")
+		importlib.invalidate_caches()
+
+		# SatCLIP loaders exposed by the official repo:
+		# - load_lightweight.py: get_satclip_loc_encoder (no lightning dependency)
+		# - load.py: get_satclip
+		get_satclip = None
+		import_errors: List[str] = []
+		for mod_name in (
+			"load_lightweight",
+			"load",
+			"satclip.load_lightweight",
+			"satclip.load",
+			"satclip.load_model",
+		):
+			try:
+				mod = importlib.import_module(mod_name)
+			except Exception as exc:  # pragma: no cover - import failures are env-specific
+				import_errors.append(f"{mod_name}: {exc}")
+				continue
+			candidate = getattr(mod, "get_satclip", None) or getattr(mod, "get_satclip_loc_encoder", None)
+			if candidate is not None:
+				get_satclip = candidate
+				break
+
+		if get_satclip is None:
+			raise ImportError(
+				"SatCLIP backend could not find a loader function. Expected one of "
+				"'get_satclip' or 'get_satclip_loc_encoder' from SatCLIP source. "
+				"If using local clone, ensure third_party/satclip is present and SatCLIP deps are installed. "
+				f"Checked paths: {vendored_satclip_pkg}, {vendored_satclip_root}. "
+				f"Import errors: {' | '.join(import_errors)}"
+			)
+
+		ckpt_path = satclip_ckpt_path
+		if ckpt_path is None:
+			ckpt_path = hf_hub_download(
+				repo_id="microsoft/SatCLIP-ResNet50-L10",
+				filename="satclip-resnet50-l10.ckpt",
+				repo_type="model",
+			)
+
+		self._torch = torch
+		self._model = get_satclip(ckpt_path, device=device)
+		self._model.to(device)
+		self._model.eval()
+		self._embedding_dim = int(getattr(self._model, "location_feature_dim", 256))
+
+	@property
+	def embedding_dim(self) -> int:
+		return self._embedding_dim
+
+	def encode(self, latlon: np.ndarray) -> np.ndarray:
+		coords_latlon = _sanitize_latlon(latlon)
+		# SatCLIP expects [lon, lat] coordinates (as in HF card examples)
+		coords_lonlat = np.column_stack([coords_latlon[:, 1], coords_latlon[:, 0]])
+
+		outs: List[np.ndarray] = []
+		with self._torch.no_grad():
+			for start, end in _iter_batches(len(coords_lonlat), self.batch_size):
+				batch = self._torch.tensor(
+					coords_lonlat[start:end], dtype=self._torch.float64, device=self.device
+				)
+				emb = self._model(batch)
+				if hasattr(emb, "detach"):
+					emb_np = emb.detach().cpu().numpy()
+				else:
+					emb_np = np.asarray(emb)
+				outs.append(np.asarray(emb_np, dtype=np.float32))
+		return np.concatenate(outs, axis=0) if outs else np.zeros((0, self.embedding_dim), dtype=np.float32)
+
+
+class RANGEEmbedder(_RangeBackedEmbedder):
+	def __init__(
+		self,
+		device: str = "cpu",
+		batch_size: int = 4096,
+		satclip_ckpt_path: Optional[str] = None,
+		range_db_path: Optional[str] = None,
+		range_model_name: str = "RANGE+",  # "RANGE" or "RANGE+"
+		range_beta: float = 0.5,           # interpolation weight for RANGE+ (0=RANGE, 1=RANGE+)
+	) -> None:
+		super().__init__(
+			model_name=range_model_name,
+			device=device,
+			batch_size=batch_size,
+			satclip_ckpt_path=satclip_ckpt_path,
+			range_db_path=range_db_path,
+			range_beta=range_beta,
+		)
+
+
+class AlphaEarthEmbedder(BaseLocationEmbedder):
+	DATASET_ID = "GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL"
+
+	def __init__(
+		self,
+		device: str = "cpu",
+		batch_size: int = 256,
+		year: int = 2024,           # satellite imagery year
+		scale_meters: int = 10,     # sampling resolution in metres
+		project: Optional[str] = "metabarcoding-491221",  # GCP project for Earth Engine
+	) -> None:
+		super().__init__(device=device, batch_size=batch_size)
+		try:
+			ee = importlib.import_module("ee")
+		except ImportError as exc:
+			raise ImportError(
+				"AlphaEarth backend requires Earth Engine API. Install with: pip install earthengine-api"
+			) from exc
+
+		self._ee = ee
+		self.year = int(year)
+		self.scale_meters = int(scale_meters)
+
+		# Allow project override from env for cluster jobs.
+		project = (
+			project
+			or os.environ.get("ALPHAEARTH_EE_PROJECT")
+			or os.environ.get("EE_PROJECT")
+		)
+
+		# Optional service-account credentials path for non-interactive auth.
+		# Preferred on clusters where browser-based auth is unavailable.
+		credentials_path = (
+			os.environ.get("ALPHAEARTH_EE_CREDENTIALS_JSON")
+			or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+		)
+
+		last_exc: Optional[Exception] = None
+
+		if credentials_path:
+			if not os.path.exists(credentials_path):
+				raise RuntimeError(
+					"Earth Engine credentials file not found. "
+					"Set ALPHAEARTH_EE_CREDENTIALS_JSON (or GOOGLE_APPLICATION_CREDENTIALS) "
+					f"to a valid JSON key file path. Got: {credentials_path}"
+				)
+
+			try:
+				with open(credentials_path, "r", encoding="utf-8") as f:
+					service_account_email = json.load(f).get("client_email")
+			except Exception as exc:
+				raise RuntimeError(
+					"Could not read service-account JSON key for Earth Engine initialization. "
+					f"Path: {credentials_path}"
+				) from exc
+
+			if not service_account_email:
+				raise RuntimeError(
+					"Service-account JSON is missing 'client_email'. "
+					f"Path: {credentials_path}"
+				)
+
+			try:
+				credentials = ee.ServiceAccountCredentials(service_account_email, credentials_path)
+				ee.Initialize(credentials=credentials, project=project) if project else ee.Initialize(credentials=credentials)
+				last_exc = None
+			except Exception as exc:
+				last_exc = exc
+
+		if last_exc is not None or not credentials_path:
+			try:
+				ee.Initialize(project=project) if project else ee.Initialize()
+			except Exception as exc:
+				root = last_exc if last_exc is not None else exc
+				raise RuntimeError(
+					"Earth Engine is not initialized. "
+					"For local interactive auth, run `earthengine authenticate`. "
+					"For clusters, set ALPHAEARTH_EE_CREDENTIALS_JSON (or GOOGLE_APPLICATION_CREDENTIALS) "
+					"to a service-account JSON key and set ALPHAEARTH_EE_PROJECT to your GCP project ID. "
+					f"Initialization error: {root}"
+				) from exc
+
+	@property
+	def embedding_dim(self) -> int:
+		return 64
+
+	def _encode_batch(self, latlon_batch: np.ndarray) -> np.ndarray:
+		ee = self._ee
+		features = []
+		for i, (lat, lon) in enumerate(latlon_batch):
+			geom = ee.Geometry.Point([float(lon), float(lat)])
+			features.append(ee.Feature(geom, {"idx": int(i)}))
+
+		start = f"{self.year}-01-01"
+		end = f"{self.year + 1}-01-01"
+		collection = ee.ImageCollection(self.DATASET_ID).filterDate(start, end)
+		image = collection.mosaic()
+
+		sampled = image.sampleRegions(
+			collection=ee.FeatureCollection(features),
+			properties=["idx"],
+			scale=self.scale_meters,
+			geometries=False,
+		).getInfo()
+
+		out = np.zeros((len(latlon_batch), self.embedding_dim), dtype=np.float32)
+		for feature in sampled.get("features", []):
+			props = feature.get("properties", {})
+			idx = int(props.get("idx", -1))
+			if idx < 0 or idx >= len(latlon_batch):
+				continue
+			out[idx] = np.array([props.get(f"A{i:02d}", 0.0) for i in range(64)], dtype=np.float32)
+		return out
+
+	def encode(self, latlon: np.ndarray) -> np.ndarray:
+		coords = _sanitize_latlon(latlon)
+		outs: List[np.ndarray] = []
+		for start, end in _iter_batches(len(coords), self.batch_size):
+			outs.append(self._encode_batch(coords[start:end]))
+		return np.concatenate(outs, axis=0) if outs else np.zeros((0, self.embedding_dim), dtype=np.float32)
+
+
+def build_location_embedder(spec: EmbedderSpec) -> BaseLocationEmbedder:
+	model_name = _normalize_model_name(spec.model_name)
+	if model_name == "satclip":
+		return SatCLIPEmbedder(
+			device=spec.device,
+			batch_size=spec.batch_size,
+			satclip_ckpt_path=spec.satclip_ckpt_path,
+		)
+	if model_name == "range":
+		return RANGEEmbedder(
+			device=spec.device,
+			batch_size=spec.batch_size,
+			satclip_ckpt_path=spec.satclip_ckpt_path,
+			range_db_path=spec.range_db_path,
+		)
+	if model_name == "geoclip":
+		return GeoCLIPEmbedder(device=spec.device, batch_size=spec.batch_size)
+	if model_name == "alphaearth":
+		return AlphaEarthEmbedder(device=spec.device, batch_size=spec.batch_size)
+	raise ValueError(f"Unsupported model_name '{spec.model_name}'")
+
+
+def add_location_embeddings(
+	df: pd.DataFrame,
+	embedder: BaseLocationEmbedder,
+	*,
+	lat_col: str = "latitude",
+	lon_col: str = "longitude",
+	prefix: str = "loc_emb",
+) -> Tuple[pd.DataFrame, List[str]]:
+	if lat_col not in df.columns or lon_col not in df.columns:
+		raise ValueError(f"DataFrame must contain '{lat_col}' and '{lon_col}' columns")
+
+	coord_df = df[[lat_col, lon_col]].copy()
+	valid_mask = coord_df[lat_col].notna() & coord_df[lon_col].notna()
+
+	unique_coords = coord_df.loc[valid_mask, [lat_col, lon_col]].drop_duplicates().reset_index(drop=True)
+	emb_cols = [f"{prefix}_{i:03d}" for i in range(embedder.embedding_dim)]
+
+	if len(unique_coords) == 0:
+		out_df = df.copy()
+		empty_emb_df = pd.DataFrame(
+			np.zeros((len(out_df), len(emb_cols)), dtype=np.float32),
+			columns=emb_cols,
+			index=out_df.index,
+		)
+		out_df = pd.concat([out_df, empty_emb_df], axis=1)
+		return out_df, emb_cols
+
+	unique_latlon = unique_coords[[lat_col, lon_col]].to_numpy(dtype=np.float64)
+	unique_embeddings = embedder.encode(unique_latlon)
+	if unique_embeddings.shape[1] != embedder.embedding_dim:
+		raise ValueError(
+			"Embedding dimension mismatch: "
+			f"expected {embedder.embedding_dim}, got {unique_embeddings.shape[1]}"
+		)
+
+	emb_values_df = pd.DataFrame(unique_embeddings, columns=emb_cols, index=unique_coords.index)
+	emb_df = pd.concat([unique_coords, emb_values_df], axis=1)
+
+	merged = df.merge(emb_df, on=[lat_col, lon_col], how="left")
+	merged[emb_cols] = merged[emb_cols].fillna(0.0)
+	return merged, emb_cols
 
 
 class Loss:
@@ -706,11 +1277,23 @@ class Loss:
             raise ValueError(f"Unknown task {task}")
 
     def cross_entropy_soft_targets(
-        self,
-        logits: torch.Tensor,
-        targets: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        self, logits: torch.Tensor, targets: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        """
+        Cross-entropy loss for soft targets (probability distributions).
+        
+        Args:
+            logits: Raw model outputs (before softmax) of shape [batch_size, n_bins_in_sample]
+                Padded positions should have value -inf (will become 0 after softmax)
+            targets: Target probability distributions of shape [batch_size, n_bins_in_sample]
+                Must sum to 1 along last dim. Padded positions should be 0.
+            mask: Optional mask of shape [batch_size, n_bins_in_sample]. 
+                1 for valid positions, 0 for padded. If None, inferred from logits.
+        
+        Returns:
+            Scalar loss averaged over the batch.
+        """
+
         if logits.dim() == 3 and logits.size(1) == 1:
             logits = logits.squeeze(1)
         if targets.dim() == 3 and targets.size(1) == 1:
@@ -722,10 +1305,7 @@ class Loss:
         return (-torch.sum(targets * log_probs_safe, dim=-1)).mean()
 
     def __call__(
-        self,
-        outputs: torch.Tensor,
-        targets: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        self, outputs: torch.Tensor, targets: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         if self.task == "cross_entropy":
             return self.cross_entropy_soft_targets(outputs, targets, mask)
