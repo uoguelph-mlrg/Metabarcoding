@@ -30,9 +30,6 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from prepare import MBDataset, collate_samples, load, Loss, TIME_BUDGET, TAXONOMY_FEATURES, PREPROCESSING_STATE_FILENAME, compute_metrics, metric_key
-
-
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 @dataclass
@@ -118,6 +115,9 @@ class Config:
     location_embedder: Optional[str] = "range"        # None | "satclip" | "geoclip" | "range" | "alphaearth"
     keep_raw_gps_features: bool = False          # Keep raw lat/lon alongside location embeddings
     satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
+
+
+from prepare import MBDataset, collate_samples, load, Loss, TIME_BUDGET, TAXONOMY_FEATURES, PREPROCESSING_STATE_FILENAME, compute_metrics, metric_key
 
 
 def set_seed(seed: int = 14) -> None:
