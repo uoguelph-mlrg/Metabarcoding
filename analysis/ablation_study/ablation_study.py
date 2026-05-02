@@ -202,7 +202,9 @@ class MLPOnlyTrainer:
         log.info(f"  Using cross-entropy loss (sample mode)")
         log.info(f"  BIN embedding: disabled")
         log.info(f"  Taxonomy embeddings: {'enabled' if taxonomy is not None else 'disabled'}")
-        
+
+        set_seed()
+
         hidden_dims = self.cfg.mlp_hidden_dims  # Can tune this if desired, but keeping it fixed for fair comparison
         if taxonomy is None:
             # NO taxonomy, NO bin embedding: exact same inputs as latent model MLP
