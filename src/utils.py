@@ -23,10 +23,10 @@ OBSERVATION_FEATURES = [
     #"length_max_mm",
     # Computed bin-level features
     "collection_day",   # derived from collection_start_date
-    "total_reads_norm", # total_reads normalized by sample total
-    "avg_reads_norm",   # avg_reads normalized by sample total
-    "max_reads_norm",   # max_reads normalized by sample total
-    "min_reads_norm",   # min_reads normalized by sample total
+    "total_reads",
+    "avg_reads",
+    "max_reads",
+    "min_reads",
 ]
 
 TAXONOMY_FEATURES = [
@@ -417,13 +417,6 @@ def load(
     # Also store actual proportions for cross-entropy loss
     df["rel_abundance"] = df["occurrences"] / (sample_totals + 1e-10)
 
-    # Apply log transform (no sample normalization)
-    df["total_reads_per_sample"] = np.log1p(df["total_reads_per_sample"])
-    df["total_reads_norm"] = np.log1p(df["total_reads"])
-    df["avg_reads_norm"] = np.log1p(df["avg_reads"])
-    df["max_reads_norm"] = np.log1p(df["max_reads"])
-    df["min_reads_norm"] = np.log1p(df["min_reads"])
-
     # Build sample index mappings before splitting so split sizes are computed correctly.
     unique_samples = df["sample_id"].unique()
     n_samples = len(unique_samples)
@@ -660,7 +653,7 @@ def load(
             "source_data_path": os.path.abspath(config.data_path),
             "feature_cols_present": feature_cols_present,
             "log_transform_columns": [
-                c for c in ["total_reads_per_sample", "total_reads_norm", "avg_reads_norm", "max_reads_norm", "min_reads_norm"]
+                c for c in ["total_reads_per_sample", "total_reads", "avg_reads", "max_reads", "min_reads"]
                 if c in feature_cols_present
             ],
             "train_feature_means": train_feature_means,
