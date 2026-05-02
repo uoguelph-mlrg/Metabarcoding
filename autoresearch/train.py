@@ -88,7 +88,7 @@ class Config:
 
     # Latent solver - optimization settings
     latent_optim_steps: int = 1                 # Number of latent optimization steps per batch / solver call
-    latent_lr: float = 2e-3                     # Learning rate for the latent AdamW optimizer
+    latent_lr: float = 5e-4                     # Learning rate for the latent AdamW optimizer
     latent_init_std: float = 0.0                # Standard deviation for initializing latent embeddings (0 for zeros, >0 for Gaussian noise)
     latent_warmup_start_factor: float = 1e-3    # Initial multiplier for latent LR warmup
     latent_warmup_frac: float = 0.2             # Fraction of total latent solves used for warmup
