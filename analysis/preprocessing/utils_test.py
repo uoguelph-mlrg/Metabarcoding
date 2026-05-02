@@ -28,10 +28,10 @@ OBSERVATION_FEATURES = [
     #"length_max_mm",
     # Computed bin-level features
     "collection_day",   # derived from collection_start_date
-    "total_reads_norm", # total_reads normalized by sample total
-    "avg_reads_norm",   # avg_reads normalized by sample total
-    "max_reads_norm",   # max_reads normalized by sample total
-    "min_reads_norm",   # min_reads normalized by sample total
+    "total_reads",
+    "avg_reads",
+    "max_reads",
+    "min_reads",
 ]
 
 TAXONOMY_FEATURES = [
@@ -408,24 +408,21 @@ def load(
 
     # Apply read count preprocessing based on the specified method
     if read_count_preprocessing == "original":
-        # Normalize by sample + log transform (original method)
-        df["total_reads_norm"] = df["total_reads"]
-        df["avg_reads_norm"] = df["avg_reads"]
-        df["max_reads_norm"] = df["max_reads"]
-        df["min_reads_norm"] = df["min_reads"]
+        # No preprocessing; keep raw read counts as-is
+        pass
     elif read_count_preprocessing == "normalized":
         # Only normalize by sample (no log)
-        df["total_reads_norm"] = df["total_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
-        df["avg_reads_norm"] = df["avg_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
-        df["max_reads_norm"] = df["max_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
-        df["min_reads_norm"] = df["min_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
+        df["total_reads"] = df["total_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
+        df["avg_reads"] = df["avg_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
+        df["max_reads"] = df["max_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
+        df["min_reads"] = df["min_reads"] / (df["total_reads_per_sample"] + 1e-10) * 1e2
     elif read_count_preprocessing == "logarithm":
         # Only log transform (no sample normalization)
         df["total_reads_per_sample"] = np.log1p(df["total_reads_per_sample"])
-        df["total_reads_norm"] = np.log1p(df["total_reads"])
-        df["avg_reads_norm"] = np.log1p(df["avg_reads"])
-        df["max_reads_norm"] = np.log1p(df["max_reads"])
-        df["min_reads_norm"] = np.log1p(df["min_reads"])
+        df["total_reads"] = np.log1p(df["total_reads"])
+        df["avg_reads"] = np.log1p(df["avg_reads"])
+        df["max_reads"] = np.log1p(df["max_reads"])
+        df["min_reads"] = np.log1p(df["min_reads"])
     else:
         raise ValueError(f"Unknown read_count_preprocessing: {read_count_preprocessing}. "
                         f"Must be one of: 'original', 'normalized', 'logarithm'")
@@ -666,7 +663,7 @@ def load(
             "source_data_path": os.path.abspath(config.data_path),
             "feature_cols_present": feature_cols_present,
             "log_transform_columns": [
-                c for c in ["total_reads_per_sample", "total_reads_norm", "avg_reads_norm", "max_reads_norm", "min_reads_norm"]
+                c for c in ["total_reads_per_sample", "total_reads", "avg_reads", "max_reads", "min_reads"]
                 if c in feature_cols_present
             ],
             "train_feature_means": train_feature_means,
