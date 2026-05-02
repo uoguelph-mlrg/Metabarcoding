@@ -117,6 +117,11 @@ class Config:
     satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
 
 
+# When train.py is the __main__ script, sys.modules['train'] is absent.
+# prepare.py imports Config from 'train', which would re-import train.py fresh and
+# cause a circular import. Aliasing fixes it by making 'train' resolve to this module.
+sys.modules.setdefault('train', sys.modules['__main__'])
+
 from prepare import MBDataset, collate_samples, load, Loss, TIME_BUDGET, TAXONOMY_FEATURES, PREPROCESSING_STATE_FILENAME, compute_metrics, metric_key
 
 
