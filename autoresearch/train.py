@@ -40,6 +40,7 @@ class Config:
     preprocessed_dir: Optional[str] = os.path.join(PROJECT_ROOT, "data", "preprocessed")  # If set, save all preprocessing artifacts here on first run and load from there on subsequent runs, skipping CSV parsing and BarcodeBERT inference
     checkpoint_every: int = 20                   # Save periodic checkpoint every N epochs
     diag_ablation_interval: int = 20            # Compute latent ablation delta every N epochs (0 = disabled)
+    eval_interval: int = 5                       # Run validation and checkpoint every N epochs (1 = every epoch)
 
     # Train / val / test split
     train_frac: float = 0.8
@@ -2476,68 +2477,72 @@ class Trainer:
             # Accumulate only batch-loop time (excludes eval/metrics overhead)
             training_seconds += time.perf_counter() - epoch_start
 
-            train_eval_start = time.perf_counter()
-            train_preds = self.get_predictions(split="train")
-            train_loss = self.validate(split="train")
-            train_eval_s = time.perf_counter() - train_eval_start
+            eval_interval = max(1, int(getattr(self.cfg, "eval_interval", 1)))
+            do_eval = (epoch % eval_interval == 0) or (epoch == self.cfg.epochs - 1)
 
-            val_eval_start = time.perf_counter()
-            val_preds = self.get_predictions(split="val")
-            val_loss = self.validate(split="val")
-            val_eval_s = time.perf_counter() - val_eval_start
+            if do_eval:
+                train_eval_start = time.perf_counter()
+                train_preds = self.get_predictions(split="train")
+                train_loss = self.validate(split="train")
+                train_eval_s = time.perf_counter() - train_eval_start
 
-            train_metric_start = time.perf_counter()
-            train_metrics = self.compute_metrics(split="train", predictions=train_preds)
-            train_metric_s = time.perf_counter() - train_metric_start
+                val_eval_start = time.perf_counter()
+                val_preds = self.get_predictions(split="val")
+                val_loss = self.validate(split="val")
+                val_eval_s = time.perf_counter() - val_eval_start
 
-            val_metric_start = time.perf_counter()
-            val_metrics = self.compute_metrics(split="val", predictions=val_preds)
-            val_metric_s = time.perf_counter() - val_metric_start
-            self.last_val_metrics = val_metrics
+                train_metric_start = time.perf_counter()
+                train_metrics = self.compute_metrics(split="train", predictions=train_preds)
+                train_metric_s = time.perf_counter() - train_metric_start
 
-            run_ablation = bool(self.cfg.diag_ablation_interval > 0 and (epoch % self.cfg.diag_ablation_interval == 0))
-            diag = self._collect_diagnostics(epoch=epoch, run_abl=run_ablation)
-            self.latent_diagnostics.append(diag)
+                val_metric_start = time.perf_counter()
+                val_metrics = self.compute_metrics(split="val", predictions=val_preds)
+                val_metric_s = time.perf_counter() - val_metric_start
+                self.last_val_metrics = val_metrics
 
-            self.train_losses.append((epoch, train_loss))
-            self.val_losses.append((epoch, val_loss))
+                run_ablation = bool(self.cfg.diag_ablation_interval > 0 and (epoch % self.cfg.diag_ablation_interval == 0))
+                diag = self._collect_diagnostics(epoch=epoch, run_abl=run_ablation)
+                self.latent_diagnostics.append(diag)
 
-            val_kl = val_metrics.get("KL Divergence", float("inf"))
-            improved = np.isfinite(val_kl) and val_kl < self.best_val_kl
-            if improved:
-                self.best_val_kl = val_kl
-                self.best_val_loss = val_loss
+                self.train_losses.append((epoch, train_loss))
+                self.val_losses.append((epoch, val_loss))
 
-            self._save_checkpoint(epoch=epoch, val_loss=val_loss, val_metrics=val_metrics, best=improved)
+                val_kl = val_metrics.get("KL Divergence", float("inf"))
+                improved = np.isfinite(val_kl) and val_kl < self.best_val_kl
+                if improved:
+                    self.best_val_kl = val_kl
+                    self.best_val_loss = val_loss
 
-            epoch_total_s = time.perf_counter() - epoch_start
+                self._save_checkpoint(epoch=epoch, val_loss=val_loss, val_metrics=val_metrics, best=improved)
 
-            epoch_log_payload = {
-                "train/loss": train_loss,
-                "val/loss": val_loss,
-                "train/epoch": epoch,
-                "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
-                "timing/epoch/total_s": float(epoch_total_s),
-                "timing/epoch/train_eval_s": float(train_eval_s),
-                "timing/epoch/val_eval_s": float(val_eval_s),
-                "timing/epoch/train_metrics_s": float(train_metric_s),
-                "timing/epoch/val_metrics_s": float(val_metric_s),
-            }
-            for metric_name, metric_value in train_metrics.items():
-                epoch_log_payload[f"train/metrics/{metric_key(metric_name)}"] = metric_value
-            for metric_name, metric_value in val_metrics.items():
-                epoch_log_payload[f"val/metrics/{metric_key(metric_name)}"] = metric_value
-            for diag_name, diag_value in diag.items():
-                epoch_log_payload[f"diag/{diag_name}"] = diag_value
+                epoch_total_s = time.perf_counter() - epoch_start
 
-            if use_wandb and WANDB_AVAILABLE:
-                wandb.log(epoch_log_payload)
+                epoch_log_payload = {
+                    "train/loss": train_loss,
+                    "val/loss": val_loss,
+                    "train/epoch": epoch,
+                    "train/interpolated_sample_count": int(self._epoch_selected_sample_ids.size),
+                    "timing/epoch/total_s": float(epoch_total_s),
+                    "timing/epoch/train_eval_s": float(train_eval_s),
+                    "timing/epoch/val_eval_s": float(val_eval_s),
+                    "timing/epoch/train_metrics_s": float(train_metric_s),
+                    "timing/epoch/val_metrics_s": float(val_metric_s),
+                }
+                for metric_name, metric_value in train_metrics.items():
+                    epoch_log_payload[f"train/metrics/{metric_key(metric_name)}"] = metric_value
+                for metric_name, metric_value in val_metrics.items():
+                    epoch_log_payload[f"val/metrics/{metric_key(metric_name)}"] = metric_value
+                for diag_name, diag_value in diag.items():
+                    epoch_log_payload[f"diag/{diag_name}"] = diag_value
 
-            log.info(
-                f"Epoch {epoch + 1}/{self.cfg.epochs}: "
-                f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}, "
-                f"val_kl={val_kl:.6f}, best_val_kl={self.best_val_kl:.6f}, epoch_s={epoch_total_s:.2f}"
-            )
+                if use_wandb and WANDB_AVAILABLE:
+                    wandb.log(epoch_log_payload)
+
+                log.info(
+                    f"Epoch {epoch + 1}/{self.cfg.epochs}: "
+                    f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}, "
+                    f"val_kl={val_kl:.6f}, best_val_kl={self.best_val_kl:.6f}, epoch_s={epoch_total_s:.2f}"
+                )
 
         best_ckpt = self._checkpoint_path("best.pt")
         if os.path.exists(best_ckpt):
