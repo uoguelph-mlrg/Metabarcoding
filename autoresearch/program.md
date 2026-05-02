@@ -98,15 +98,16 @@ commit	val_kl	status	description
 1. Short git commit hash (7 chars)
 2. `val_kl_divergence` from the run (use `0.000000` for crashes)
 3. status: `keep`, `discard`, or `crash`
+4. Number of epochs trained (optional, for your reference)
 4. Short description of what was tried
 
 Example:
 ```
-commit	val_kl	status	description
-a1b2c3d	0.123456	keep	baseline
-b2c3d4e	0.119200	keep	increase K from 25 to 50
-c3d4e5f	0.131000	discard	switch gating to exp
-d4e5f6g	0.000000	crash	embed_dim=50 (OOM)
+commit	val_kl	status	epochs	description
+a1b2c3d	0.123456	keep	18	baseline
+b2c3d4e	0.119200	keep	20	increase K from 25 to 50
+c3d4e5f	0.131000	discard	15	switch gating to exp
+d4e5f6g	0.000000	crash	0	embed_dim=50 (OOM)
 ```
 
 ---
