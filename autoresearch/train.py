@@ -2418,8 +2418,8 @@ class Trainer:
         for epoch in tqdm(range(self.start_epoch, self.cfg.epochs), desc="Epochs", leave=False):
             self.current_epoch = epoch
 
-            # Stop if wall-clock training budget is spent (epoch 0 always runs for a baseline)
-            if epoch > 0 and training_seconds >= TIME_BUDGET:
+            # Stop if wall-clock budget (train+eval) is spent (epoch 0 always runs for a baseline)
+            if epoch > 0 and (time.perf_counter() - total_start) >= TIME_BUDGET:
                 log.info(f"Time budget of {TIME_BUDGET}s reached after epoch {epoch}. Stopping.")
                 break
 
@@ -2478,7 +2478,7 @@ class Trainer:
             training_seconds += time.perf_counter() - epoch_start
 
             eval_interval = max(1, int(getattr(self.cfg, "eval_interval", 1)))
-            training_done = (epoch > 0 and training_seconds >= TIME_BUDGET)
+            training_done = (epoch > 0 and (time.perf_counter() - total_start) >= TIME_BUDGET)
             do_eval = (epoch % eval_interval == 0) or (epoch == self.cfg.epochs - 1) or training_done
 
             if do_eval:
