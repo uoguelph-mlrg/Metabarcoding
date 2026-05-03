@@ -55,7 +55,7 @@ class Config:
         "cpu"
     )
     batch_size_bin: int = 1024                  # Batch size (in number of observations not samples)
-    batch_size_sample: int = 32                 # Batch size in number of samples
+    batch_size_sample: int = 64                 # Batch size in number of samples
     epochs: int = 200                           # Epochs per training phase
     grad_clip: Optional[float] = 1.0            # Gradient clipping value (None to disable)
 
