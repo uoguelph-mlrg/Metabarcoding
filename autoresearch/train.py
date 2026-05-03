@@ -79,7 +79,7 @@ class Config:
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
     mlp_warmup_frac: float = 0.1                # Fraction of total training steps used for MLP LR warmup
     mlp_lr_eta_min: float = 1e-6                # Minimum MLP LR reached by cosine decay
-    dropout: float = 0.15                       # Dropout rate in MLP
+    dropout: float = 0.05                       # Dropout rate in MLP
 
     # Latent solver - regularization settings
     latent_smooth_reg: float = 1e-3             # Smoothness regularization (parameter λ_smooth)
