@@ -45,6 +45,8 @@ class Config:
     # DNA embedding settings (used when use_embedding=True)
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
     barcode_hf_model: str = "emmabhl/BarcodeBERT_finetuned"  # HuggingFace model used to compute barcode embeddings
+    barcode_tokenizer: Literal["char", "k_mer"] = "char"  # Tokenizer type for BarcodeMamba (ignored for standard HF models): "char" for character-level, "k_mer" for k-mer based
+
 
     # MLP - architecture & optimization settings
     mlp_hidden_dims: List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
