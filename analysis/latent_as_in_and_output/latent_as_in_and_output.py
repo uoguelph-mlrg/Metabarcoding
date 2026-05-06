@@ -23,7 +23,7 @@ from typing import Dict, Any
 ANALYSIS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ANALYSIS_DIR not in sys.path:
 	sys.path.insert(0, ANALYSIS_DIR)
-from variant_helpers import (
+from run_analysis import (
 	make_output_dir_for_analysis,
 	make_run_group,
 	save_variant_result,

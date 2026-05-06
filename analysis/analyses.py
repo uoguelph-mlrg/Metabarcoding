@@ -65,7 +65,7 @@ class Analysis:
 
     @property
     def DEFAULT_VARIANTS(self) -> List[Dict[str, Any]]:
-        """Compatibility shim used by run_analysis / variant_helpers."""
+        """Compatibility shim used by run_analysis."""
         return [{"name": v.name, "config": v.config} for v in self.variants]
 
     @property
