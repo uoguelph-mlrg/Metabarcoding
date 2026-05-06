@@ -15,7 +15,7 @@ all come from analyses.py (single source of truth).
 Usage
 -----
     python run_all_visualizations.py               # all analyses
-    python run_all_visualizations.py optimal_K barcodebert
+    python run_all_visualizations.py optimal_K barcode_embeddings
     python run_all_visualizations.py --baseline /path/to/results_baseline.pkl optimal_K
 """
 from __future__ import annotations
@@ -130,9 +130,6 @@ def _file_specs_for(analysis: Analysis) -> List[Tuple[str, Optional[str]]]:
 
 def _output_dir_for(analysis: Analysis) -> str:
     """Return the figures output directory for an analysis."""
-    # barcodebert is stored under BarcodeBERT (uppercase) for historical reasons
-    if analysis.name == "barcodebert":
-        return os.path.join(SCRIPT_DIR, "figures", "BarcodeBERT")
     return os.path.join(SCRIPT_DIR, "figures", analysis.name)
 
 

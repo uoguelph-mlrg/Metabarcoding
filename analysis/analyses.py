@@ -84,22 +84,54 @@ def _reg(analysis: Analysis) -> Analysis:
 
 
 # ---------------------------------------------------------------------------
-# BarcodeBERT
+# Barcode embeddings
 # ---------------------------------------------------------------------------
 
 _reg(Analysis(
-    name="barcodebert",
+    name="barcode_embeddings",
     variants=[
         Variant(
-            name="taxonomy",
+            name="taxonomy_distance",
             config={"use_taxonomy": True, "use_embedding": False},
-            label="Taxonomy",
+            label="Taxonomic Distance",
             color="#9b59b6",
             time="0:45:00",
         ),
+        Variant(
+            name="emb_emmabhl_finetuned",
+            config={
+                "use_taxonomy": False,
+                "use_embedding": True,
+                "barcode_hf_model": "emmabhl/BarcodeBERT_finetuned",
+            },
+            label="emmabhl/BarcodeBERT_finetuned",
+            color="#3498db",
+            time="0:45:00",
+        ),
+        Variant(
+            name="emb_bioscan_barcodebert",
+            config={
+                "use_taxonomy": False,
+                "use_embedding": True,
+                "barcode_hf_model": "bioscan-ml/BarcodeBERT",
+            },
+            label="bioscan-ml/BarcodeBERT",
+            color="#2ecc71",
+            time="0:45:00",
+        ),
+        Variant(
+            name="emb_bioscan_barcodemamba",
+            config={
+                "use_taxonomy": False,
+                "use_embedding": True,
+                "barcode_hf_model": "bioscan-ml/BarcodeMamba",
+            },
+            label="bioscan-ml/BarcodeMamba",
+            color="#e67e22",
+            time="0:45:00",
+        ),
     ],
-    baseline_label="BarcodeBERT Embeddings",
-    baseline_color="#3498db",
+    include_baseline=False,
 ))
 
 

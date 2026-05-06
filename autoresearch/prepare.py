@@ -90,7 +90,7 @@ def _compute_barcodebert_embeddings(
     from transformers import AutoTokenizer, AutoModel
     import torch
 
-    MODEL_NAME = "emmabhl/BarcodeBERT_finetuned"
+    MODEL_NAME = getattr(config, "barcode_hf_model", "emmabhl/BarcodeBERT_finetuned")
     log.info(f"Loading BarcodeBERT from HuggingFace ({MODEL_NAME}) ...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     model = AutoModel.from_pretrained(MODEL_NAME, trust_remote_code=True)
