@@ -41,6 +41,7 @@ TAXONOMY_FEATURES = [
 ]
 
 PREPROCESSING_STATE_FILENAME = "preprocessing_state.pkl"
+DEFAULT_BARCODE_HF_MODEL = "emmabhl/BarcodeBERT_finetuned"
 
 
 def _default_preprocessing_state_path(config: Config, filename: str = PREPROCESSING_STATE_FILENAME) -> str:
@@ -83,7 +84,7 @@ def _compute_barcodebert_embeddings(
     from transformers import AutoTokenizer, AutoModel
     import torch
 
-    MODEL_NAME = "emmabhl/BarcodeBERT_finetuned"
+    MODEL_NAME = getattr(config, "barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
     log.info(f"Loading BarcodeBERT from HuggingFace ({MODEL_NAME}) ...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     model = AutoModel.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -328,17 +329,25 @@ def load(
                 # Check that the cached location embedder matches the current config.
                 cached_state_path = os.path.join(config.preprocessed_dir, PREPROCESSING_STATE_FILENAME)
                 cached_loc_embedder = None
+                cached_barcode_hf_model = DEFAULT_BARCODE_HF_MODEL
                 if os.path.exists(cached_state_path):
                     try:
                         cached_state = load_preprocessing_state(cached_state_path)
                         cached_loc_embedder = cached_state.get("location_embedder", None)
+                        cached_barcode_hf_model = cached_state.get("barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
                     except Exception:
                         pass
                 current_loc_embedder = getattr(config, "location_embedder", None)
+                current_barcode_hf_model = getattr(config, "barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
                 if cached_loc_embedder != current_loc_embedder:
                     log.info(
                         f"load(): cache at {config.preprocessed_dir} was built with location_embedder={cached_loc_embedder!r} "
                         f"but current config has location_embedder={current_loc_embedder!r} — recomputing."
+                    )
+                elif cached_barcode_hf_model != current_barcode_hf_model:
+                    log.info(
+                        f"load(): cache at {config.preprocessed_dir} was built with barcode_hf_model={cached_barcode_hf_model!r} "
+                        f"but current config has barcode_hf_model={current_barcode_hf_model!r} — recomputing."
                     )
                 else:
                     log.info(f"load(): cache hit at {config.preprocessed_dir} — loading from disk, skipping preprocessing.")
@@ -673,6 +682,8 @@ def load(
         }
         # Always record which location embedder was used so cache invalidation works correctly.
         state["location_embedder"] = getattr(config, "location_embedder", None)
+        # Record barcode model provenance so embedding cache invalidates on model change.
+        state["barcode_hf_model"] = getattr(config, "barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
         # Add embeddings to state if computed
         if config.use_embedding and embeddings_array is not None:
             # Store embeddings dict for reproducibility on resume
