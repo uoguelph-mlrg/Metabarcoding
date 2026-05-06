@@ -519,12 +519,12 @@ def load(
             lat = df["latitude"].to_numpy()
             lon = df["longitude"].to_numpy()
             row_embs = np.array([
-                cached_embs[coord_to_idx.get((lat[i], lon[i]), -1)]
+                cached_embs[coord_to_idx[(lat[i], lon[i])]]
                 if (lat[i], lon[i]) in coord_to_idx else np.zeros(n_emb_dims, dtype=np.float32)
                 for i in range(len(df))
             ], dtype=np.float32)
-            for j, col in enumerate(location_embedding_cols):
-                df[col] = row_embs[:, j]
+            emb_df = pd.DataFrame(row_embs, columns=location_embedding_cols, index=df.index)
+            df = pd.concat([df, emb_df], axis=1)
         else:
             spec = EmbedderSpec(
                 model_name=_emb_model,
