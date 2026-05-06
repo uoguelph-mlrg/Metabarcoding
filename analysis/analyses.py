@@ -42,6 +42,8 @@ class Variant:
     label: str                       # display label for plots
     color: str                       # hex color for plots
     time: str                        # SLURM walltime, e.g. "0:45:00"
+    gpu: Optional[str] = None        # SLURM --gres gpu spec override, e.g. "a40:1" (None = use submit script default)
+    mem: Optional[str] = None        # SLURM --mem override, e.g. "64G" (None = use submit script default)
 
 
 @dataclass
@@ -129,6 +131,7 @@ _reg(Analysis(
             label="bioscan-ml/BarcodeMamba",
             color="#e67e22",
             time="0:45:00",
+            mem="64G",
         ),
     ],
     include_baseline=False,

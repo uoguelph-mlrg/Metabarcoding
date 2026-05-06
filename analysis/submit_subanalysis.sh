@@ -204,7 +204,7 @@ if key not in REGISTRY:
     sys.exit(1)
 a = REGISTRY[key]
 print(json.dumps({
-    "variants": [{"name": v.name, "time": v.time} for v in a.variants],
+    "variants": [{"name": v.name, "time": v.time, "gpu": v.gpu, "mem": v.mem} for v in a.variants],
     "run_script": a.run_script,
 }))
 PY
@@ -224,16 +224,20 @@ PY
 
   # Submit one training job per variant
   while IFS= read -r variant_json; do
-    local vname vtime
+    local vname vtime vgpu vmem
     vname="$(echo "$variant_json" | python -c 'import sys,json; d=json.load(sys.stdin); print(d["name"])')"
     vtime="$(echo "$variant_json" | python -c 'import sys,json; d=json.load(sys.stdin); print(d["time"])')"
+    vgpu="$(echo "$variant_json" | python -c 'import sys,json; d=json.load(sys.stdin); print(d.get("gpu") or "")')"
+    vmem="$(echo "$variant_json" | python -c 'import sys,json; d=json.load(sys.stdin); print(d.get("mem") or "")')"
     [[ -n "$TIME_OVERRIDE" ]] && vtime="$TIME_OVERRIDE"
+    local effective_gpu="${vgpu:-$GPU}"
+    local effective_mem="${vmem:-$MEM}"
 
     local job_name="${analysis_key}_${vname}"
     local job_file="$JOB_DIR/${job_name}_$(date +%Y%m%d_%H%M%S%N).sbatch"
 
     {
-      _slurm_header "$job_name" "$vtime" "$SLOG_DIR/%x_%A.out"
+      GPU="$effective_gpu" MEM="$effective_mem" _slurm_header "$job_name" "$vtime" "$SLOG_DIR/%x_%A.out"
       echo ""
       echo "cd \"$SCRIPT_DIR\""
       echo "echo \"[\$(date)] ${analysis_key} / ${vname}\""
