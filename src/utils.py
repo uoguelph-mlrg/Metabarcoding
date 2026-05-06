@@ -81,13 +81,75 @@ def _compute_barcodebert_embeddings(
     Returns:
         Dict[str, np.ndarray]: {bin_uri: np.ndarray of shape [hidden_dim]}
     """
-    from transformers import AutoTokenizer, AutoModel
     import torch
 
     MODEL_NAME = getattr(config, "barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
     log.info(f"Loading BarcodeBERT from HuggingFace ({MODEL_NAME}) ...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-    model = AutoModel.from_pretrained(MODEL_NAME, trust_remote_code=True)
+
+    is_barcodemamba = "BarcodeMamba" in MODEL_NAME
+
+    # torchvision 0.20.1 (.so compiled for torch 2.5.1) segfaults when imported under
+    # torch 2.9.1. Inject a stub before any import that may pull it in (transformers for
+    # BarcodeBERT; barcode_mamba.py's `from torchvision.ops import StochasticDepth` for
+    # BarcodeMamba). Must happen before is_barcodemamba branch.
+    import sys as _sys
+    if "torchvision" not in _sys.modules:
+        import types as _types, importlib.util as _ilu, enum as _enum
+
+        class _InterpMode(_enum.IntEnum):
+            NEAREST_EXACT = 0; BILINEAR = 1; BICUBIC = 2
+            BOX = 3; HAMMING = 4; LANCZOS = 5
+
+        def _make(name):
+            m = _types.ModuleType(name)
+            m.__spec__ = _ilu.spec_from_loader(name, loader=None)
+            m.__path__ = []  # mark as package
+            return m
+
+        _tv               = _make("torchvision")
+        _tv.__version__   = "0.0.0+stub"
+        _tv_transforms    = _make("torchvision.transforms")
+        _tv_transforms.InterpolationMode = _InterpMode
+        _tv_io            = _make("torchvision.io")
+        _tv_ops           = _make("torchvision.ops")
+        # Provide a working StochasticDepth so barcode_mamba.py's import succeeds
+        import torch as _torch
+        import torch.nn as _nn
+        class _StochasticDepth(_nn.Module):
+            def __init__(self, p: float, mode: str):
+                super().__init__()
+                self.p, self.mode = p, mode
+            def forward(self, x):
+                if not self.training or self.p == 0.0:
+                    return x
+                survival = 1.0 - self.p
+                shape = ([x.shape[0]] + [1] * (x.ndim - 1)) if self.mode == "row" else ([1] * x.ndim)
+                noise = _torch.empty(shape, dtype=x.dtype, device=x.device).bernoulli_(survival)
+                return x * noise / survival
+        _tv_ops.StochasticDepth = _StochasticDepth
+
+        for _name, _mod in [
+            ("torchvision",            _tv),
+            ("torchvision.transforms", _tv_transforms),
+            ("torchvision.io",         _tv_io),
+            ("torchvision.ops",        _tv_ops),
+        ]:
+            _sys.modules[_name] = _mod
+        _tv.transforms = _tv_transforms
+        _tv.io         = _tv_io
+        _tv.ops        = _tv_ops
+
+    if is_barcodemamba:
+        tokenizer, model = _load_barcodemamba(MODEL_NAME, config)
+    else:
+        from transformers import AutoTokenizer, BertModel
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        # Use BertModel directly to get hidden states regardless of the classification
+        # head declared in config.json (e.g. bioscan-ml/BarcodeBERT uses
+        # BertForTokenClassification but we only need the encoder embeddings).
+        model = BertModel.from_pretrained(MODEL_NAME, trust_remote_code=True,
+                                          ignore_mismatched_sizes=True)
+
     device = torch.device(config.device)
     model = model.to(device).eval()
 
@@ -114,21 +176,25 @@ def _compute_barcodebert_embeddings(
             batch_seqs = sequences[start : start + batch_size]
             batch_uris = uris[start : start + batch_size]
 
-            # KmerTokenizer is single-sequence only: encode each one individually
-            # and stack — safe because padding makes all outputs the same length
-            batch_input_ids = []
-            batch_attention_mask = []
-            for seq in batch_seqs:
-                encoded = tokenizer(seq, padding=True)
-                batch_input_ids.append(encoded["input_ids"])
-                batch_attention_mask.append(encoded["attention_mask"])
+            if is_barcodemamba:
+                input_ids, attention_mask = _tokenize_barcodemamba(tokenizer, batch_seqs, device)
+                last_hidden = model.get_hidden_states(input_ids)
+            else:
+                # KmerTokenizer is single-sequence only: encode each one individually
+                # and stack — safe because padding makes all outputs the same length
+                batch_input_ids = []
+                batch_attention_mask = []
+                for seq in batch_seqs:
+                    encoded = tokenizer(seq, padding=True)
+                    batch_input_ids.append(encoded["input_ids"])
+                    batch_attention_mask.append(encoded["attention_mask"])
 
-            input_ids = torch.tensor(batch_input_ids, dtype=torch.long).to(device)
-            attention_mask = torch.tensor(batch_attention_mask, dtype=torch.long).to(device)
+                input_ids = torch.tensor(batch_input_ids, dtype=torch.long).to(device)
+                attention_mask = torch.tensor(batch_attention_mask, dtype=torch.long).to(device)
 
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            # last_hidden_state: [B, seq_len, hidden_dim]
-            last_hidden = outputs.last_hidden_state
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                last_hidden = outputs.last_hidden_state
+
             # Mean-pool over non-padding token positions
             mask_exp = attention_mask.unsqueeze(-1).float()  # [B, seq_len, 1]
             sum_hidden = (last_hidden * mask_exp).sum(dim=1)  # [B, hidden_dim]
@@ -143,6 +209,138 @@ def _compute_barcodebert_embeddings(
 
     log.info("BarcodeBERT inference complete.")
     return emb_dict
+
+
+def _load_barcodemamba(model_name: str, config: Config):
+    """Load BarcodeMamba from HuggingFace (raw .ckpt) with its char tokenizer."""
+    import torch
+    from huggingface_hub import snapshot_download
+    import sys
+
+    # Resolve which sub-directory to use based on config.barcode_tokenizer
+    tokenizer_type = getattr(config, "barcode_tokenizer", "char")
+    # Find matching variant dir: BarcodeMamba-dim*-layer*-{char|k-mer}
+    repo_dir = snapshot_download(repo_id=model_name)
+    import glob as _glob
+    candidates = sorted(_glob.glob(os.path.join(repo_dir, f"BarcodeMamba-*-{tokenizer_type}")))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No BarcodeMamba variant matching tokenizer='{tokenizer_type}' in {repo_dir}"
+        )
+    # Pick the largest (highest dim/layer) variant for best embeddings.
+    # The A40 GPU node (gpu="a40:1" in analyses.py) has enough RAM for the dim768 checkpoint.
+    variant_dir = candidates[-1]
+    log.info(f"Using BarcodeMamba variant: {os.path.basename(variant_dir)}")
+
+    import yaml as _yaml
+    with open(os.path.join(variant_dir, ".hydra", "config.yaml")) as _f:
+        _raw = _yaml.safe_load(_f)
+
+    # Resolve the few interpolations we actually need without Hydra/OmegaConf resolvers.
+    _m = _raw["model"]
+    _d_model = int(_m["d_model"])
+    _model_params = {
+        "d_model":               _d_model,
+        "n_layer":               int(_m["n_layer"]),
+        "d_inner":               4 * _d_model,   # ${eval:4 * ${.d_model}}
+        "vocab_size":            int(_raw["tokenizer"]["vocab_size"]),
+        "resid_dropout":         float(_m.get("resid_dropout", 0.0)),
+        "embed_dropout":         float(_m.get("embed_dropout", 0.0)),
+        "residual_in_fp32":      bool(_m.get("residual_in_fp32", False)),
+        "pad_vocab_size_multiple": int(_m.get("pad_vocab_size_multiple", 1)),
+        "mamba_ver":             _m.get("mamba_ver", "mamba2"),
+        "layer":                 {
+            "d_model": _d_model,          # resolves ${model.d_model}
+            "d_state":  int(_m["layer"]["d_state"]),
+            "d_conv":   int(_m["layer"]["d_conv"]),
+            "expand":   int(_m["layer"]["expand"]),
+            "headdim":  int(_m["layer"]["headdim"]),
+        },
+    }
+    _tok = _raw["tokenizer"]
+    _max_len = int(_raw["dataset"]["max_len"])
+
+    # Python source lives in the cloned repo; weights/config come from the HF snapshot.
+    _third_party = os.path.join(os.path.dirname(os.path.dirname(__file__)), "third_party")
+    _src = os.path.join(_third_party, "BarcodeMamba", "utils")
+
+    import importlib.util as _ilu
+
+    def _load_module(name, path):
+        spec = _ilu.spec_from_file_location(name, path)
+        mod = _ilu.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    _char_tok_mod = _load_module("_bm_char_tokenizer", os.path.join(_src, "char_tokenizer.py"))
+    _seq_dec_mod = _load_module("_bm_seq_decoder", os.path.join(_src, "seq_decoder.py"))
+
+    # barcode_mamba.py does `from utils.seq_decoder import SequenceDecoder` at import
+    # time. Register our already-loaded module under that dotted name so the lookup
+    # succeeds without touching sys.path or our own src/utils module.
+    import types as _types
+    _fake_utils_pkg = sys.modules.get("utils")  # our src/utils.py
+    _bm_utils_ns = _types.ModuleType("utils")
+    _bm_utils_ns.seq_decoder = _seq_dec_mod
+    sys.modules["utils"] = _bm_utils_ns
+    sys.modules["utils.seq_decoder"] = _seq_dec_mod
+    try:
+        _bm_mod = _load_module("_bm_barcode_mamba", os.path.join(_src, "barcode_mamba.py"))
+    finally:
+        # Restore our own utils module immediately after the import completes.
+        if _fake_utils_pkg is not None:
+            sys.modules["utils"] = _fake_utils_pkg
+        else:
+            del sys.modules["utils"]
+
+    BarcodeMamba = _bm_mod.BarcodeMamba
+    CharacterTokenizer = _char_tok_mod.CharacterTokenizer
+
+    model = BarcodeMamba(**_model_params, use_head="pretrain")
+
+    ckpt_path = os.path.join(variant_dir, "checkpoints", "last.ckpt")
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)["state_dict"]
+    # Remove "model." prefix added by PyTorch Lightning
+    state = {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
+    model.load_state_dict(state, strict=False)
+
+    tokenizer = CharacterTokenizer(
+        characters=list(_tok["characters"]),
+        model_max_length=_max_len + 2,   # config says ${dataset.max_len} + 2
+        padding_side=str(_tok.get("padding_side", "left")),
+    )
+    return tokenizer, model
+
+
+def _tokenize_barcodemamba(
+    tokenizer,
+    sequences: list,
+    device,
+):
+    """Tokenize a batch of sequences with the BarcodeMamba char tokenizer."""
+    import torch
+
+    max_len = tokenizer.model_max_length
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+    all_ids, all_mask = [], []
+    for seq in sequences:
+        ids = tokenizer.encode(seq[:max_len], add_special_tokens=False)
+        mask = [1] * len(ids)
+        # Pad / truncate to max_len
+        pad_len = max_len - len(ids)
+        if pad_len > 0:
+            ids = ids + [pad_id] * pad_len
+            mask = mask + [0] * pad_len
+        else:
+            ids = ids[:max_len]
+            mask = mask[:max_len]
+        all_ids.append(ids)
+        all_mask.append(mask)
+
+    input_ids = torch.tensor(all_ids, dtype=torch.long).to(device)
+    attention_mask = torch.tensor(all_mask, dtype=torch.long).to(device)
+    return input_ids, attention_mask
 
 
 def _load_or_compute_embeddings(
