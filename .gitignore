@@ -15,3 +15,5 @@ autoresearch/results.tsv
 analysis/google-cloud-cli-linux-x86_64.tar.gz
 autoresearch/.claude/scheduled_tasks.lock
 analysis/preprocessing/data/*
+data/preprocessed/*
+data/ng*.pkl
