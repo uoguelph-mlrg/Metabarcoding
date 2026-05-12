@@ -45,12 +45,10 @@ class Config:
     # DNA embedding settings (used when use_embedding=True)
     emb_distance_metric: str = "cosine"         # distance metric: "cosine" or "euclidean"
     barcode_hf_model: str = "emmabhl/BarcodeBERT_finetuned"  # HuggingFace model used to compute barcode embeddings
-    barcode_tokenizer: Literal["char", "k_mer"] = "char"  # Tokenizer type for BarcodeMamba (ignored for standard HF models): "char" for character-level, "k_mer" for k-mer based
-
 
     # MLP - architecture & optimization settings
     mlp_hidden_dims: List[int] = field(default_factory=lambda: [128, 128, 128, 128])  # Hidden layer dimensions for MLP
-    mlp_lr: float = 5e-4                        # Learning rate for MLP parameters
+    mlp_lr: float = 3e-4                        # Learning rate for MLP parameters
     weight_decay: float = 1e-4                  # Weight decay for MLP parameters
     mlp_warmup_start_factor: float = 1e-3       # Initial multiplier for MLP LR warmup
     mlp_warmup_frac: float = 0.1                # Fraction of total training steps used for MLP LR warmup
@@ -65,7 +63,7 @@ class Config:
 
     # Latent solver - optimization settings
     latent_optim_steps: int = 1                 # Number of latent optimization steps per batch / solver call
-    latent_lr: float = 5e-4                     # Learning rate for the latent AdamW optimizer
+    latent_lr: float = 3e-4                     # Learning rate for the latent AdamW optimizer
     latent_init_std: float = 0.0                # Standard deviation for initializing latent embeddings (0 for zeros, >0 for Gaussian noise)
     latent_warmup_start_factor: float = 1e-3    # Initial multiplier for latent LR warmup
     latent_warmup_frac: float = 0.2             # Fraction of total latent solves used for warmup
@@ -89,7 +87,7 @@ class Config:
     final_linear_weight_decay: float = 1e-3     # Weight decay specifically for final linear layer w
 
     # Location embedding (optional; None disables it and keeps raw lat/lon features)
-    location_embedder: Optional[str] = "range"        # None | "satclip" | "geoclip" | "range" | "alphaearth"
+    location_embedder: Optional[str] = "geoclip"        # None | "satclip" | "geoclip" | "range" | "alphaearth"
     keep_raw_gps_features: bool = False          # Keep raw lat/lon alongside location embeddings
     satclip_ckpt_path: Optional[str] = None      # Path to SatCLIP checkpoint (required when location_embedder="satclip")
 
