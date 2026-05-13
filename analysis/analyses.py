@@ -163,6 +163,18 @@ _reg(Analysis(
     name="interpolated_latent",
     variants=[
         Variant(
+            name="without_interpolation",
+            config={
+                "interpolated_sample_fraction": 0.0,
+                "train_MLP_with_interpolation": False,
+                "inference_with_interpolation": False,
+                "include_self_in_interpolation": False,
+            },
+            label="No Interpolation",
+            color="#95a5a6",
+            time="0:45:00",
+        ),
+        Variant(
             name="default_with_interpolation",
             config={
                 "interpolated_sample_fraction": 0.2,
@@ -247,8 +259,7 @@ _reg(Analysis(
             time="0:45:00",
         ),
     ],
-    baseline_label="No Interpolation",
-    baseline_color="#95a5a6",
+    include_baseline=False,
 ))
 
 
@@ -280,7 +291,6 @@ _reg(Analysis(
     name="optimal_K",
     variants=_optimal_K_default_variants,
     baseline_label="K=25 (default)",
-    baseline_color="#95a5a6",
     add_cli_args=_optimal_K_add_cli_args,
     make_variants=_optimal_K_make_variants,
 ))
@@ -344,7 +354,7 @@ _dim_gating_default_variants = [
     Variant(name="softplus",    config={"embed_dim": 10, "gating_fn": "softplus"},    label="Softplus",           color="#2ecc71", time="0:45:00"),
     Variant(name="tanh",        config={"embed_dim": 10, "gating_fn": "tanh"},        label="Tanh",               color="#3498db", time="0:45:00"),
     Variant(name="dot_product", config={"embed_dim": 10, "gating_fn": "dot_product"}, label="Dot Product",        color="#1abc9c", time="0:45:00"),
-    # sigmoid omitted: it is identical to the baseline config (gating_fn=sigmoid)
+    Variant(name="sigmoid",     config={"embed_dim": 10, "gating_fn": "sigmoid"},     label="Sigmoid",            color="#95a5a6", time="0:45:00"),
 ]
 
 _GATING_FUNCTION_NAMES = [v.name for v in _dim_gating_default_variants]
@@ -368,8 +378,7 @@ def _dim_gating_make_variants(args) -> List[Dict[str, Any]]:
 _reg(Analysis(
     name="dimensionality_gating",
     variants=_dim_gating_default_variants,
-    baseline_label="Sigmoid",
-    baseline_color="#9b59b6",
+    include_baseline=False,  
     add_cli_args=_dim_gating_add_cli_args,
     make_variants=_dim_gating_make_variants,
 ))
@@ -382,6 +391,7 @@ _reg(Analysis(
 _EMBEDDER_NAMES = ["satclip", "range", "geoclip", "alphaearth"]
 
 _loc_emb_default_variants = [
+    Variant(name="none",       config={"location_embedder": None}, label="Raw GPS (lat/lon)", color="#95a5a6", time="0:45:00"),
     Variant(name="satclip",    config={"location_embedder": "satclip"}, label="SatCLIP (256D)",   color="#e74c3c", time="0:45:00"),
     Variant(name="range",      config={"location_embedder": "range"}, label="RANGE (1280D)",    color="#3498db", time="0:45:00"),
     Variant(name="geoclip",    config={"location_embedder": "geoclip"}, label="GeoCLIP (512D)",   color="#2ecc71", time="0:45:00"),
@@ -419,8 +429,7 @@ def _loc_emb_apply_args_to_cfg(cfg, args) -> None:
 _reg(Analysis(
     name="location_embedding",
     variants=_loc_emb_default_variants,
-    baseline_label="Raw GPS (lat/lon)",
-    baseline_color="#95a5a6",
+    include_baseline=False,
     add_cli_args=_loc_emb_add_cli_args,
     make_variants=_loc_emb_make_variants,
     apply_args_to_cfg=_loc_emb_apply_args_to_cfg,
@@ -465,14 +474,14 @@ _reg(Analysis(
             time="0:45:00",
         ),
         Variant(
-            name="original",
-            config={"preprocessed_dir": os.path.join(_PREPROCESSING_DATA, "original")},
-            label="Raw counts",
+            name="logarithm",
+            config={"preprocessed_dir": os.path.join(_PREPROCESSING_DATA, "logarithm")},
+            label="Logarithm",
             color="#2ca02c",
             time="0:45:00",
         ),
     ],
-    baseline_label="Logarithm",
+    baseline_label="Raw counts",
     baseline_color="#ff7f0e",
 ))
 
@@ -548,7 +557,7 @@ _reg(Analysis(
         Variant(name="elasticnet",         config={}, label="ElasticNet",         color="#e15759", time="0:02:00"),
         Variant(name="decision_tree",      config={}, label="Decision Tree",      color="#76b7b2", time="0:02:00"),
         Variant(name="random_forest",      config={}, label="Random Forest",      color="#59a14f", time="0:02:00"),
-        Variant(name="gradient_boosting",  config={}, label="Gradient Boosting",  color="#edc948", time="0:02:00"),
+        Variant(name="gradient_boosting",  config={}, label="Gradient Boosting",  color="#edc948", time="0:15:00"),
         Variant(name="knn",                config={}, label="KNN",                color="#b07aa1", time="0:02:00"),
         Variant(name="two_stage",          config={}, label="Two-Stage",          color="#9c755f", time="0:02:00"),
         Variant(name="zero_inflated_ridge",config={}, label="Zero-Inflated Ridge",color="#bab0ab", time="0:02:00"),
