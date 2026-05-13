@@ -1,0 +1,47 @@
+# ~/barcode venv — user-installed packages
+#
+# The cluster provides torch, torchvision, numpy, transformers, wandb,
+# lightning, scipy, scikit-learn, timm, opencv, etc. via:
+#   module load python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0
+#
+# This file lists ONLY packages that are NOT provided by the cluster modules.
+# To recreate the venv from scratch:
+#
+#   # 1. Install uv if not present:
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
+#   export PATH="$HOME/.local/bin:$PATH"
+#
+#   # 2. Load cluster modules, then create venv:
+#   module load python/3.12 cuda/12.6 arrow/21.0.0 opencv/4.12.0
+#   uv venv ~/barcode --python $(which python3) --system-site-packages
+#   source ~/barcode/bin/activate
+#
+#   # 3. Install packages below:
+#   uv pip install -r requirements.txt
+#
+#   # 4. Remove any PyPI torch/torchvision that got pulled in as transitive deps:
+#   uv pip uninstall torch torchvision triton 2>/dev/null || true
+#
+#   # 5. Verify (should show 2.7.1 / 0.22.1 from +computecanada build):
+#   python -c "import torch, torchvision; print(torch.__version__, torchvision.__version__)"
+#
+# NOTE: mamba-ssm (for BarcodeMamba) requires a GPU node to build.
+#       Install separately on a compute node:
+#         uv pip install mamba-ssm --no-build-isolation
+
+# --- Geospatial / location embeddings ---
+geoclip==1.2.0
+earthengine-api==1.7.19
+
+# --- Tabular / ML utilities ---
+category_encoders
+
+# --- Plotting ---
+seaborn
+matplotlib
+
+# --- Experiment tracking ---
+wandb==0.24.0
+
+# --- Data download ---
+gdown==4.4.0

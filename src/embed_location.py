@@ -312,13 +312,16 @@ class SatCLIPEmbedder(BaseLocationEmbedder):
 		return np.concatenate(outs, axis=0) if outs else np.zeros((0, self.embedding_dim), dtype=np.float32)
 
 
+_DEFAULT_RANGE_DB_PATH = _THIRD_PARTY_DIR / "RANGE" / "pretrained" / "range_db_med.npz"
+
+
 class RANGEEmbedder(_RangeBackedEmbedder):
 	def __init__(
 		self,
 		device: str = "cpu",
 		batch_size: int = 4096,
 		satclip_ckpt_path: Optional[str] = None,
-		range_db_path: Optional[str] = None,
+		range_db_path: Optional[str] = str(_DEFAULT_RANGE_DB_PATH),
 		range_model_name: str = "RANGE+",  # "RANGE" or "RANGE+"
 		range_beta: float = 0.5,           # interpolation weight for RANGE+ (0=RANGE, 1=RANGE+)
 	) -> None:

@@ -43,6 +43,23 @@ TAXONOMY_FEATURES = [
 PREPROCESSING_STATE_FILENAME = "preprocessing_state.pkl"
 DEFAULT_BARCODE_HF_MODEL = "emmabhl/BarcodeBERT_finetuned"
 
+# Config fields whose values are baked into the preprocessed cache.
+# Each entry: (state_key, config_attr, default_value).
+# On cache load, every mismatch triggers a full recompute.
+# On cache save, every field is written into the state dict.
+CACHE_INVALIDATING_CONFIG = [
+    ("source_data_path",    "data_path",            None),
+    ("train_frac",          "train_frac",            0.8),
+    ("val_frac",            "val_frac",              0.1),
+    ("remove_excess",       "remove_excess",         False),
+    ("use_embedding",       "use_embedding",         True),
+    ("use_taxonomy",        "use_taxonomy",          False),
+    ("location_embedder",   "location_embedder",     None),
+    ("keep_raw_gps_features", "keep_raw_gps_features", False),
+    ("barcode_hf_model",    "barcode_hf_model",      DEFAULT_BARCODE_HF_MODEL),
+    ("emb_distance_metric", "emb_distance_metric",   "cosine"),
+]
+
 
 def _default_preprocessing_state_path(config: Config, filename: str = PREPROCESSING_STATE_FILENAME) -> str:
     data_dir = os.path.abspath(config.results_dir)
@@ -81,75 +98,13 @@ def _compute_barcodebert_embeddings(
     Returns:
         Dict[str, np.ndarray]: {bin_uri: np.ndarray of shape [hidden_dim]}
     """
+    from transformers import AutoTokenizer, AutoModel
     import torch
 
     MODEL_NAME = getattr(config, "barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
     log.info(f"Loading BarcodeBERT from HuggingFace ({MODEL_NAME}) ...")
-
-    is_barcodemamba = "BarcodeMamba" in MODEL_NAME
-
-    # torchvision 0.20.1 (.so compiled for torch 2.5.1) segfaults when imported under
-    # torch 2.9.1. Inject a stub before any import that may pull it in (transformers for
-    # BarcodeBERT; barcode_mamba.py's `from torchvision.ops import StochasticDepth` for
-    # BarcodeMamba). Must happen before is_barcodemamba branch.
-    import sys as _sys
-    if "torchvision" not in _sys.modules:
-        import types as _types, importlib.util as _ilu, enum as _enum
-
-        class _InterpMode(_enum.IntEnum):
-            NEAREST_EXACT = 0; BILINEAR = 1; BICUBIC = 2
-            BOX = 3; HAMMING = 4; LANCZOS = 5
-
-        def _make(name):
-            m = _types.ModuleType(name)
-            m.__spec__ = _ilu.spec_from_loader(name, loader=None)
-            m.__path__ = []  # mark as package
-            return m
-
-        _tv               = _make("torchvision")
-        _tv.__version__   = "0.0.0+stub"
-        _tv_transforms    = _make("torchvision.transforms")
-        _tv_transforms.InterpolationMode = _InterpMode
-        _tv_io            = _make("torchvision.io")
-        _tv_ops           = _make("torchvision.ops")
-        # Provide a working StochasticDepth so barcode_mamba.py's import succeeds
-        import torch as _torch
-        import torch.nn as _nn
-        class _StochasticDepth(_nn.Module):
-            def __init__(self, p: float, mode: str):
-                super().__init__()
-                self.p, self.mode = p, mode
-            def forward(self, x):
-                if not self.training or self.p == 0.0:
-                    return x
-                survival = 1.0 - self.p
-                shape = ([x.shape[0]] + [1] * (x.ndim - 1)) if self.mode == "row" else ([1] * x.ndim)
-                noise = _torch.empty(shape, dtype=x.dtype, device=x.device).bernoulli_(survival)
-                return x * noise / survival
-        _tv_ops.StochasticDepth = _StochasticDepth
-
-        for _name, _mod in [
-            ("torchvision",            _tv),
-            ("torchvision.transforms", _tv_transforms),
-            ("torchvision.io",         _tv_io),
-            ("torchvision.ops",        _tv_ops),
-        ]:
-            _sys.modules[_name] = _mod
-        _tv.transforms = _tv_transforms
-        _tv.io         = _tv_io
-        _tv.ops        = _tv_ops
-
-    if is_barcodemamba:
-        tokenizer, model = _load_barcodemamba(MODEL_NAME, config)
-    else:
-        from transformers import AutoTokenizer, BertModel
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        # Use BertModel directly to get hidden states regardless of the classification
-        # head declared in config.json (e.g. bioscan-ml/BarcodeBERT uses
-        # BertForTokenClassification but we only need the encoder embeddings).
-        model = BertModel.from_pretrained(MODEL_NAME, trust_remote_code=True,
-                                          ignore_mismatched_sizes=True)
-
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    model = AutoModel.from_pretrained(MODEL_NAME, trust_remote_code=True)
     device = torch.device(config.device)
     model = model.to(device).eval()
 
@@ -176,25 +131,21 @@ def _compute_barcodebert_embeddings(
             batch_seqs = sequences[start : start + batch_size]
             batch_uris = uris[start : start + batch_size]
 
-            if is_barcodemamba:
-                input_ids, attention_mask = _tokenize_barcodemamba(tokenizer, batch_seqs, device)
-                last_hidden = model.get_hidden_states(input_ids)
-            else:
-                # KmerTokenizer is single-sequence only: encode each one individually
-                # and stack — safe because padding makes all outputs the same length
-                batch_input_ids = []
-                batch_attention_mask = []
-                for seq in batch_seqs:
-                    encoded = tokenizer(seq, padding=True)
-                    batch_input_ids.append(encoded["input_ids"])
-                    batch_attention_mask.append(encoded["attention_mask"])
+            # KmerTokenizer is single-sequence only: encode each one individually
+            # and stack — safe because padding makes all outputs the same length
+            batch_input_ids = []
+            batch_attention_mask = []
+            for seq in batch_seqs:
+                encoded = tokenizer(seq, padding=True)
+                batch_input_ids.append(encoded["input_ids"])
+                batch_attention_mask.append(encoded["attention_mask"])
 
-                input_ids = torch.tensor(batch_input_ids, dtype=torch.long).to(device)
-                attention_mask = torch.tensor(batch_attention_mask, dtype=torch.long).to(device)
+            input_ids = torch.tensor(batch_input_ids, dtype=torch.long).to(device)
+            attention_mask = torch.tensor(batch_attention_mask, dtype=torch.long).to(device)
 
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                last_hidden = outputs.last_hidden_state
-
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            # last_hidden_state: [B, seq_len, hidden_dim]
+            last_hidden = outputs.last_hidden_state
             # Mean-pool over non-padding token positions
             mask_exp = attention_mask.unsqueeze(-1).float()  # [B, seq_len, 1]
             sum_hidden = (last_hidden * mask_exp).sum(dim=1)  # [B, hidden_dim]
@@ -209,138 +160,6 @@ def _compute_barcodebert_embeddings(
 
     log.info("BarcodeBERT inference complete.")
     return emb_dict
-
-
-def _load_barcodemamba(model_name: str, config: Config):
-    """Load BarcodeMamba from HuggingFace (raw .ckpt) with its char tokenizer."""
-    import torch
-    from huggingface_hub import snapshot_download
-    import sys
-
-    # Resolve which sub-directory to use based on config.barcode_tokenizer
-    tokenizer_type = getattr(config, "barcode_tokenizer", "char")
-    # Find matching variant dir: BarcodeMamba-dim*-layer*-{char|k-mer}
-    repo_dir = snapshot_download(repo_id=model_name)
-    import glob as _glob
-    candidates = sorted(_glob.glob(os.path.join(repo_dir, f"BarcodeMamba-*-{tokenizer_type}")))
-    if not candidates:
-        raise FileNotFoundError(
-            f"No BarcodeMamba variant matching tokenizer='{tokenizer_type}' in {repo_dir}"
-        )
-    # Pick the largest (highest dim/layer) variant for best embeddings.
-    # The A40 GPU node (gpu="a40:1" in analyses.py) has enough RAM for the dim768 checkpoint.
-    variant_dir = candidates[-1]
-    log.info(f"Using BarcodeMamba variant: {os.path.basename(variant_dir)}")
-
-    import yaml as _yaml
-    with open(os.path.join(variant_dir, ".hydra", "config.yaml")) as _f:
-        _raw = _yaml.safe_load(_f)
-
-    # Resolve the few interpolations we actually need without Hydra/OmegaConf resolvers.
-    _m = _raw["model"]
-    _d_model = int(_m["d_model"])
-    _model_params = {
-        "d_model":               _d_model,
-        "n_layer":               int(_m["n_layer"]),
-        "d_inner":               4 * _d_model,   # ${eval:4 * ${.d_model}}
-        "vocab_size":            int(_raw["tokenizer"]["vocab_size"]),
-        "resid_dropout":         float(_m.get("resid_dropout", 0.0)),
-        "embed_dropout":         float(_m.get("embed_dropout", 0.0)),
-        "residual_in_fp32":      bool(_m.get("residual_in_fp32", False)),
-        "pad_vocab_size_multiple": int(_m.get("pad_vocab_size_multiple", 1)),
-        "mamba_ver":             _m.get("mamba_ver", "mamba2"),
-        "layer":                 {
-            "d_model": _d_model,          # resolves ${model.d_model}
-            "d_state":  int(_m["layer"]["d_state"]),
-            "d_conv":   int(_m["layer"]["d_conv"]),
-            "expand":   int(_m["layer"]["expand"]),
-            "headdim":  int(_m["layer"]["headdim"]),
-        },
-    }
-    _tok = _raw["tokenizer"]
-    _max_len = int(_raw["dataset"]["max_len"])
-
-    # Python source lives in the cloned repo; weights/config come from the HF snapshot.
-    _third_party = os.path.join(os.path.dirname(os.path.dirname(__file__)), "third_party")
-    _src = os.path.join(_third_party, "BarcodeMamba", "utils")
-
-    import importlib.util as _ilu
-
-    def _load_module(name, path):
-        spec = _ilu.spec_from_file_location(name, path)
-        mod = _ilu.module_from_spec(spec)
-        sys.modules[name] = mod
-        spec.loader.exec_module(mod)
-        return mod
-    _char_tok_mod = _load_module("_bm_char_tokenizer", os.path.join(_src, "char_tokenizer.py"))
-    _seq_dec_mod = _load_module("_bm_seq_decoder", os.path.join(_src, "seq_decoder.py"))
-
-    # barcode_mamba.py does `from utils.seq_decoder import SequenceDecoder` at import
-    # time. Register our already-loaded module under that dotted name so the lookup
-    # succeeds without touching sys.path or our own src/utils module.
-    import types as _types
-    _fake_utils_pkg = sys.modules.get("utils")  # our src/utils.py
-    _bm_utils_ns = _types.ModuleType("utils")
-    _bm_utils_ns.seq_decoder = _seq_dec_mod
-    sys.modules["utils"] = _bm_utils_ns
-    sys.modules["utils.seq_decoder"] = _seq_dec_mod
-    try:
-        _bm_mod = _load_module("_bm_barcode_mamba", os.path.join(_src, "barcode_mamba.py"))
-    finally:
-        # Restore our own utils module immediately after the import completes.
-        if _fake_utils_pkg is not None:
-            sys.modules["utils"] = _fake_utils_pkg
-        else:
-            del sys.modules["utils"]
-
-    BarcodeMamba = _bm_mod.BarcodeMamba
-    CharacterTokenizer = _char_tok_mod.CharacterTokenizer
-
-    model = BarcodeMamba(**_model_params, use_head="pretrain")
-
-    ckpt_path = os.path.join(variant_dir, "checkpoints", "last.ckpt")
-    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)["state_dict"]
-    # Remove "model." prefix added by PyTorch Lightning
-    state = {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
-    model.load_state_dict(state, strict=False)
-
-    tokenizer = CharacterTokenizer(
-        characters=list(_tok["characters"]),
-        model_max_length=_max_len + 2,   # config says ${dataset.max_len} + 2
-        padding_side=str(_tok.get("padding_side", "left")),
-    )
-    return tokenizer, model
-
-
-def _tokenize_barcodemamba(
-    tokenizer,
-    sequences: list,
-    device,
-):
-    """Tokenize a batch of sequences with the BarcodeMamba char tokenizer."""
-    import torch
-
-    max_len = tokenizer.model_max_length
-    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-
-    all_ids, all_mask = [], []
-    for seq in sequences:
-        ids = tokenizer.encode(seq[:max_len], add_special_tokens=False)
-        mask = [1] * len(ids)
-        # Pad / truncate to max_len
-        pad_len = max_len - len(ids)
-        if pad_len > 0:
-            ids = ids + [pad_id] * pad_len
-            mask = mask + [0] * pad_len
-        else:
-            ids = ids[:max_len]
-            mask = mask[:max_len]
-        all_ids.append(ids)
-        all_mask.append(mask)
-
-    input_ids = torch.tensor(all_ids, dtype=torch.long).to(device)
-    attention_mask = torch.tensor(all_mask, dtype=torch.long).to(device)
-    return input_ids, attention_mask
 
 
 def _load_or_compute_embeddings(
@@ -524,29 +343,34 @@ def load(
             if config.use_embedding and cached[2] is None:
                 log.info(f"load(): cache at {config.preprocessed_dir} has no embeddings but use_embedding=True — recomputing.")
             else:
-                # Check that the cached location embedder matches the current config.
                 cached_state_path = os.path.join(config.preprocessed_dir, PREPROCESSING_STATE_FILENAME)
-                cached_loc_embedder = None
-                cached_barcode_hf_model = DEFAULT_BARCODE_HF_MODEL
+                cached_state: Dict[str, Any] = {}
                 if os.path.exists(cached_state_path):
                     try:
                         cached_state = load_preprocessing_state(cached_state_path)
-                        cached_loc_embedder = cached_state.get("location_embedder", None)
-                        cached_barcode_hf_model = cached_state.get("barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
                     except Exception:
                         pass
-                current_loc_embedder = getattr(config, "location_embedder", None)
-                current_barcode_hf_model = getattr(config, "barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
-                if cached_loc_embedder != current_loc_embedder:
-                    log.info(
-                        f"load(): cache at {config.preprocessed_dir} was built with location_embedder={cached_loc_embedder!r} "
-                        f"but current config has location_embedder={current_loc_embedder!r} — recomputing."
-                    )
-                elif cached_barcode_hf_model != current_barcode_hf_model:
-                    log.info(
-                        f"load(): cache at {config.preprocessed_dir} was built with barcode_hf_model={cached_barcode_hf_model!r} "
-                        f"but current config has barcode_hf_model={current_barcode_hf_model!r} — recomputing."
-                    )
+
+                # For source_data_path, resolve the current path the same way it was stored.
+                def _current_val(cfg_attr: str, default: Any) -> Any:
+                    val = getattr(config, cfg_attr, default)
+                    if cfg_attr == "data_path" and val is not None:
+                        val = os.path.abspath(val)
+                    return val
+
+                mismatches = []
+                for state_key, cfg_attr, default in CACHE_INVALIDATING_CONFIG:
+                    cached_val = cached_state.get(state_key, default)
+                    current_val = _current_val(cfg_attr, default)
+                    if cached_val != current_val:
+                        mismatches.append((state_key, cached_val, current_val))
+
+                if mismatches:
+                    for state_key, cached_val, current_val in mismatches:
+                        log.info(
+                            f"load(): cache mismatch on '{state_key}': "
+                            f"cached={cached_val!r}, current={current_val!r} — recomputing."
+                        )
                 else:
                     log.info(f"load(): cache hit at {config.preprocessed_dir} — loading from disk, skipping preprocessing.")
                     return cached
@@ -700,11 +524,18 @@ def load(
         _emb_model = config.location_embedder
         _cache_path: Optional[str] = None
         if getattr(config, "preprocessed_dir", None) is not None:
-            _cache_path = os.path.join(
-                os.path.abspath(config.preprocessed_dir),
-                f"loc_emb_{_emb_model}.npy",
+            # Store the location embedding cache as a sibling of preprocessed_dir so it
+            # survives preprocessed cache invalidations (e.g. barcode model changes).
+            # The cache is keyed on both the data path and the embedder name so it stays
+            # valid as long as those two don't change.
+            import hashlib as _hashlib
+            _data_hash = _hashlib.md5(os.path.abspath(config.data_path).encode()).hexdigest()[:8]
+            _loc_cache_dir = os.path.join(
+                os.path.dirname(os.path.abspath(config.preprocessed_dir)),
+                f"loc_emb_cache_{_emb_model}_{_data_hash}",
             )
-            _cache_coords_path = _cache_path.replace(".npy", "_coords.npy")
+            _cache_path = os.path.join(_loc_cache_dir, "embeddings.npy")
+            _cache_coords_path = os.path.join(_loc_cache_dir, "coords.npy")
 
         if _cache_path is not None and os.path.exists(_cache_path) and os.path.exists(_cache_coords_path):
             cached_embs = np.load(_cache_path)
@@ -744,10 +575,10 @@ def load(
                     for k, coord in enumerate(unique_coords):
                         rows_with_coord = (df["latitude"] == coord[0]) & (df["longitude"] == coord[1])
                         uniq_embs[k, j] = df.loc[rows_with_coord, col].iloc[0]
-                os.makedirs(os.path.dirname(_cache_path), exist_ok=True)
+                os.makedirs(_loc_cache_dir, exist_ok=True)
                 np.save(_cache_path, uniq_embs)
                 np.save(_cache_coords_path, unique_coords)
-                log.info("Saved location embedding cache to %s", _cache_path)
+                log.info("Saved location embedding cache to %s", _loc_cache_dir)
 
     # Build feature list: when using location embedder, replace raw GPS with embedding cols
     LOCATION_RAW_FEATURES = ["latitude", "longitude"]
@@ -877,11 +708,14 @@ def load(
                 "enabled": len(sample_reads) > 0,
                 "threshold": float(reads_threshold) if len(sample_reads) > 0 else None,
             },
+            "bin_uris": [str(b) for b in unique_bins],
         }
-        # Always record which location embedder was used so cache invalidation works correctly.
-        state["location_embedder"] = getattr(config, "location_embedder", None)
-        # Record barcode model provenance so embedding cache invalidates on model change.
-        state["barcode_hf_model"] = getattr(config, "barcode_hf_model", DEFAULT_BARCODE_HF_MODEL)
+        # Record all cache-invalidating config fields so future loads can detect mismatches.
+        for state_key, cfg_attr, default in CACHE_INVALIDATING_CONFIG:
+            val = getattr(config, cfg_attr, default)
+            if cfg_attr == "data_path" and val is not None:
+                val = os.path.abspath(val)
+            state[state_key] = val
         # Add embeddings to state if computed
         if config.use_embedding and embeddings_array is not None:
             # Store embeddings dict for reproducibility on resume
