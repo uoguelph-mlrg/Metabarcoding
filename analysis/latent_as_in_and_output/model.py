@@ -66,8 +66,7 @@ class Model(nn.Module):
         self.H_interp: Optional[torch.Tensor] = None
 
         if interpolation_enabled:
-            interp_device = self.device if self.device.type != "mps" else torch.device("cpu")
-            self.H_interp = latent_solver.get_interpolation_operator(include_self_in_interpolation, device=interp_device)
+            self.H_interp = latent_solver.get_interpolation_operator(include_self_in_interpolation)
 
         z_init = torch.randn((n_bins, self.latent_input_dim), device=device) * latent_init_std if latent_init_std > 0 else torch.zeros((n_bins, self.latent_input_dim), device=device)
         self.latent_z = nn.Parameter(
@@ -271,25 +270,26 @@ class Model(nn.Module):
                 x = batch["input"].to(self.device)  # [B, max_bins, features]
                 bin_idx = batch["bin_idx"].to(self.device)
                 mask = batch.get("mask")  # [B, max_bins]
-                
+
                 B, max_bins, n_feat = x.shape
                 x_flat = x.view(B * max_bins, n_feat)
                 bin_flat = bin_idx.view(B * max_bins)
                 z_flat = self._lookup_input_latent(bin_flat)
                 x_aug = torch.cat([x_flat, z_flat], dim=-1)
-                
+
                 intrinsic_flat = self.mlp(x_aug)  # [B * max_bins, d] or [B * max_bins]
                 mask_np = mask.cpu().numpy().astype(bool) if mask is not None else np.ones((B, max_bins), dtype=bool)
-                
+
                 if self.embed_dim > 1:
                     intrinsic_np = intrinsic_flat.view(B, max_bins, self.embed_dim).cpu().numpy()
                     for b in range(B):
                         all_preds.append(intrinsic_np[b, mask_np[b]])  # [n_valid, d]
-                    return np.concatenate(all_preds, axis=0)
                 else:
                     intrinsic_np = intrinsic_flat.squeeze(-1).view(B, max_bins).cpu().numpy()
                     for b in range(B):
                         all_preds.extend(intrinsic_np[b, mask_np[b]])
+            if self.embed_dim > 1:
+                return np.concatenate(all_preds, axis=0)
             return np.array(all_preds)
         else:
             for batch in data_loader:
