@@ -117,19 +117,19 @@ class Model(nn.Module):
         if not self._interpolation_enabled:
             raise RuntimeError("Interpolation was requested but interpolation operators were not initialized")
 
-        mask_t = interpolation_mask.to(device=latent_source.device, dtype=torch.bool).reshape(-1)
-        if not bool(torch.any(mask_t).item()):
+        mask = interpolation_mask.to(device=latent_source.device, dtype=torch.bool).reshape(-1)
+        if not bool(torch.any(mask).item()):
             return own_latent
 
-        latent_2d = latent_source.unsqueeze(-1) if self.embed_dim == 1 else latent_source
+        latent_source = latent_source.unsqueeze(-1) if self.embed_dim == 1 else latent_source
         interp_operator = self.H_interp
         if interp_operator is None:
             raise RuntimeError("Interpolation operator is not initialized")
 
         interp_device = interp_operator.device
         # Keep sparse matmul on the operator device to avoid repeated sparse transfers.
-        latent_for_interp = latent_2d if interp_device == latent_2d.device else latent_2d.to(interp_device)
-        if interp_device != latent_2d.device:
+        latent_for_interp = latent_source if interp_device == latent_source.device else latent_source.to(interp_device)
+        if interp_device != latent_source.device:
             interp_operator = interp_operator.to(interp_device)
 
         interpolated_full = torch.sparse.mm(interp_operator, latent_for_interp)
@@ -137,11 +137,11 @@ class Model(nn.Module):
         if interpolated_obs.device != own_latent.device:
             interpolated_obs = interpolated_obs.to(own_latent.device)
         if self.embed_dim == 1:
-            own_latent_2d = own_latent.unsqueeze(-1)
-            mixed = torch.where(mask_t.unsqueeze(-1), interpolated_obs, own_latent_2d)
+            own_latent = own_latent.unsqueeze(-1)
+            mixed = torch.where(mask.unsqueeze(-1), interpolated_obs, own_latent)
             return mixed.squeeze(-1)
 
-        mixed = torch.where(mask_t.unsqueeze(-1), interpolated_obs, own_latent)
+        mixed = torch.where(mask.unsqueeze(-1), interpolated_obs, own_latent)
         return mixed
 
     def forward(
