@@ -24,6 +24,7 @@ MODEL_ALIASES: Dict[str, str] = {
 
 _REPO_DIR = Path(__file__).resolve().parent.parent
 _THIRD_PARTY_DIR = _REPO_DIR / "third_party"
+_DEFAULT_RANGE_DB_PATH = _THIRD_PARTY_DIR / "RANGE" / "pretrained" / "range_db_med.npz"
 
 
 def _ensure_third_party_on_syspath(*relative_parts: str) -> Path:
@@ -151,7 +152,7 @@ class _RangeBackedEmbedder(BaseLocationEmbedder):
 			raise ValueError(f"Unsupported RANGE model '{model_name}'. Use RANGE or RANGE+.")
 
 		if range_db_path is None:
-			raise ValueError("RANGE requires a precomputed database file path via 'range_db_path'.")
+			range_db_path = str(_DEFAULT_RANGE_DB_PATH)
 		range_db = Path(range_db_path).expanduser()
 		if not range_db.is_absolute():
 			range_db = (_REPO_DIR / range_db).resolve()
@@ -312,16 +313,13 @@ class SatCLIPEmbedder(BaseLocationEmbedder):
 		return np.concatenate(outs, axis=0) if outs else np.zeros((0, self.embedding_dim), dtype=np.float32)
 
 
-_DEFAULT_RANGE_DB_PATH = _THIRD_PARTY_DIR / "RANGE" / "pretrained" / "range_db_med.npz"
-
-
 class RANGEEmbedder(_RangeBackedEmbedder):
 	def __init__(
 		self,
 		device: str = "cpu",
 		batch_size: int = 4096,
 		satclip_ckpt_path: Optional[str] = None,
-		range_db_path: Optional[str] = str(_DEFAULT_RANGE_DB_PATH),
+		range_db_path: Optional[str] = None,
 		range_model_name: str = "RANGE+",  # "RANGE" or "RANGE+"
 		range_beta: float = 0.5,           # interpolation weight for RANGE+ (0=RANGE, 1=RANGE+)
 	) -> None:
