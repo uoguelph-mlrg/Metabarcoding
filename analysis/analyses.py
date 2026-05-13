@@ -119,17 +119,17 @@ _reg(Analysis(
             color="#2ecc71",
             time="0:45:00",
         ),
-        Variant(
-            name="emb_bioscan_barcodemamba",
-            config={
-                "use_taxonomy": False,
-                "use_embedding": True,
-                "barcode_hf_model": "bioscan-ml/BarcodeMamba",
-            },
-            label="bioscan-ml/BarcodeMamba",
-            color="#e67e22",
-            time="0:45:00",
-        ),
+        #Variant(
+        #    name="emb_bioscan_barcodemamba",
+        #    config={
+        #        "use_taxonomy": False,
+        #        "use_embedding": True,
+        #        "barcode_hf_model": "bioscan-ml/BarcodeMamba",
+        #    },
+        #    label="bioscan-ml/BarcodeMamba",
+        #    color="#e67e22",
+        #    time="0:45:00",
+        #),
     ],
     include_baseline=False,
 ))
@@ -391,11 +391,13 @@ _reg(Analysis(
 _EMBEDDER_NAMES = ["satclip", "range", "geoclip", "alphaearth"]
 
 _loc_emb_default_variants = [
-    Variant(name="none",       config={"location_embedder": None}, label="Raw GPS (lat/lon)", color="#95a5a6", time="0:45:00"),
-    Variant(name="satclip",    config={"location_embedder": "satclip"}, label="SatCLIP (256D)",   color="#e74c3c", time="0:45:00"),
-    Variant(name="range",      config={"location_embedder": "range"}, label="RANGE (1280D)",    color="#3498db", time="0:45:00"),
-    Variant(name="geoclip",    config={"location_embedder": "geoclip"}, label="GeoCLIP (512D)",   color="#2ecc71", time="0:45:00"),
-    Variant(name="alphaearth", config={"location_embedder": "alphaearth"}, label="AlphaEarth (64D)", color="#f39c12", time="0:45:00"),
+    # preprocessed_dir=None: each variant has a different feature schema (different loc_emb dim),
+    # so they must not share or write to the global preprocessed cache.
+    Variant(name="none",       config={"location_embedder": None,          "preprocessed_dir": None}, label="Raw GPS (lat/lon)", color="#95a5a6", time="0:45:00"),
+    Variant(name="satclip",    config={"location_embedder": "satclip",     "preprocessed_dir": None}, label="SatCLIP (256D)",   color="#e74c3c", time="0:45:00"),
+    Variant(name="range",      config={"location_embedder": "range",       "preprocessed_dir": None}, label="RANGE (1280D)",    color="#3498db", time="0:45:00"),
+    Variant(name="geoclip",    config={"location_embedder": "geoclip",     "preprocessed_dir": None}, label="GeoCLIP (512D)",   color="#2ecc71", time="0:45:00"),
+    Variant(name="alphaearth", config={"location_embedder": "alphaearth",  "preprocessed_dir": None}, label="AlphaEarth (64D)", color="#f39c12", time="0:45:00"),
 ]
 
 
