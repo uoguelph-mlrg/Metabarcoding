@@ -61,9 +61,8 @@ CACHE_INVALIDATING_CONFIG = [
 ]
 
 
-def _default_preprocessing_state_path(config: Config, filename: str = PREPROCESSING_STATE_FILENAME) -> str:
-    data_dir = os.path.abspath(config.results_dir)
-    return os.path.join(data_dir, filename)
+def _default_preprocessing_state_path(config: Config) -> str:
+    return os.path.join(os.path.abspath(config.results_dir), PREPROCESSING_STATE_FILENAME)
 
 def save_preprocessing_state(path: str, state: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -203,6 +202,20 @@ def _load_or_compute_embeddings(
     return embeddings, bins_with_embedding
 
 
+def _to_csv(df: pd.DataFrame, dest: str, **kwargs) -> None:
+    """Write a DataFrame to CSV atomically via a temp file + rename."""
+    dir_ = os.path.dirname(dest) or "."
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=dir_, suffix=".tmp") as tmp:
+        tmp_path = tmp.name
+    try:
+        df.to_csv(tmp_path, **kwargs)
+        os.replace(tmp_path, dest)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
 def _save_to_preprocessed_dir(
     out_dir: str,
     X_train: pd.DataFrame,
@@ -226,9 +239,9 @@ def _save_to_preprocessed_dir(
         os.remove(sentinel)
 
     for X, y, split in [(X_train, y_train, "train"), (X_val, y_val, "val"), (X_test, y_test, "test")]:
-        X.to_csv(os.path.join(out_dir, f"X_{split}.csv"))
-        pd.Series(y).to_csv(os.path.join(out_dir, f"y_{split}.csv"), index=False)
-    taxonomy_df.to_csv(os.path.join(out_dir, "bins_data.csv"), index=False)
+        _to_csv(X, os.path.join(out_dir, f"X_{split}.csv"))
+        _to_csv(pd.Series(y).to_frame(), os.path.join(out_dir, f"y_{split}.csv"), index=False)
+    _to_csv(taxonomy_df, os.path.join(out_dir, "bins_data.csv"), index=False)
 
     emb = embeddings_array if embeddings_array is not None else np.array([], dtype=np.float32)
     np.save(os.path.join(out_dir, "embeddings_array.npy"), emb)
@@ -302,11 +315,77 @@ def _load_from_preprocessed_dir(
     )
 
 
+def _try_load_cache(config: Config) -> Optional[tuple]:
+    """
+    Try to load preprocessed artifacts from config.preprocessed_dir.
+
+    Returns the cached tuple on success, or None if the cache is missing, corrupt,
+    or stale (any config-invalidating field has changed since the cache was written).
+    Removes the sentinel file when the cache is found to be invalid so it won't be
+    retried on subsequent runs until a fresh write succeeds.
+    """
+    cache_dir = config.preprocessed_dir
+    sentinel = os.path.join(cache_dir, "_complete")
+    if not os.path.exists(sentinel):
+        return None
+
+    def _invalidate(reason: str) -> None:
+        log.warning("load(): cache at %s is invalid (%s) — recomputing.", cache_dir, reason)
+        try:
+            os.remove(sentinel)
+        except OSError:
+            pass
+
+    try:
+        cached = _load_from_preprocessed_dir(cache_dir)
+    except Exception as exc:
+        _invalidate(str(exc))
+        return None
+
+    if config.use_embedding and cached[2] is None:
+        _invalidate("use_embedding=True but cache has no embeddings")
+        return None
+
+    cached_state: Dict[str, Any] = {}
+    state_path = os.path.join(cache_dir, PREPROCESSING_STATE_FILENAME)
+    if os.path.exists(state_path):
+        try:
+            cached_state = load_preprocessing_state(state_path)
+        except Exception:
+            pass
+
+    cached_feature_cols = cached_state.get("feature_cols_present", [])
+    if cached_feature_cols and list(cached[0]["train"]["X"].columns) != cached_feature_cols:
+        _invalidate(
+            f"state has {len(cached_feature_cols)} features "
+            f"but X_train has {len(list(cached[0]['train']['X'].columns))} columns"
+        )
+        return None
+
+    def _current_cfg_val(cfg_attr: str, default: Any) -> Any:
+        val = getattr(config, cfg_attr, default)
+        if cfg_attr == "data_path" and val is not None:
+            val = os.path.abspath(val)
+        return val
+
+    mismatches = [
+        (key, cached_state.get(key, default), _current_cfg_val(attr, default))
+        for key, attr, default in CACHE_INVALIDATING_CONFIG
+        if cached_state.get(key, default) != _current_cfg_val(attr, default)
+    ]
+    if mismatches:
+        for key, cached_val, current_val in mismatches:
+            log.info("load(): cache mismatch on '%s': cached=%r, current=%r — recomputing.", key, cached_val, current_val)
+        return None
+
+    log.info("load(): cache hit at %s — loading from disk, skipping preprocessing.", cache_dir)
+    return cached
+
+
 def load(
     config: Config,
     fixed_split_indices: Optional[Dict[str, np.ndarray]] = None,
     preprocessing_state_path: Optional[str] = None,
-    preprocessing_state_filename: str = PREPROCESSING_STATE_FILENAME,
 ) -> Tuple[
     Dict[str, Dict[str, Any]], pd.DataFrame, Optional[np.ndarray], Optional[np.ndarray],
     Dict[Any, int], Dict[Any, int], Dict[str, np.ndarray], str
@@ -314,14 +393,16 @@ def load(
     """
     Load and preprocess the CSV data.
 
+    If config.preprocessed_dir points to a valid cache, all artifacts are loaded from disk
+    and returned immediately. Any read error or config mismatch invalidates the cache and
+    falls through to a full recompute.
+
     Args:
         config: Configuration object with train_frac, val_frac
-        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing sample
-            indices for reproducible splits across different calls
-        preprocessing_state_path: Optional path to preprocessing state file; used for replay mode
-            when the file already exists. If missing, preprocessing is computed and the artifact is
-            written there.
-        preprocessing_state_filename: Artifact filename used when writing default state
+        fixed_split_indices: Optional dict with 'train', 'val', 'test' keys containing
+            sample indices to use instead of a random split
+        preprocessing_state_path: Path where the preprocessing state artifact will be
+            written (defaults to config.results_dir / preprocessing_state.pkl)
 
     Returns:
     Tuple containing:
@@ -334,53 +415,16 @@ def load(
         - split_indices: dict with 'train', 'val', 'test' sample indices (for reuse)
         - preprocessing_state_path: path to the saved preprocessing state artifact
     """
-    # Fast-path: load everything from a previously written cache directory.
     if config.preprocessed_dir is not None:
-        sentinel = os.path.join(config.preprocessed_dir, "_complete")
-        if os.path.exists(sentinel):
-            cached = _load_from_preprocessed_dir(config.preprocessed_dir)
-            # cached[2] is embeddings_array; skip cache if config needs embeddings but cache has none
-            if config.use_embedding and cached[2] is None:
-                log.info(f"load(): cache at {config.preprocessed_dir} has no embeddings but use_embedding=True — recomputing.")
-            else:
-                cached_state_path = os.path.join(config.preprocessed_dir, PREPROCESSING_STATE_FILENAME)
-                cached_state: Dict[str, Any] = {}
-                if os.path.exists(cached_state_path):
-                    try:
-                        cached_state = load_preprocessing_state(cached_state_path)
-                    except Exception:
-                        pass
+        cached = _try_load_cache(config)
+        if cached is not None:
+            return cached
 
-                # For source_data_path, resolve the current path the same way it was stored.
-                def _current_val(cfg_attr: str, default: Any) -> Any:
-                    val = getattr(config, cfg_attr, default)
-                    if cfg_attr == "data_path" and val is not None:
-                        val = os.path.abspath(val)
-                    return val
-
-                mismatches = []
-                for state_key, cfg_attr, default in CACHE_INVALIDATING_CONFIG:
-                    cached_val = cached_state.get(state_key, default)
-                    current_val = _current_val(cfg_attr, default)
-                    if cached_val != current_val:
-                        mismatches.append((state_key, cached_val, current_val))
-
-                if mismatches:
-                    for state_key, cached_val, current_val in mismatches:
-                        log.info(
-                            f"load(): cache mismatch on '{state_key}': "
-                            f"cached={cached_val!r}, current={current_val!r} — recomputing."
-                        )
-                else:
-                    log.info(f"load(): cache hit at {config.preprocessed_dir} — loading from disk, skipping preprocessing.")
-                    return cached
-
-    replay_state: Optional[Dict[str, Any]] = None
-    if preprocessing_state_path is not None and os.path.exists(preprocessing_state_path):
-        replay_state = load_preprocessing_state(preprocessing_state_path)
-
-    default_state_path = _default_preprocessing_state_path(config, preprocessing_state_filename)
-    resolved_state_path = os.path.abspath(preprocessing_state_path) if preprocessing_state_path else default_state_path
+    resolved_state_path = (
+        os.path.abspath(preprocessing_state_path)
+        if preprocessing_state_path
+        else _default_preprocessing_state_path(config)
+    )
 
     df = pd.read_csv(config.data_path)
 
@@ -519,7 +563,7 @@ def load(
     # Location embedding (optional)
     ################################################################################################
     location_embedding_cols: List[str] = []
-    if replay_state is None and getattr(config, "location_embedder", None) is not None:
+    if getattr(config, "location_embedder", None) is not None:
         from embed_location import build_location_embedder, add_location_embeddings, EmbedderSpec
         _emb_model = config.location_embedder
         _cache_path: Optional[str] = None
@@ -588,35 +632,9 @@ def load(
         base_feature_list.extend(location_embedding_cols)
         if getattr(config, "keep_raw_gps_features", False):
             base_feature_list.extend(LOCATION_RAW_FEATURES)
-    elif replay_state is not None and getattr(config, "location_embedder", None) is not None:
-        # Replay with location embedder: re-run embedding to recreate columns, then let
-        # feature_cols_present from state take over (which already includes loc_emb_* cols).
-        from embed_location import build_location_embedder, add_location_embeddings, EmbedderSpec
-        spec = EmbedderSpec(
-            model_name=config.location_embedder,
-            device=config.device,
-            satclip_ckpt_path=getattr(config, "satclip_ckpt_path", None),
-            range_db_path=getattr(config, "range_db_path", None),
-        )
-        embedder = build_location_embedder(spec)
-        df, location_embedding_cols = add_location_embeddings(
-            df, embedder, lat_col="latitude", lon_col="longitude"
-        )
-
     # Build df_long with required columns + features
     base_cols = ["sample_id", "bin_uri", "occurrences", "rel_abundance"]
-    if replay_state is not None:
-        feature_cols_present = list(replay_state.get("feature_cols_present", []))
-        if not feature_cols_present:
-            raise ValueError("Preprocessing replay failed: missing 'feature_cols_present' in artifact")
-        replay_missing = [c for c in feature_cols_present if c not in df.columns]
-        if replay_missing:
-            raise ValueError(
-                "Preprocessing replay failed: expected feature columns are missing from input data: "
-                + ", ".join(replay_missing)
-            )
-    else:
-        feature_cols_present = [c for c in base_feature_list if c in df.columns]
+    feature_cols_present = [c for c in base_feature_list if c in df.columns]
     df_long = df[base_cols + feature_cols_present].copy()
 
     # Ensure feature columns are numeric; non-numeric values become NaN and are imputed later.
@@ -638,30 +656,14 @@ def load(
     if config.use_embedding:
         embeddings_array, bins_with_embedding_arr = _load_or_compute_embeddings(config, taxonomy_df["bin_uri"].tolist())
 
-    if replay_state is not None:
-        train_feature_means = dict(replay_state.get("train_feature_means", {}))
-        train_feature_stds = dict(replay_state.get("train_feature_stds", {}))
-        bin_medians = pd.DataFrame(replay_state.get("bin_medians", {}))
-        feature_medians = pd.Series(replay_state.get("feature_medians", {}))
-        # Restore embeddings from replay state if available
-        if config.use_embedding and "embeddings_dict" in replay_state:
-            cached_emb_dict = replay_state.get("embeddings_dict", {})
-            embeddings_array = np.zeros((len(taxonomy_df), len(next(iter(cached_emb_dict.values())))), dtype=np.float32)
-            bins_with_embedding_arr = np.zeros(len(taxonomy_df), dtype=bool)
-            for idx, uri in enumerate(taxonomy_df["bin_uri"]):
-                if uri in cached_emb_dict:
-                    embeddings_array[idx] = np.array(cached_emb_dict[uri], dtype=np.float32)
-                    bins_with_embedding_arr[idx] = True
-    else:
-        # Fill missing numeric features with their median values given the BIN in the training set.
-        X = df_long.loc[
-            df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), feature_cols_present + ["bin_uri"]
-        ]
-        X_features = X[feature_cols_present]
-        train_feature_means = X_features.mean().to_dict()
-        train_feature_stds = X_features.std(ddof=0).to_dict()
-        bin_medians = X.groupby("bin_uri")[feature_cols_present].median()
-        feature_medians = X_features.median()
+    X = df_long.loc[
+        df_long["sample_id"].isin(set(unique_samples[train_sample_idx])), feature_cols_present + ["bin_uri"]
+    ]
+    X_features = X[feature_cols_present]
+    train_feature_means = X_features.mean().to_dict()
+    train_feature_stds = X_features.std(ddof=0).to_dict()
+    bin_medians = X.groupby("bin_uri")[feature_cols_present].median()
+    feature_medians = X_features.median()
 
     for col in feature_cols_present:
         median_map = dict(bin_medians.get(col, {}))
@@ -670,62 +672,56 @@ def load(
         df_long.loc[missing, col] = df_long.loc[missing, "bin_uri"].map(median_map)
         # Second pass: global fallback for BINs with no usable train median.
         if col not in feature_medians:
-            raise ValueError(f"Preprocessing replay failed: missing global median for feature '{col}'")
+            raise ValueError(f"Missing global median for feature '{col}'")
         df_long[col] = df_long[col].fillna(float(feature_medians[col]))
 
         if col not in train_feature_means or col not in train_feature_stds:
-            raise ValueError(f"Preprocessing replay failed: missing mean/std for feature '{col}'")
+            raise ValueError(f"Missing mean/std for feature '{col}'")
         std = float(train_feature_stds[col])
         mean = float(train_feature_means[col])
         df_long[col] = (df_long[col] - mean) / (std + 1e-10)
 
 
-    if replay_state is None:
-        # Store the sample IDs corresponding to each split for reproducibility and downstream use.
-        split_sample_ids = {
-            "train": unique_samples[train_sample_idx].tolist(),
-            "val": unique_samples[val_sample_idx].tolist(),
-            "test": unique_samples[test_sample_idx].tolist(),
+    split_sample_ids = {
+        "train": unique_samples[train_sample_idx].tolist(),
+        "val": unique_samples[val_sample_idx].tolist(),
+        "test": unique_samples[test_sample_idx].tolist(),
+    }
+    state = {
+        "source_data_path": os.path.abspath(config.data_path),
+        "feature_cols_present": feature_cols_present,
+        "log_transform_columns": [
+            c for c in ["total_reads_per_sample", "total_reads", "avg_reads", "max_reads", "min_reads"]
+            if c in feature_cols_present
+        ],
+        "train_feature_means": train_feature_means,
+        "train_feature_stds": train_feature_stds,
+        "feature_medians": feature_medians.to_dict(),
+        "bin_medians": bin_medians.to_dict(),
+        "split_indices": {
+            "train": train_sample_idx.astype(np.int64).tolist(),
+            "val": val_sample_idx.astype(np.int64).tolist(),
+            "test": test_sample_idx.astype(np.int64).tolist(),
+        },
+        "split_sample_ids": split_sample_ids,
+        "sample_filter": {
+            "enabled": len(sample_reads) > 0,
+            "threshold": float(reads_threshold) if len(sample_reads) > 0 else None,
+        },
+        "bin_uris": [str(b) for b in unique_bins],
+    }
+    for state_key, cfg_attr, default in CACHE_INVALIDATING_CONFIG:
+        val = getattr(config, cfg_attr, default)
+        if cfg_attr == "data_path" and val is not None:
+            val = os.path.abspath(val)
+        state[state_key] = val
+    if config.use_embedding and embeddings_array is not None:
+        state["embeddings_dict"] = {
+            uri: embeddings_array[idx].tolist()
+            for idx, uri in enumerate(taxonomy_df["bin_uri"])
         }
-        state = {
-            "source_data_path": os.path.abspath(config.data_path),
-            "feature_cols_present": feature_cols_present,
-            "log_transform_columns": [
-                c for c in ["total_reads_per_sample", "total_reads", "avg_reads", "max_reads", "min_reads"]
-                if c in feature_cols_present
-            ],
-            "train_feature_means": train_feature_means,
-            "train_feature_stds": train_feature_stds,
-            "feature_medians": feature_medians.to_dict(),
-            "bin_medians": bin_medians.to_dict(),
-            "split_indices": {
-                "train": train_sample_idx.astype(np.int64).tolist(),
-                "val": val_sample_idx.astype(np.int64).tolist(),
-                "test": test_sample_idx.astype(np.int64).tolist(),
-            },
-            "split_sample_ids": split_sample_ids,
-            "sample_filter": {
-                "enabled": len(sample_reads) > 0,
-                "threshold": float(reads_threshold) if len(sample_reads) > 0 else None,
-            },
-            "bin_uris": [str(b) for b in unique_bins],
-        }
-        # Record all cache-invalidating config fields so future loads can detect mismatches.
-        for state_key, cfg_attr, default in CACHE_INVALIDATING_CONFIG:
-            val = getattr(config, cfg_attr, default)
-            if cfg_attr == "data_path" and val is not None:
-                val = os.path.abspath(val)
-            state[state_key] = val
-        # Add embeddings to state if computed
-        if config.use_embedding and embeddings_array is not None:
-            # Store embeddings dict for reproducibility on resume
-            embeddings_dict = {
-                uri: embeddings_array[idx].tolist()
-                for idx, uri in enumerate(taxonomy_df["bin_uri"])
-            }
-            state["embeddings_dict"] = embeddings_dict
-            state["use_embedding"] = True
-        save_preprocessing_state(resolved_state_path, state)
+        state["use_embedding"] = True
+    save_preprocessing_state(resolved_state_path, state)
 
     # Get train, val, test data
     def compute_data_split(df_long, sample_idx):
