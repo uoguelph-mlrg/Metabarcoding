@@ -10,3 +10,6 @@ Metabarcoding/analysis/data_curation/results/
 autoresearch/results.tsv
 autoresearch/.claude/scheduled_tasks.lock
 analysis/preprocessing/data/*
+# Model checkpoints and preprocessing state (too large for git)
+**/checkpoints/
+**/preprocessing_state.pkl
