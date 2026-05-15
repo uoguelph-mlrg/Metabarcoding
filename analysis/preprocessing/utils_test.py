@@ -662,10 +662,6 @@ def load(
         state = {
             "source_data_path": os.path.abspath(config.data_path),
             "feature_cols_present": feature_cols_present,
-            "log_transform_columns": [
-                c for c in ["total_reads_per_sample", "total_reads", "avg_reads", "max_reads", "min_reads"]
-                if c in feature_cols_present
-            ],
             "train_feature_means": train_feature_means,
             "train_feature_stds": train_feature_stds,
             "feature_medians": feature_medians.to_dict(),
