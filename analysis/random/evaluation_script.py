@@ -460,7 +460,7 @@ def main() -> None:
         description="Evaluate a checkpoint trained on one dataset on a different (larger) dataset."
     )
     parser.add_argument("--model", required=True, help="Checkpoint .pt path or run directory containing checkpoints/")
-    parser.add_argument("--dataset", required=True, help="Path to evaluation CSV dataset (e.g. data_merged.csv)")
+    parser.add_argument("--dataset", required=True, help="Path to evaluation CSV dataset (e.g. metabarcoding_dataset.csv)")
     parser.add_argument("--output", default=None, help="Output pickle path (default: next to checkpoint)")
     parser.add_argument("--device", default=None, choices=["cpu", "mps", "cuda"], help="Override device")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")

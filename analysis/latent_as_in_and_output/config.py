@@ -9,7 +9,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 @dataclass
 class Config:
     # Run configuration
-    data_path: str = os.path.join(PROJECT_ROOT, "data", "data_merged.csv")  # Path to raw data CSV file
+    data_path: str = os.path.join(PROJECT_ROOT, "data", "metabarcoding_dataset.csv")  # Path to raw data CSV file
     results_dir: str = os.path.join(os.path.dirname(__file__), "results")  # Directory where run artifacts are saved
     preprocessed_dir: Optional[str] = os.path.join(PROJECT_ROOT, "data", "preprocessed")  # If set, save all preprocessing artifacts here on first run and load from there on subsequent runs, skipping CSV parsing and BarcodeBERT inference
     checkpoint_every: int = 20                   # Save periodic checkpoint every N epochs

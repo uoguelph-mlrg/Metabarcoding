@@ -19,7 +19,7 @@ Work with the user to complete the following before starting the loop:
    - `train.py` — the **only** file you edit: `Config`, model classes (`MLPModel`, `Model`, `LatentSolver`, `NeighbourGraph`), `Trainer`, optimizer, hyperparameters.
 
 4. **Verify data exists** at the paths in `Config`:
-   - `data_path` → `../data/data_merged.csv` (main observations CSV)
+   - `data_path` → `../data/metabarcoding_dataset.csv` (main observations CSV)
    - `embedding_path` → set in Config to `../data/embeddings.npy` (cache; computed on first run, reused after)
    - Preprocessed splits (`X_train.csv`, `X_val.csv`, etc.) are auto-generated in `../data/` on the first run and reused on all subsequent runs.
 

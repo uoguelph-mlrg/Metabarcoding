@@ -4,7 +4,7 @@ Train and evaluate all baseline models, then save a unified pickle for visualize
 
 Usage:
     python run_baselines.py
-    python run_baselines.py --data_path ../../data/data_merged.csv
+    python run_baselines.py --data_path ../../data/metabarcoding_dataset.csv
     python run_baselines.py --models two_stage ridge random_forest
     python run_baselines.py --output_dir results
 """
@@ -212,9 +212,9 @@ def main():
     parser.add_argument(
         "--data_path",
         default=os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "data_merged.csv"
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "metabarcoding_dataset.csv"
         ),
-        help="Path to data CSV (default: data/data_merged.csv)",
+        help="Path to data CSV (default: data/metabarcoding_dataset.csv)",
     )
     parser.add_argument(
         "--models",
