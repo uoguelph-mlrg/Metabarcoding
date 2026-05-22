@@ -155,7 +155,7 @@ EOF
 submit_baseline() {
   local baseline_results_dir="$SCRIPT_DIR/results/baseline"
   mkdir -p "$baseline_results_dir"
-  local walltime="${TIME_OVERRIDE:-0:45:00}"
+  local walltime="${TIME_OVERRIDE:-2:30:00}"
   local job_file="$JOB_DIR/baseline_$(date +%Y%m%d_%H%M%S).sbatch"
 
   {

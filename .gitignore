@@ -13,3 +13,4 @@ analysis/preprocessing/data/*
 # Model checkpoints and preprocessing state (too large for git)
 **/checkpoints/
 **/preprocessing_state.pkl
+.venv/
