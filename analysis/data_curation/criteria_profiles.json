@@ -98,7 +98,7 @@
     "control_to_noncontrol_prevalence_ratio_fail": 6.0
   },
   "required_columns": {
-    "sample": "sample-eventid",
+    "sample": "sample",
     "bin": "bin_uri",
     "reads": "total_reads",
     "occurrences": "occurrences",

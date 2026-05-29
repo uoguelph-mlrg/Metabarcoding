@@ -1,5 +1,5 @@
 """
-Preprocess ecuador_training_data.csv and save train/val/test splits.
+Preprocess metabarcoding_dataset.csv and save train/val/test splits.
 This creates the X_train, X_val, X_test, y_train, y_val, y_test CSV files.
 """
 import os
@@ -31,7 +31,7 @@ TAXONOMY_FEATURES = ["phylum", "class", "order", "family"]
 
 
 def preprocess_and_save(
-    input_path: str = "../../data/ecuador_training_data.csv",
+    input_path: str = "../../data/metabarcoding_dataset.csv",
     output_dir: str = "data",
     train_frac: float = 0.8,
     val_frac: float = 0.1,
@@ -98,7 +98,7 @@ def preprocess_and_save(
         )
     
     # Rename columns to match expected format
-    df = df.rename(columns={"sample-eventid": "sample_id"})
+    df = df.rename(columns={"sample": "sample_id"})
     
     # Parse date and extract day of year as numeric feature
     if "collection_start_date" in df.columns:
@@ -229,7 +229,7 @@ def preprocess_and_save(
     pd.DataFrame({'index': df_long.index[train_mask]}).to_csv(os.path.join(output_dir, 'train_indices.csv'), index=False)
     pd.DataFrame({'index': df_long.index[val_mask]}).to_csv(os.path.join(output_dir, 'val_indices.csv'), index=False)
     pd.DataFrame({'index': df_long.index[test_mask]}).to_csv(os.path.join(output_dir, 'test_indices.csv'), index=False)
-    # 7. Save sample-eventid to split mapping
+    # 7. Save sample to split mapping
     eventid_occurrences.to_csv(os.path.join(output_dir, 'sample_eventid_splits.csv'), index=False)
 
     # --- IMPUTATION & COLUMN DROPPING (MATCH ITERATION 6) ---
@@ -314,7 +314,7 @@ def preprocess_and_save(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Preprocess data for Random Forest")
-    parser.add_argument("--input", type=str, default="../../data/ecuador_training_data.csv",
+    parser.add_argument("--input", type=str, default="../../data/metabarcoding_dataset.csv",
                         help="Path to raw data file")
     parser.add_argument("--output", type=str, default="data",
                         help="Output directory for preprocessed data")

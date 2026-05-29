@@ -60,7 +60,7 @@ Optional baseline controls:
 - Disable W&B (supported targets):
   - `./submit_subanalysis.sh --target latent_as_input --no-wandb`
 - Override data path for `--data_path`-based targets:
-  - `./submit_subanalysis.sh --target ablation_study --data-path ../../data/ecuador_training_data.csv`
+  - `./submit_subanalysis.sh --target ablation_study --data-path ../../data/data_small.csv`
 - Override labels/colors JSON passed to unified visualizer:
   - `./submit_subanalysis.sh --target interpolated_latent/V4 --labels-json '{"baseline":"Baseline","interpolated_latent":"Interpolated Latent"}' --colors-json '{"baseline":"#1f6feb","interpolated_latent":"#d97706"}'`
 

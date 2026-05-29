@@ -343,7 +343,7 @@ def load(
     df = pd.read_csv(config.data_path)
 
     df = df.rename(columns={
-        "sample-eventid": "sample_id"
+        "sample": "sample_id"
     })
 
     ################################################################################################

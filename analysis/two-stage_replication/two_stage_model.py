@@ -417,7 +417,7 @@ def load_data(data_dir: str) -> Tuple:
     """
     Load preprocessed train, validation, and test data from CSV files.
     
-    Use preprocess_data.py to create these files from ecuador_training_data.csv.
+    Use preprocess_data.py to create these files from metabarcoding_dataset.csv.
     """
     X_train = pd.read_csv(os.path.join(data_dir, "X_train.csv"))
     X_val = pd.read_csv(os.path.join(data_dir, "X_val.csv"))
@@ -435,14 +435,14 @@ def load_data(data_dir: str) -> Tuple:
 
 def load_data_from_raw(config: TwoStageConfig) -> Tuple:
     """
-    Load and preprocess data from ecuador_training_data.csv.
+    Load and preprocess data from metabarcoding_dataset.csv.
     Uses same preprocessing as utils.py but includes taxonomy features.
     """
-    data_path = os.path.join(config.data_dir, "ecuador_training_data.csv")
+    data_path = os.path.join(config.data_dir, "metabarcoding_dataset.csv")
     df = pd.read_csv(data_path)
     
     # Rename columns to match expected format
-    df = df.rename(columns={"sample-eventid": "sample_id"})
+    df = df.rename(columns={"sample": "sample_id"})
     
     # Parse date and extract day of year as numeric feature
     if "collection_start_date" in df.columns:

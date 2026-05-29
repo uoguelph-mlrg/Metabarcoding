@@ -809,7 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--input_path",
         type=str,
-        default="../../data/ecuador_training_data.csv",
+        default="../../data/metabarcoding_dataset.csv",
         help="Path to input CSV dataset.",
     )
     parser.add_argument(

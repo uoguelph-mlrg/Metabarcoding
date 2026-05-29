@@ -135,7 +135,7 @@ def _interpolate_new_bin_latents(
     cfg: Config,
 ) -> Tuple[torch.Tensor, int, int]:
     """
-    For BINs in the global dataset not present in Ecuador training, interpolate their
+    For BINs in the global dataset not present in original training, interpolate their
     latents from the NW-weighted average of trained neighbors (by taxonomy distance).
 
     Returns: (latent_matrix, n_interpolated, n_zero_init)
@@ -507,7 +507,7 @@ def main() -> None:
     cfg = _config_from_checkpoint(saved_cfg)
     cfg.data_path = os.path.abspath(os.path.expanduser(args.dataset))
     cfg.results_dir = inferred_results_dir
-    cfg.preprocessed_dir = None  # prevent stale Ecuador cache from being loaded
+    cfg.preprocessed_dir = None  # prevent stale original cache from being loaded
     cfg.inference_with_interpolation = False  # H matrix not available in cross-dataset eval
     if args.device is not None:
         cfg.device = args.device
